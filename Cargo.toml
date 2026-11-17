@@ -5,6 +5,7 @@ edition = "2024"
 license = "MIT"
 description = "An exact boundary-representation geometry kernel, in safe Rust"
 repository = "https://github.com/springcraft-ai/springrep"
+exclude = ["site"]
 
 [dependencies]
 

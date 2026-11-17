@@ -1,0 +1,1229 @@
+<title>springrep</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<style>
+/* The design system's published build: its tokens and fonts. In a layer, so its base styles give
+   way to every rule on this page. */
+{{SC_CSS}}
+/* Layout: Alt-1 on the void. Hero = live scan-mode build of a real springrep part; four sections,
+   each opened by one header row (index · title · one-line deck). */
+:root {
+  color-scheme: dark;
+  /* The page's names for the design system's void tokens. */
+  --void: var(--ground-void);
+  --ink-1: var(--void-ink-1);
+  --ink-2: var(--void-ink-2);
+  --ink-3: var(--void-ink-3);
+  --ink-4: var(--void-ink-4);
+  --rule-soft: var(--rule-void-soft);
+  --accent: var(--amber);
+  --scan: var(--series-5);
+  --ok: var(--phosphor);
+  --bg: var(--void);
+  --fg: var(--ink-1);
+  --fg-2: var(--ink-2);
+  --fg-3: var(--ink-3);
+  --line: var(--rule-soft);
+  --line-strong: var(--ink-1);
+
+  --cut: 6px;
+  --dur: 120ms;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: calc(56px + env(safe-area-inset-top, 0px)); }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 400 14px/1.5 var(--font-voice); -webkit-font-smoothing: antialiased; }
+::selection { background: var(--accent); color: #000; }
+a { color: inherit; text-decoration: none; border-bottom: 0; }
+code, pre, .mono { font-family: var(--font-machine); font-variant-numeric: tabular-nums; }
+
+.band { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.wrap { max-width: 1344px; margin: 0 auto; padding-inline: clamp(0px, 3vw, 32px); }
+
+.annot { font: 600 9px/1.25 var(--font-display); letter-spacing: .14em; text-transform: uppercase; color: var(--fg-2); }
+.annot b { color: var(--fg); font-weight: 600; }
+.display { font-family: var(--font-display); font-weight: 700; text-transform: uppercase; letter-spacing: -.04em; line-height: .88; margin: 0; text-wrap: balance; }
+
+/* controls */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 10px; height: 44px;
+  padding: 0 18px; border: 1px solid var(--fg-3); background: transparent; color: var(--fg);
+  font: 400 13px/1 var(--font-voice); cursor: pointer;
+  transition: border-color var(--dur) linear, color var(--dur) linear, background var(--dur) linear;
+}
+.btn .idx { font: 600 10px/1 var(--font-display); color: var(--fg-2); }
+.btn:hover { border-color: var(--fg); }
+.btn.sm { height: 28px; padding: 0 10px; font-size: 12px; }
+.btn:focus-visible, .nav a:focus-visible, .figure:focus-visible, .cmd button:focus-visible {
+  outline: 1px solid var(--fg); outline-offset: 2px;
+}
+@supports (corner-shape: bevel) {
+  .btn:not(.sm), .cmd { corner-shape: bevel; border-radius: 0 0 var(--cut) 0; }
+}
+.cmd { display: flex; align-items: stretch; height: 48px; border: 1px solid var(--accent); width: 100%; max-width: 400px; }
+.cmd .prompt { display: grid; place-items: center; width: 40px; color: var(--fg-3); font: 400 13px/1 var(--font-machine); border-right: 1px solid var(--line); }
+.cmd input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--fg); font: 400 14px/1 var(--font-machine); padding: 0 14px; outline: none; }
+.cmd button {
+  border: 0; border-left: 1px solid var(--accent); background: transparent; color: var(--accent);
+  font: 600 9px/1 var(--font-display); letter-spacing: .16em; text-transform: uppercase; padding: 0 16px; cursor: pointer; min-width: 80px;
+}
+.cmd button:hover { background: rgba(255, 255, 255, .08); }
+
+/* chrome */
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--void); }
+header.chrome { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 9; background: var(--void); border-bottom: 1px solid var(--rule-soft); }
+.chrome .row { display: flex; align-items: center; gap: 24px; height: 56px; }
+.brand { display: flex; align-items: center; gap: 10px; font: 400 14px/1 var(--font-voice); }
+.brand img { height: 18px; width: auto; display: block; }
+.nav { display: flex; margin-left: auto; height: 56px; }
+.nav a { display: flex; align-items: center; padding: 0 14px; font: 400 12px/1 var(--font-voice); color: var(--ink-2); transition: color var(--dur) linear; }
+.nav a:hover { color: var(--ink-1); }
+.nav a[aria-current="true"] { color: var(--accent); box-shadow: inset 0 -1px 0 var(--accent); }
+@media (max-width: 760px) { .nav { display: none; } .chrome .gh { margin-left: auto; } }
+
+/* hero */
+.hero { padding-block: 40px 72px; }
+.hero-grid { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 40px; align-items: start; }
+.rep { color: var(--fg-2); }
+.hero h1 {
+  font-size: clamp(64px, 9vw, 132px); text-transform: none; font-variant-caps: all-small-caps;
+  letter-spacing: -.01em; line-height: .8;
+}
+.gh-mark { width: 15px; height: 15px; display: block; fill: currentColor; }
+.hbench { display: grid; gap: 12px; max-width: 520px; padding-top: 4px; }
+.hbench .hd { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-bottom: 6px; border-bottom: 1px solid var(--rule-soft); }
+.hrow { display: grid; grid-template-columns: 92px 112px minmax(0, 1fr) 54px 62px; gap: 12px; align-items: center; }
+.hrow .lic { font: 400 11px/1 var(--font-machine); color: var(--ink-3); white-space: nowrap; }
+.hrow.us .lic { color: var(--accent); }
+.hrow[data-tip] { cursor: default; }
+.hrow[data-tip] .t i { transition: width 700ms var(--ease-mech), filter var(--dur) linear; }
+.hrow[data-tip]:hover .n, .hrow[data-tip]:hover b { color: var(--ink-1); }
+.hrow[data-tip]:hover .t i { filter: brightness(1.4); }
+#hbench:hover .hrow[data-tip]:not(:hover) { opacity: .5; }
+.hrow { transition: opacity var(--dur) linear; }
+.hrow .ms { font: 400 13px/1 var(--font-machine); color: var(--ink-2); text-align: right; white-space: nowrap; }
+.hrow.us .ms { color: var(--accent); }
+.hcols { font: 600 8px/1 var(--font-display); letter-spacing: .14em; text-transform: uppercase; color: var(--ink-3); }
+.hcols > span:nth-child(3) { grid-column: span 2; }
+.hcols .num { text-transform: none; }
+.hcols > span:nth-child(4) { text-align: right; }
+.hrow .n { font: 400 13px/1 var(--font-voice); color: var(--ink-2); }
+.hrow .t { height: 6px; background: #111214; }
+.hrow .t i { display: block; height: 100%; width: 0; background: var(--ink-3); transition: width 700ms var(--ease-mech); }
+.hrow b { font: 400 13px/1 var(--font-machine); text-align: right; font-weight: 400; color: var(--ink-2); }
+.hrow.us .n, .hrow.us b { color: var(--accent); }
+.hrow.us .t i { background: var(--accent); }
+.hbench a.more { justify-self: start; font-size: 12px; color: var(--ink-2); border-bottom: 1px solid var(--ink-3); transition: color var(--dur) linear; }
+.hbench a.more:hover { color: var(--ink-1); }
+@media (prefers-reduced-motion: reduce) { .hrow .t i { transition: none; } }
+.hero-copy { display: grid; gap: 38px; }
+.hero .sub { font-size: clamp(22px, 2.2vw, 30px); letter-spacing: -.02em; line-height: 1; color: var(--ink-2); }
+.hero .sub b { color: var(--ink-1); font-weight: 700; }
+.creds { display: flex; flex-wrap: wrap; gap: 10px; margin-top: -10px; }
+.badge { display: inline-flex; align-items: stretch; height: 30px; border: 1px solid var(--accent); }
+.badge b { display: flex; align-items: center; padding: 0 10px; background: var(--accent); color: #000; font: 700 13px/1 var(--font-display); letter-spacing: .08em; }
+.badge span { display: flex; align-items: center; padding: 0 12px; color: var(--accent); font: 600 10px/1 var(--font-display); letter-spacing: .16em; text-transform: uppercase; }
+.hero p.lede { margin: 0; max-width: 40ch; color: var(--ink-2); font-size: 15px; font-weight: 300; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; }
+
+.figure { position: relative; height: 560px; touch-action: none; cursor: grab; user-select: none; outline: none; }
+.figure.dragging { cursor: grabbing; }
+.figure canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.figure .br { position: absolute; width: 14px; height: 14px; border: 0 solid var(--ink-3); pointer-events: none; }
+.figure .tl { left: 0; top: 0; border-left-width: 1px; border-top-width: 1px; }
+.figure .tr { right: 0; top: 0; border-right-width: 1px; border-top-width: 1px; }
+.figure .bl { left: 0; bottom: 0; border-left-width: 1px; border-bottom-width: 1px; }
+.figure .brr { right: 0; bottom: 0; border-right-width: 1px; border-bottom-width: 1px; }
+.status { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-top: 14px; }
+.ticks { display: flex; align-items: center; }
+.ticks button { width: 26px; height: 28px; padding: 0 2px; border: 0; background: transparent; cursor: pointer; display: grid; align-items: center; }
+.ticks button i { display: block; height: 3px; background: var(--ink-4); transition: background var(--dur) linear, height var(--dur) linear; }
+.ticks button:hover i { background: var(--ink-1); }
+.ticks button.on i { background: var(--ink-2); }
+.ticks button.now i { background: var(--accent); }
+.ticks button[aria-pressed="true"] i { height: 5px; }
+.ticks button:focus-visible, .play:focus-visible { outline: 1px solid var(--ink-1); outline-offset: 0; }
+.play {
+  height: 28px; padding: 0 10px; border: 1px solid var(--ink-4); background: transparent; color: var(--ink-2);
+  font: 600 8px/1 var(--font-display); letter-spacing: .16em; text-transform: uppercase; cursor: pointer;
+  transition: color var(--dur) linear, border-color var(--dur) linear;
+}
+.play:hover { color: var(--ink-1); border-color: var(--ink-2); }
+.play[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+.op { font: 400 12px/1 var(--font-machine); color: var(--ink-1); min-width: 15ch; }
+.op span { color: var(--ink-3); margin-right: 10px; }
+.result { flex: 1 1 0; min-width: 0; overflow: hidden; text-align: right; font: 400 12px/1 var(--font-machine); color: var(--ink-2); white-space: nowrap; text-overflow: ellipsis; min-height: 12px; }
+.result .ok { color: var(--ok); }
+.result b { display: inline-block; font-weight: 400; color: var(--ink-1); text-align: right; font-variant-numeric: tabular-nums; }
+#r-faces { min-width: 2ch; }
+#r-ms { min-width: 5ch; }
+#r-check { color: var(--ink-4); }
+#r-check.ok { color: var(--ok); transition: color 280ms ease-out; }
+#r-check.bad { color: var(--accent); }
+.hero-grid > :last-child { margin-top: calc(clamp(64px, 9vw, 132px) * .23); }
+@media (max-width: 1000px) {
+  .hero-grid { grid-template-columns: minmax(0, 1fr); }
+  .hero-grid > :last-child { margin-top: 0; }
+  .figure { height: 420px; }
+}
+
+/* section header */
+section.sec { padding-block: 104px; }
+.sh {
+  display: grid; gap: 18px;
+  border-top: 1px solid var(--line-strong); padding-top: 20px; margin-bottom: 48px;
+}
+.sh h2 sub { font: 400 clamp(12px, 1.1vw, 15px)/1 var(--font-machine); letter-spacing: 0; color: var(--fg-2); vertical-align: baseline; margin-left: .5em; }
+.sh h2 { font-size: clamp(36px, 4.4vw, 64px); }
+.sh p { margin: 0; max-width: 88ch; color: var(--fg-2); font-size: 16px; font-weight: 300; line-height: 1.5; }
+.tag {
+  display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border: 1px solid var(--line);
+  font: 600 8px/1 var(--font-display); letter-spacing: .14em; text-transform: uppercase; color: var(--fg-2);
+  background-image: repeating-linear-gradient(135deg, var(--line) 0 1px, transparent 1px 5px);
+}
+
+/* what it is */
+#what { padding-block: 16px 40px; }
+.pillars { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; }
+.pillars h3 .num { text-transform: none; }
+.pillars > div { padding: 0 28px 0 0; display: grid; gap: 14px; align-content: start; }
+.pillars > div + div { padding-left: 28px; border-left: 1px solid var(--line); }
+.pillars h3 { margin: 0; font: 700 22px/1.05 var(--font-display); text-transform: uppercase; letter-spacing: -.02em; }
+.pillars p { margin: 0; color: var(--fg-2); font-size: 14px; max-width: 44ch; }
+@media (max-width: 760px) {
+  .pillars { grid-template-columns: minmax(0, 1fr); gap: 28px; }
+  .pillars > div + div { padding-left: 0; border-left: 0; }
+}
+
+/* get started */
+.start { display: grid; grid-template-columns: minmax(0, 4fr) minmax(0, 8fr); gap: 40px; align-items: start; }
+.steps { display: grid; gap: 32px; }
+.step { display: grid; gap: 12px; }
+.step .h { display: flex; gap: 12px; align-items: baseline; }
+.step .h span { font: 400 12px/1 var(--font-machine); color: var(--fg-3); }
+.step .h b { font: 600 10px/1 var(--font-display); letter-spacing: .16em; text-transform: uppercase; }
+.out { border-left: 1px solid var(--ok); padding: 4px 0 4px 14px; display: grid; gap: 2px; font: 400 12px/1.6 var(--font-machine); }
+.out .dim { color: var(--ink-2); }
+.code { border: 1px solid var(--line); background: #070708; overflow-x: auto; }
+.code .bar { display: flex; justify-content: space-between; align-items: center; height: 34px; padding-left: 16px; border-bottom: 1px solid var(--line); }
+.code .bar button {
+  height: 34px; border: 0; border-left: 1px solid var(--line); background: transparent; color: var(--ink-2);
+  font: 600 8px/1 var(--font-display); letter-spacing: .16em; text-transform: uppercase; padding: 0 14px; cursor: pointer;
+}
+.code .bar button:hover { color: var(--ink-1); }
+.code pre { margin: 0; padding: 18px 20px; font-size: 12px; line-height: 1.75; color: var(--ink-2); }
+.code .kw, .code .fn { color: var(--ink-1); }
+.code .st { color: var(--ok); }
+.code .nu { color: var(--accent); }
+@media (max-width: 1000px) { .start { grid-template-columns: minmax(0, 1fr); } }
+.or { display: flex; align-items: center; gap: 14px; }
+.btn.armed { border-color: var(--accent); color: var(--accent); }
+.btn.armed:hover { background: rgba(245, 162, 0, .12); color: var(--ink-1); }
+.btn.armed.done { background: rgba(245, 162, 0, .12); }
+.or span { font: 400 12px/1 var(--font-machine); color: var(--fg-3); }
+
+/* benchmark */
+#bench .sh { grid-template-columns: auto minmax(0, 1fr); column-gap: 56px; align-items: start; }
+#bench .sh p { max-width: 72ch; margin-top: var(--cap-drop, 0px); }
+@media (max-width: 1000px) { #bench .sh { grid-template-columns: minmax(0, 1fr); } }
+/* The brep-conformance results site's leaderboard: one bar per kernel, each case coloured by the
+   tightest tolerance it passed. Colours are its grade scale. */
+#bench {
+  --g7: var(--ink-1); --g5: #93A6BA; --g3: #5E7186; --gfail: #FF4A2E; --gquiet: #45484C;
+}
+.lb-head { display: flex; justify-content: space-between; align-items: center; gap: 16px 24px; flex-wrap: wrap; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.lb-head .annot { color: var(--fg); }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 0; padding: 0; list-style: none; }
+.legend li { display: flex; align-items: center; gap: 7px; font: 600 9px/1 var(--font-display); letter-spacing: .14em; text-transform: uppercase; color: var(--fg-2); }
+.legend i { width: 10px; height: 10px; display: block; }
+.board-wrap { overflow-x: auto; }
+.board { width: 100%; min-width: 960px; color: var(--fg); border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.board th { font: 600 9px/1 var(--font-display); letter-spacing: .14em; text-transform: uppercase; color: var(--fg-2); text-align: right; padding: 22px 0 14px 20px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.board th:first-child, .board th.l { text-align: left; }
+.board th:first-child { padding-left: 0; }
+.board td { padding: 18px 0 18px 20px; border-bottom: 1px solid var(--line); white-space: nowrap; vertical-align: middle; text-align: right; }
+.board td:first-child { padding-left: 0; text-align: left; }
+.board .k b { display: block; font: 700 18px/1 var(--font-display); letter-spacing: -.01em; text-transform: uppercase; }
+.board .k small { display: block; margin-top: 6px; font: 400 11px/1 var(--font-machine); color: var(--fg-2); }
+.board tr.us .k b { color: var(--accent); }
+.board .bar-cell { width: 34%; min-width: 280px; text-align: left; }
+.tbar { display: flex; gap: 3px; height: 22px; }
+.tbar span {
+  --c: var(--g7); min-width: 4px; background: var(--c);
+  transition: opacity var(--dur) linear, clip-path 1100ms var(--ease-mech);
+  clip-path: inset(0 100% 0 0);
+}
+.board.lit .tbar span { clip-path: inset(0 0 0 0); }
+.bar-cell { cursor: default; }
+.tbar.picking span:not(.hot) { opacity: .35; }
+.tip .rows { display: block; margin-top: 4px; white-space: pre; color: var(--fg-2); font-size: 11px; }
+.tip .rows b { color: var(--fg); font-weight: 400; }
+tr.us .tbar [data-g="1e-7"] { --c: var(--accent); }
+.tbar [data-g="1e-5"] { --c: var(--g5); }
+.tbar [data-g="1e-3"] { --c: var(--g3); }
+.tbar [data-g="fail"] { --c: var(--gfail); }
+.tbar [data-g="unsupported"], .legend [data-g="unsupported"] {
+  background: repeating-linear-gradient(135deg, var(--fg-3) 0 1px, transparent 1px 5px);
+  box-shadow: inset 0 0 0 1px var(--fg-3);
+}
+.tbar [data-g="quiet"] { --c: var(--gquiet); }
+@media (prefers-reduced-motion: reduce) { .tbar span { transition: opacity var(--dur) linear; } }
+.legend [data-g="1e-7"] { background: var(--g7); }
+.legend [data-g="1e-5"] { background: var(--g5); }
+.legend [data-g="1e-3"] { background: var(--g3); }
+.legend [data-g="fail"] { background: var(--gfail); }
+.legend [data-g="quiet"] { background: var(--gquiet); }
+.board th .num { text-transform: none; }
+.board th .lower { display: block; margin-top: 6px; color: var(--fg-3); }
+.board .mt { cursor: default; }
+.board .mt b { border-bottom: 1px dotted var(--fg-3); }
+.tip {
+  position: fixed; z-index: 10; pointer-events: none; max-width: 280px; padding: 8px 10px;
+  background: #111214; border: 1px solid var(--line); color: var(--fg);
+  font: 400 12px/1.45 var(--font-machine); opacity: 0; transition: opacity 120ms linear;
+}
+.tip.on { opacity: 1; }
+.tip small { display: block; color: var(--fg-2); font-size: 11px; }
+.ruler { display: flex; justify-content: space-between; margin-top: 4px; font: 400 9px/1 var(--font-machine); color: var(--fg-2); }
+.ruler span { padding-left: 3px; border-left: 1px solid var(--fg-3); }
+.board .p7, .board .px, .board .mt b { font: 400 18px/1 var(--font-machine); letter-spacing: 0; }
+.board .p7 { font-weight: 700; }
+.board tr.us .p7, .board tr.us .px, .board tr.us .mt b { color: var(--accent); }
+.board .mt b small { font: 400 11px/1 var(--font-machine); color: var(--fg-2); margin-left: 3px; }
+.bench-foot { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; margin-top: 28px; }
+
+footer { border-top: 1px solid var(--rule-soft); padding-block: 28px; }
+.foot { display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; }
+.foot > img { height: 15px; width: auto; display: block; }
+.foot nav { display: flex; gap: 22px; flex-wrap: wrap; }
+.foot nav a { color: var(--ink-2); font-size: 12px; transition: color var(--dur) linear; }
+.foot nav a:hover { color: var(--ink-1); }
+</style>
+
+<header class="chrome band">
+  <div class="wrap row">
+    <a class="brand" href="#top" aria-label="springrep, top of page"><img src="{{SC}}/assets/logo.svg" alt=""><span>spring<span class="rep">rep</span></span></a>
+    <nav class="nav" aria-label="Links">
+      <a href="https://docs.rs/springrep" target="_blank" rel="noopener">API docs</a>
+    </nav>
+    <a class="btn sm gh" href="https://github.com/springcraft-ai/springrep" target="_blank" rel="noopener">{{GH}}github</a>
+  </div>
+</header>
+
+<main id="top">
+  <section class="hero band">
+    <div class="wrap hero-grid">
+      <div class="hero-copy">
+        <h1 class="display">spring<span class="rep">rep</span></h1>
+        <p class="display sub"><b>Exact CAD geometry</b><br>in pure Rust.</p>
+        <div class="creds" aria-label="License"><span class="badge"><b>MIT</b><span>open source license</span></span></div>
+        <p class="lede">A boundary-representation (B-rep) kernel. Booleans, fillets, sweeps and STEP on exact geometry, accurate to 1e-7&nbsp;mm, with every result validated.</p>
+        <div class="hbench" aria-label="brep-conformance pass rate">
+          <div class="hd"><span class="annot">brep-conformance leaderboard</span><span class="annot" id="hrun"></span></div>
+          <div class="hrow hcols" aria-hidden="true"><span>kernel</span><span>license</span><span>pass at <span class="num">1e-7</span> mm</span><span>speed</span></div>
+          <div id="hbench"></div>
+          <a class="more" href="#bench">see the benchmark ↓</a>
+        </div>
+        <div class="actions">
+          <a class="btn" href="https://github.com/springcraft-ai/springrep" target="_blank" rel="noopener">{{GH}}github</a>
+        </div>
+      </div>
+      <div>
+        <div class="figure" id="figure" tabindex="0" aria-label="A flanged tube being built by springrep, drawn by its exact edges. Drag or use arrow keys to turn it.">
+          <canvas id="cv"></canvas>
+          <span class="br tl"></span><span class="br tr"></span><span class="br bl"></span><span class="br brr"></span>
+        </div>
+        <div class="status">
+          <div style="display:flex;gap:16px;align-items:center">
+            <div class="ticks" id="ticks" role="group" aria-label="Build steps"></div>
+            <span class="op" id="op"></span>
+          </div>
+          <span class="result" id="result"></span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec band" id="what">
+    <div class="wrap">
+      <div class="pillars">
+        <div><h3>Accurate to <span class="num">1e-7</span> mm</h3><p>Surfaces are analytic or NURBS, never triangles, so volume, area and mass come straight from the exact shape. Every brep-conformance case holds to a ten-millionth of a millimetre.</p></div>
+        <div><h3>Valid, and named</h3><p>Each operation's output passes a validity check, or you get an error instead of a broken solid. Faces are named for the operation that made them, like <code class="mono">plate.end</code>, so a changed dimension never loses a fillet or a reference.</p></div>
+        <div><h3>Safe and fast</h3><p>100% Rust with no dependencies and no unsafe code. The fastest median case time on brep-conformance, and it compiles to WebAssembly to run in the browser.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec band" id="start">
+    <div class="wrap">
+      <header class="sh">
+        <h2 class="display">Get started<sub>01</sub></h2>
+      </header>
+      <div class="start">
+        <div class="steps">
+          <div class="step">
+            <div class="h"><span>01</span><b>add the crate</b></div>
+            <div class="cmd">
+              <span class="prompt" aria-hidden="true">$</span>
+              <input id="install2" value="cargo add springrep" readonly aria-label="Install command">
+              <button type="button" data-copy="install2">copy</button>
+            </div>
+          </div>
+          <div class="step">
+            <div class="h"><span>02</span><b>run it</b></div>
+            <div class="out" aria-label="Program output">
+              <span class="dim">$ cargo run</span>
+              <span>volume  18276.001643 mm³</span>
+              <span>area    6452.128187 mm²</span>
+              <span>wrote bracket.step, 8 faces</span>
+            </div>
+          </div>
+          <div class="or">
+            <span>or</span>
+            <button type="button" class="btn armed" data-copy-from="agent-prompt">copy prompt for AI agent</button>
+          </div>
+          <pre id="agent-prompt" hidden>Set up springrep, an exact B-rep CAD kernel in Rust, and run its first example.
+
+1. If this folder is not a Cargo project, run `cargo new springrep-start` and work in that folder.
+2. Run `cargo add springrep`.
+3. Write the program below exactly as given. In a new project it replaces src/main.rs. If the
+   project already has its own src/main.rs, save it as examples/bracket.rs instead.
+4. Run it with `cargo run`, or `cargo run --example bracket` if you saved it as an example. It
+   must print:
+     volume  18276.001643 mm³
+     area    6452.128187 mm²
+     wrote bracket.step, 8 faces
+   If it prints anything else, stop and tell me what it printed. Don't change the part to make
+   the numbers match.
+5. Run `cargo doc -p springrep` and read the module docs before writing any new geometry. Then
+   ask me what I want to build.
+
+```rust
+{{MAIN_RS}}
+```
+
+Things to know:
+- Every operation returns a Result. Propagate errors with ?; never unwrap a geometry result.
+- Faces are named after the feature that made them: plate.end is the top of an extrusion named
+  plate, bore.side is the wall of one named bore. Fillets and chamfers pick an edge by the names
+  of the two faces either side of it.
+- Run springrep::check::check on each new solid and treat any issue it reports as a bug.
+- Units are millimetres.</pre>
+        </div>
+        <div class="code"><div class="bar"><span class="annot">src/main.rs</span><button type="button" data-copy-from="main-rs">copy</button></div><pre id="main-rs">{{MAIN_RS}}</pre></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec band" id="bench">
+    <div class="wrap">
+      <header class="sh">
+        <h2 class="display">Best in class<sub>02</sub></h2>
+        <p>Results from brep-conformance, an open conformance suite for B-rep kernels. Each case's expected result is derived from closed-form mathematics, not from another kernel's output, and every kernel, springrep included, is held to the same criteria.</p>
+      </header>
+      <div class="lb-head">
+        <span class="annot">leaderboard</span>
+        <ul class="legend" id="legend" aria-label="Key"></ul>
+      </div>
+      <div class="board-wrap">
+        <table class="board" aria-label="brep-conformance leaderboard">
+          <thead><tr><th>kernel</th><th class="l">cases by tightest tolerance passed, mm</th><th>pass at <span class="num">1e-7</span> mm</th><th>pass at <span class="num">1e-5</span> mm</th><th>speed <span class="lower">lower is better</span></th></tr></thead>
+          <tbody id="board"></tbody>
+        </table>
+      </div>
+      <div class="bench-foot">
+        <span class="annot" id="run-id"></span>
+        <div class="actions">
+          <a class="btn" href="https://github.com/springcraft-ai/brep-conformance" target="_blank" rel="noopener">{{GH}}brep-conformance GitHub</a>
+          <a class="btn" href="#" id="full-report">full benchmark results</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="band">
+  <div class="wrap foot">
+    <img src="{{SC}}/assets/logo-full.svg" alt="Springcraft">
+    <nav aria-label="Links">
+      <a href="https://github.com/springcraft-ai/springrep" target="_blank" rel="noopener">github</a>
+      <a href="https://github.com/springcraft-ai/brep-conformance" target="_blank" rel="noopener">brep-conformance</a>
+      <a href="https://www.springcraft.ai/follow/" target="_blank" rel="noopener">build log</a>
+    </nav>
+    <span class="annot">mit license · springrep 1.0.0</span>
+  </div>
+</footer>
+
+<script>
+const PART = {{PART}}
+const LABELS = PART.steps.map((s) => s.label)
+
+const fig = document.getElementById("figure")
+const cv = document.getElementById("cv")
+const ctx = cv.getContext("2d")
+const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+const css = getComputedStyle(document.documentElement)
+const SCAN = css.getPropertyValue("--scan").trim()
+const INK = css.getPropertyValue("--ink-1").trim()
+
+const bb = PART.bbox
+const center = [(bb[0][0] + bb[1][0]) / 2, (bb[0][1] + bb[1][1]) / 2, (bb[0][2] + bb[1][2]) / 2]
+const diag = Math.hypot(bb[1][0] - bb[0][0], bb[1][1] - bb[0][1], bb[1][2] - bb[0][2])
+const N = PART.steps.length
+const STEP_MS = 2500
+const FADE_MS = 500
+const SWAP_MS = 220
+const HANDOFF_MS = FADE_MS
+const FINAL_REST_MS = 900
+const FINAL_COOL_MS = 1600
+const TRACE_MS = 800
+const PROFILE_MS = 600
+const SWEEP_MS = 900
+const TRACE_LEAD_MS = 120
+const HOLD_MS = 6000
+const SPIN = 0.18
+const fresh = PART.steps.map((s) => s.fresh)
+// Depth buffer at the canvas's CSS size. A point counts as hidden only when a face lies more
+// than DEPTH_EPS mm nearer at its pixel and at every pixel beside it, so edges on a face's rim stay.
+const ZSCALE = 1
+const DEPTH_EPS = 0.9
+const HIDDEN_DASH = [3, 4]
+
+// Each step's mesh, with the pairs of triangles of one face that share a side: a curved face's
+// outline runs between a pair where one turns toward the eye and the other away.
+const meshes = PART.steps.map((s) => {
+  const nt = s.tri.length / 4
+  const weld = new Map()
+  const id = new Int32Array(s.pos.length / 3)
+  for (let i = 0; i < id.length; i++) {
+    const k = s.pos[3 * i] + "," + s.pos[3 * i + 1] + "," + s.pos[3 * i + 2]
+    if (!weld.has(k)) weld.set(k, i)
+    id[i] = weld.get(k)
+  }
+  const sides = new Map()
+  const pairs = []
+  for (let t = 0; t < nt; t++) {
+    for (let j = 0; j < 3; j++) {
+      const a = id[s.tri[4 * t + j]]
+      const b = id[s.tri[4 * t + (j + 1) % 3]]
+      const k = (a < b ? a + ":" + b : b + ":" + a) + ":" + s.tri[4 * t + 3]
+      const o = sides.get(k)
+      if (o === undefined) sides.set(k, t)
+      else pairs.push(o, t, a, b)
+    }
+  }
+  return { pos: s.pos, tri: s.tri, nt, pairs }
+})
+
+let yaw = -0.62
+let pitch = 0.42
+let W = 0
+let H = 0
+let start = null
+let last = null
+let drag = null
+let resumeAt = 0
+let visible = true
+let zw = 0
+let zh = 0
+let zbuf = new Float32Array(0)
+
+const ticks = document.getElementById("ticks")
+for (let i = 0; i < N; i++) {
+  const b = document.createElement("button")
+  b.type = "button"
+  b.setAttribute("aria-label", "Step " + (i + 1) + ": " + LABELS[i])
+  b.appendChild(document.createElement("i"))
+  ticks.appendChild(b)
+}
+const opEl = document.getElementById("op")
+const resultEl = document.getElementById("result")
+// The status line: the check, the solid's face count and the build's running time, each field
+// updated in place. While a step runs, "valid" waits in dark grey and the clock counts on from the
+// time spent so far by what the kernel took for this step; when the step finishes, "valid" lights
+// in phosphor and the face count rolls to the new solid's.
+resultEl.innerHTML = '<span id="r-check" class="wait">valid</span> / <b id="r-faces">0</b> faces / ' +
+  '<b id="r-ms">0.00</b> ms'
+const rCheck = document.getElementById("r-check")
+const rFaces = document.getElementById("r-faces")
+const rMs = document.getElementById("r-ms")
+const ROLL_MS = 650
+const READ = PART.steps.map((s) => ({ issues: s.issues, faces: s.faces, ms: s.ms }))
+// The build's time up to the start of each step, and to its end.
+const SPENT = READ.reduce((a, s) => [...a, a[a.length - 1] + s.ms], [0])
+let facesShown = 0
+let facesFrom = 0
+let facesTo = 0
+let facesAt = 0
+function check(evaluating, issues) {
+  const text = issues ? issues + " issues" : "valid"
+  const state = evaluating ? "wait" : issues ? "bad" : "ok"
+  if (rCheck.textContent !== text) rCheck.textContent = text
+  if (rCheck.className !== state) rCheck.className = state
+}
+function faces(to, t) {
+  if (to !== facesTo) {
+    facesFrom = facesShown
+    facesTo = to
+    facesAt = t
+  }
+  const f = reduce ? 1 : 1 - Math.pow(1 - Math.min(1, (t - facesAt) / ROLL_MS), 3)
+  facesShown = facesFrom + (facesTo - facesFrom) * f
+  rFaces.textContent = String(Math.round(facesShown))
+}
+// The clock runs from `from` to `to` ms as `run` goes from 0 to 1.
+function clock(from, to, run) {
+  const f = 1 - Math.pow(1 - Math.max(0, Math.min(1, run)), 2)
+  rMs.textContent = (from + (to - from) * f).toFixed(2)
+}
+// `age` is null for a drawing shown settled, with no animation.
+function readout(step, age, doneAt, t) {
+  const evaluating = age !== null && age < doneAt
+  check(evaluating, READ[step].issues)
+  faces(evaluating ? (step > 0 ? READ[step - 1].faces : 0) : READ[step].faces, t)
+  clock(SPENT[step], SPENT[step + 1], age === null ? 1 : age / doneAt)
+}
+let shownStep = -1
+
+function project(p, out, o) {
+  const x = p[o] - center[0]
+  const y = p[o + 1] - center[1]
+  const z = p[o + 2] - center[2]
+  const x1 = x * Math.cos(yaw) - y * Math.sin(yaw)
+  const y1 = x * Math.sin(yaw) + y * Math.cos(yaw)
+  const y2 = y1 * Math.cos(pitch) - z * Math.sin(pitch)
+  const z2 = y1 * Math.sin(pitch) + z * Math.cos(pitch)
+  const s = (Math.min(W, H) * 0.86) / diag
+  out[0] = W / 2 + x1 * s
+  out[1] = H / 2 - z2 * s
+  out[2] = y2
+  return out
+}
+
+function size() {
+  const r = fig.getBoundingClientRect()
+  W = r.width
+  H = r.height
+  const d = window.devicePixelRatio || 1
+  cv.width = Math.round(W * d)
+  cv.height = Math.round(H * d)
+  ctx.setTransform(d, 0, 0, d, 0, 0)
+  zw = Math.ceil(W * ZSCALE)
+  zh = Math.ceil(H * ZSCALE)
+  zbuf = new Float32Array(zw * zh)
+  if (reduce) render(N - 1, -1, null)
+}
+
+function rasterize(m, sp, keep = false) {
+  if (!keep) zbuf.fill(Infinity)
+  for (let t = 0; t < m.nt; t++) {
+    const a = 3 * m.tri[4 * t]
+    const b = 3 * m.tri[4 * t + 1]
+    const c = 3 * m.tri[4 * t + 2]
+    const ax = sp[a] * ZSCALE, ay = sp[a + 1] * ZSCALE, az = sp[a + 2]
+    const bx = sp[b] * ZSCALE, by = sp[b + 1] * ZSCALE, bz = sp[b + 2]
+    const cx = sp[c] * ZSCALE, cy = sp[c + 1] * ZSCALE, cz = sp[c + 2]
+    const area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+    if (Math.abs(area) < 1e-9) continue
+    const x0 = Math.max(0, Math.floor(Math.min(ax, bx, cx)))
+    const x1 = Math.min(zw - 1, Math.ceil(Math.max(ax, bx, cx)))
+    const y0 = Math.max(0, Math.floor(Math.min(ay, by, cy)))
+    const y1 = Math.min(zh - 1, Math.ceil(Math.max(ay, by, cy)))
+    for (let y = y0; y <= y1; y++) {
+      const py = y + 0.5
+      for (let x = x0; x <= x1; x++) {
+        const px = x + 0.5
+        const w0 = ((bx - px) * (cy - py) - (by - py) * (cx - px)) / area
+        const w1 = ((cx - px) * (ay - py) - (cy - py) * (ax - px)) / area
+        const w2 = 1 - w0 - w1
+        if (w0 < 0 || w1 < 0 || w2 < 0) continue
+        const z = w0 * az + w1 * bz + w2 * cz
+        const k = y * zw + x
+        if (z < zbuf[k]) zbuf[k] = z
+      }
+    }
+  }
+}
+
+function visibleAt(x, y, z) {
+  const cx = Math.floor(x * ZSCALE)
+  const cy = Math.floor(y * ZSCALE)
+  let far = -Infinity
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      const px = cx + dx
+      const py = cy + dy
+      if (px < 0 || py < 0 || px >= zw || py >= zh) return true
+      far = Math.max(far, zbuf[py * zw + px])
+    }
+  }
+  return z <= far + DEPTH_EPS
+}
+
+// Strokes an edge's projected points up to `upto` of its length, solid where it is seen and dashed
+// where a face hides it. Returns the point the stroke ends on.
+function stroke(pts, alpha, upto = 1) {
+  const n = pts.length - 1
+  const end = upto * n
+  let run = null
+  let tip = pts[0]
+  const flush = () => {
+    if (!run) return
+    ctx.setLineDash(run.seen ? [] : HIDDEN_DASH)
+    ctx.globalAlpha = alpha * (run.seen ? 1 : 0.5)
+    ctx.beginPath()
+    ctx.moveTo(run.pts[0][0], run.pts[0][1])
+    for (let i = 1; i < run.pts.length; i++) ctx.lineTo(run.pts[i][0], run.pts[i][1])
+    ctx.stroke()
+    run = null
+  }
+  for (let i = 1; i <= n && i - 1 < end; i++) {
+    const a = pts[i - 1]
+    let b = pts[i]
+    if (i > end) {
+      const f = end - (i - 1)
+      b = [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f]
+    }
+    const v = visibleAt((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2)
+    if (run && run.seen !== v) flush()
+    if (!run) run = { seen: v, pts: [a] }
+    run.pts.push(b)
+    tip = b
+  }
+  flush()
+  return tip
+}
+
+// A curved face's outline: where one of a pair of its triangles faces the eye and the other turns
+// away. Faces the step made are lit in ink at `heat`, like its new edges.
+function outline(m, sp, alpha, newFaces, heat) {
+  if (alpha < 0.01) return
+  const facing = new Int8Array(m.nt)
+  for (let t = 0; t < m.nt; t++) {
+    const a = 3 * m.tri[4 * t]
+    const b = 3 * m.tri[4 * t + 1]
+    const c = 3 * m.tri[4 * t + 2]
+    const cross = (sp[b] - sp[a]) * (sp[c + 1] - sp[a + 1]) - (sp[b + 1] - sp[a + 1]) * (sp[c] - sp[a])
+    facing[t] = cross < 0 ? 1 : -1
+  }
+  const p = m.pairs
+  const paths = [new Path2D(), new Path2D(), new Path2D(), new Path2D()]
+  for (let i = 0; i < p.length; i += 4) {
+    if (facing[p[i]] === facing[p[i + 1]]) continue
+    const a = 3 * p[i + 2]
+    const b = 3 * p[i + 3]
+    const v = visibleAt((sp[a] + sp[b]) / 2, (sp[a + 1] + sp[b + 1]) / 2, (sp[a + 2] + sp[b + 2]) / 2)
+    const lit = newFaces && heat > 0.01 && newFaces.has(m.tri[4 * p[i] + 3])
+    const path = paths[(v ? 0 : 1) + (lit ? 2 : 0)]
+    path.moveTo(sp[a], sp[a + 1])
+    path.lineTo(sp[b], sp[b + 1])
+  }
+  ctx.strokeStyle = SCAN
+  ctx.lineWidth = 1
+  for (const [k, path] of paths.entries()) {
+    ctx.setLineDash(k % 2 ? HIDDEN_DASH : [])
+    ctx.globalAlpha = alpha * (k % 2 ? 0.5 : 1)
+    ctx.stroke(path)
+  }
+  if (!newFaces || heat <= 0.01) return
+  ctx.strokeStyle = INK
+  ctx.lineWidth = 1.25
+  ctx.shadowColor = SCAN
+  ctx.shadowBlur = 8 * heat
+  for (const k of [2, 3]) {
+    ctx.setLineDash(k % 2 ? HIDDEN_DASH : [])
+    ctx.globalAlpha = alpha * heat * (k % 2 ? 0.5 : 1)
+    ctx.stroke(paths[k])
+  }
+  ctx.shadowBlur = 0
+}
+
+const ease = (x) => x * x * (3 - 2 * x)
+const easeOut = (x) => 1 - Math.pow(1 - x, 3)
+const easeInOut = (x) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2)
+const clamp01 = (x) => Math.max(0, Math.min(1, x))
+
+// One build step projected for this frame: its mesh in screen space, ready to hide edges.
+function solidOf(step) {
+  const m = meshes[step]
+  const sp = new Float32Array(m.pos.length)
+  for (let i = 0; i < m.pos.length; i += 3) {
+    project(m.pos, tmp, i)
+    sp[i] = tmp[0]
+    sp[i + 1] = tmp[1]
+    sp[i + 2] = tmp[2]
+  }
+  return { step, m, sp, edges: PART.steps[step].edges.map((e) => e.map((p) => project(p, [0, 0, 0], 0))) }
+}
+const tmp = [0, 0, 0]
+
+// The solid a step's tool sweeps out so far: each profile, lifted `s` of the way along the sweep,
+// as a mesh to hide what it covers, plus its base, its cap and the two side lines that outline it.
+function toolOf(tool, s) {
+  const pos = []
+  const tri = []
+  const lines = []
+  const at = (p) => project(p, [0, 0, 0], 0)
+  for (const { pts: prof, dir: d } of tool.profiles) {
+    const lift = (p, f = s) => [p[0] + d[0] * f, p[1] + d[1] * f, p[2] + d[2] * f]
+    const a0 = at([0, 0, 0])
+    const a1 = at(d)
+    const base = prof.map(at)
+    const cap = prof.map((p) => at(lift(p)))
+    const o = pos.length / 3
+    const n = prof.length - 1
+    for (let i = 0; i <= n; i++) pos.push(...base[i])
+    for (let i = 0; i <= n; i++) pos.push(...cap[i])
+    for (let i = 0; i < n; i++) {
+      tri.push(o + i, o + i + 1, o + n + 2 + i, 0, o + i + 1, o + n + 2 + i + 1, o + n + 2 + i, 0)
+    }
+    const mid = (q) => q.slice(0, n).reduce((m, p) => [m[0] + p[0] / n, m[1] + p[1] / n, m[2] + p[2] / n], [0, 0, 0])
+    const cb = pos.length / 3
+    pos.push(...mid(base), ...mid(cap))
+    for (let i = 0; i < n; i++) tri.push(cb, o + i, o + i + 1, 0, cb + 1, o + n + 2 + i, o + n + 2 + i + 1, 0)
+    // Side lines run where the profile's tangent lines up with the sweep on screen.
+    const nx = a0[1] - a1[1]
+    const ny = a1[0] - a0[0]
+    let lo = 0
+    let hi = 0
+    base.forEach((p, i) => {
+      const v = p[0] * nx + p[1] * ny
+      if (v < base[lo][0] * nx + base[lo][1] * ny) lo = i
+      if (v > base[hi][0] * nx + base[hi][1] * ny) hi = i
+    })
+    const side = (i) => {
+      const pts = []
+      for (let k = 0; k <= 24; k++) pts.push(at(lift(prof[i], s * k / 24)))
+      return pts
+    }
+    lines.push({ base, cap, sides: s > 0.001 ? [side(lo), side(hi)] : [] })
+  }
+  return { mesh: { tri, nt: tri.length / 4 }, sp: new Float32Array(pos), lines }
+}
+// Draws a projected step. Its new edges are drawn up to `q` of their length and, with the faces it
+// made, lit in ink at `heat`, which cools to the scan colour as heat falls to 0.
+function drawEdges(S, alpha, q = 1, heat = 0) {
+  const isNew = fresh[S.step]
+  outline(S.m, S.sp, alpha, newFaces[S.step], heat)
+  const heads = []
+  S.edges.forEach((e, i) => {
+    ctx.strokeStyle = SCAN
+    ctx.lineWidth = 1
+    if (!isNew[i]) return stroke(e, alpha)
+    if (q <= 0) return
+    stroke(e, alpha, q)
+    if (heat > 0.01) {
+      ctx.strokeStyle = INK
+      ctx.lineWidth = 1.25
+      ctx.shadowColor = SCAN
+      ctx.shadowBlur = 8 * heat
+      const tip = stroke(e, alpha * heat, q)
+      ctx.shadowBlur = 0
+      if (q < 1) heads.push(tip)
+    }
+  })
+  return heads
+}
+const newFaces = PART.steps.map((s) => new Set(s.fresh_faces))
+
+function glowStroke(pts, alpha, upto = 1) {
+  ctx.strokeStyle = INK
+  ctx.lineWidth = 1.25
+  ctx.shadowColor = SCAN
+  ctx.shadowBlur = 8
+  const tip = stroke(pts, alpha, upto)
+  ctx.shadowBlur = 0
+  return tip
+}
+
+function drawHeads(heads, alpha) {
+  ctx.setLineDash([])
+  for (const h of heads) {
+    ctx.globalAlpha = alpha
+    ctx.fillStyle = INK
+    ctx.shadowColor = SCAN
+    ctx.shadowBlur = 14
+    ctx.beginPath()
+    ctx.arc(h[0], h[1], 2.2, 0, Math.PI * 2)
+    ctx.fill()
+  }
+  ctx.shadowBlur = 0
+}
+
+function solidAt(S, alpha, q, heat) {
+  rasterize(S.m, S.sp)
+  return drawEdges(S, alpha, q, heat)
+}
+
+// What is on screen: the step shown, the one shown before it, and when it changed.
+let cur = -1
+let prev = -1
+let changedAt = 0
+
+// A step with a tool draws its profiles on the solid before it, sweeps them, then hands the swept
+// shape to the result while both are still lit, and the new geometry cools as one. A step without
+// a tool (a fillet, a chamfer) draws its new edges on over the solid before it. Each step finishes
+// cooling inside its own time, so the next starts from a settled drawing.
+function render(step, from, age) {
+  ctx.clearRect(0, 0, W, H)
+  ctx.lineCap = "round"
+  ctx.lineJoin = "round"
+  const base = step - 1
+  if (age === null) {
+    solidAt(solidOf(step), 1)
+  } else {
+    // A drawing that is not this step's starting solid (the loop wrapping, a click) fades out first.
+    const gone = ease(clamp01(age / FADE_MS))
+    if (from >= 0 && from !== base && gone < 1) solidAt(solidOf(from), 1 - gone)
+    const into = from === base ? 1 : gone
+    // The step before stays lit until this one begins, and cools while this one draws: the light
+    // moves to what is happening rather than fading on a drawing that has stopped.
+    const before = from === base ? 1 - ease(clamp01(age / HANDOFF_MS)) : 0
+    const tool = PART.steps[step].tool
+    const done = tool ? PROFILE_MS + SWEEP_MS + SWAP_MS : TRACE_LEAD_MS + TRACE_MS
+    const heat = step < N - 1 ? 1 : 1 - ease(clamp01((age - done - FINAL_REST_MS) / FINAL_COOL_MS))
+    if (tool) {
+      const traced = easeOut(clamp01(age / PROFILE_MS))
+      const swept = easeInOut(clamp01((age - PROFILE_MS) / SWEEP_MS))
+      const swap = ease(clamp01((age - PROFILE_MS - SWEEP_MS) / SWAP_MS))
+      const T = swap < 1 ? toolOf(tool, swept) : null
+      // The result replaces the solid before it at full strength the moment the sweep ends; the
+      // swept shape fades out over it, so nothing on screen ever dims.
+      if (swap > 0) {
+        solidAt(solidOf(step), into, 1, heat)
+      } else if (base >= 0) {
+        const B = solidOf(base)
+        rasterize(B.m, B.sp)
+        rasterize(T.mesh, T.sp, true)
+        drawEdges(B, into, 1, before)
+      } else {
+        zbuf.fill(Infinity)
+        rasterize(T.mesh, T.sp, true)
+      }
+      if (T) {
+        const heads = []
+        for (const L of T.lines) {
+          const tip = glowStroke(L.base, 1 - swap, traced)
+          if (traced < 1) heads.push(tip)
+          if (swept > 0) {
+            glowStroke(L.cap, 1 - swap)
+            L.sides.forEach((sd) => glowStroke(sd, 1 - swap))
+          }
+        }
+        drawHeads(heads, 1 - swap)
+      }
+    } else {
+      const p = ease(clamp01(age / FADE_MS))
+      const q = easeOut(clamp01((age - TRACE_LEAD_MS) / TRACE_MS))
+      const heads = solidAt(solidOf(step), into, q, q > 0 ? heat : 0)
+      // Edges the step removed, and the last step's light, fade out over the result.
+      if (base >= 0 && p < 1) solidAt(solidOf(base), into * (1 - p), 1, before)
+      drawHeads(heads, 1)
+    }
+  }
+  ctx.setLineDash([])
+  ctx.globalAlpha = 1
+  if (step !== shownStep) {
+    shownStep = step
+    ;[...ticks.children].forEach((t, i) => { t.className = i < step ? "on" : i === step ? "now" : "" })
+    if (!opEl.dataset.peek) setOp(step)
+  }
+}
+
+function frame(t) {
+  if (start === null) start = t
+  const dt = last === null ? 0 : Math.min(0.05, (t - last) / 1000)
+  last = t
+  if (!drag && t > resumeAt) yaw += SPIN * dt
+  const into = ((t - start) % (N * STEP_MS + HOLD_MS) + (N * STEP_MS + HOLD_MS)) % (N * STEP_MS + HOLD_MS)
+  const target = Math.min(N - 1, Math.floor(into / STEP_MS))
+  if (target !== cur) {
+    prev = cur
+    cur = target
+    changedAt = t
+  }
+  const age = t - changedAt
+  render(cur, prev, age)
+  const tool = PART.steps[cur].tool
+  const doneAt = tool ? PROFILE_MS + SWEEP_MS + SWAP_MS : TRACE_LEAD_MS + TRACE_MS
+  readout(cur, age, doneAt, t)
+  if (visible) requestAnimationFrame(frame)
+}
+
+// Clicking a step plays the build on from there.
+function jump(i) {
+  start = (last ?? performance.now()) - i * STEP_MS
+  if (reduce) render(i, -1, null)
+}
+function replay() {
+  start = null
+  if (reduce) render(N - 1, -1, null)
+}
+;[...ticks.children].forEach((b, i) => {
+  b.addEventListener("click", () => jump(i))
+  b.addEventListener("pointerenter", () => { opEl.dataset.peek = "1"; setOp(i) })
+  b.addEventListener("pointerleave", () => { delete opEl.dataset.peek; setOp(shownStep) })
+})
+function setOp(i) {
+  if (i < 0) return
+  opEl.innerHTML = "<span>" + String(i + 1).padStart(2, "0") + "</span>"
+  opEl.append(LABELS[i])
+}
+
+fig.addEventListener("pointerdown", (e) => {
+  drag = { x: e.clientX, y: e.clientY, yaw, pitch }
+  fig.setPointerCapture(e.pointerId)
+  fig.classList.add("dragging")
+})
+fig.addEventListener("pointermove", (e) => {
+  if (!drag) return
+  yaw = drag.yaw + (e.clientX - drag.x) * 0.008
+  pitch = Math.max(-0.2, Math.min(1.5, drag.pitch + (e.clientY - drag.y) * 0.006))
+  if (reduce) render(N - 1, -1, null)
+})
+const endDrag = () => {
+  drag = null
+  resumeAt = performance.now() + 1500
+  fig.classList.remove("dragging")
+}
+fig.addEventListener("pointerup", endDrag)
+fig.addEventListener("pointercancel", endDrag)
+fig.addEventListener("dblclick", replay)
+fig.addEventListener("keydown", (e) => {
+  const k = { ArrowLeft: [-0.12, 0], ArrowRight: [0.12, 0], ArrowUp: [0, -0.08], ArrowDown: [0, 0.08] }[e.key]
+  if (e.key === "Enter") return replay()
+  if (!k) return
+  e.preventDefault()
+  yaw += k[0]
+  pitch = Math.max(-0.2, Math.min(1.5, pitch + k[1]))
+  resumeAt = performance.now() + 1500
+  if (reduce) render(N - 1, -1, null)
+})
+
+new ResizeObserver(size).observe(fig)
+size()
+if (reduce) {
+  render(N - 1, -1, null)
+  readout(N - 1, null, 0, 0)
+} else {
+  new IntersectionObserver(([en]) => {
+    const was = visible
+    visible = en.isIntersecting
+    if (visible && !was) { last = null; requestAnimationFrame(frame) }
+  }).observe(fig)
+  requestAnimationFrame(frame)
+}
+
+// Shows "copied" in the button for a moment, at the button's own width, then its label again. The
+// label is kept from the first click, so clicking again while it reads "copied" still restores it.
+async function copyText(text, btn) {
+  if (!btn.dataset.label) {
+    btn.dataset.label = btn.innerHTML
+    btn.style.minWidth = btn.getBoundingClientRect().width + "px"
+  }
+  clearTimeout(btn.copiedTimer)
+  try {
+    await navigator.clipboard.writeText(text)
+    btn.textContent = "copied"
+  } catch {
+    btn.textContent = "select + ⌘c"
+  }
+  btn.classList.add("done")
+  btn.copiedTimer = setTimeout(() => {
+    btn.innerHTML = btn.dataset.label
+    btn.classList.remove("done")
+  }, 1600)
+}
+document.querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", () => {
+  const input = document.getElementById(b.dataset.copy)
+  input.select()
+  copyText(input.value, b)
+}))
+document.querySelectorAll("[data-copy-from]").forEach((b) => b.addEventListener("click", () => {
+  copyText(document.getElementById(b.dataset.copyFrom).textContent, b)
+}))
+
+/* n: cases by tightest tolerance passed (1e-7, 1e-6, 1e-5, 1e-3), then fail, unsupported, and
+   refused/timeout/crash. */
+const BOARD = [
+  { label: "springrep", ver: "1.0.0", license: "MIT", n: [442, 0, 0, 0, 0, 0, 0], ms: [47.1, 16.3, 394], us: true },
+  { label: "kernel A", ver: "x.y.z", license: "—", n: [428, 6, 0, 0, 8, 0, 0], ms: [59.7, 36.2, 300] },
+  { label: "kernel B", ver: "x.y.z", license: "—", n: [323, 0, 0, 0, 0, 80, 39], ms: [119, 51.1, 3881] },
+  { label: "kernel C", ver: "x.y.z", license: "—", n: [317, 0, 0, 0, 66, 59, 0], ms: [313, 113, 5359] },
+]
+const GRADES = ["1e-7", "1e-6", "1e-5", "1e-3", "fail", "unsupported", "quiet"]
+// The bar shows 1e-6 with 1e-5, so neighbouring segments always differ clearly in colour.
+const BANDS = [
+  { g: "1e-7", of: [0], name: "1e-7", says: "hold to 1e-7 mm" },
+  { g: "1e-5", of: [1, 2], name: "1e-5", says: "hold to 1e-5 mm, not 1e-7" },
+  { g: "1e-3", of: [3], name: "1e-3", says: "hold only to 1e-3 mm" },
+  { g: "fail", of: [4], name: "fail", says: "wrong answer" },
+  { g: "unsupported", of: [5], name: "unsupported", says: "operation not supported" },
+  { g: "quiet", of: [6], name: "refused / timeout / crash", says: "refused, timed out or crashed" },
+]
+const bandCount = (k, b) => b.of.reduce((a, i) => a + k.n[i], 0)
+// The run the board shows, in the report's own fields (suite, run.unix, environment, and
+// kernel.tolerance, the precision the cases were run and graded to).
+const RUN = { suite: "1.0.0", unix: 1794938400, os: "macos", arch: "aarch64", cores: 10, tolerance: 1e-7 }
+const TOTAL = 442
+const [ry, rm, rd] = new Date(RUN.unix * 1000).toISOString().slice(0, 10).split("-")
+const runDate = rm + "-" + rd + "-" + ry
+document.getElementById("hrun").textContent = runDate + " run"
+document.getElementById("run-id").textContent = runDate + " run · brep-conformance " + RUN.suite +
+  " · " + TOTAL + " cases · " + RUN.os + " " + RUN.arch + ", " + RUN.cores + " cores · " +
+  RUN.tolerance.toExponential() + " mm precision"
+const atOrBetter = (k, i) => k.n.slice(0, i + 1).reduce((a, b) => a + b, 0) / TOTAL * 100
+BOARD.forEach((k) => { k.rate = atOrBetter(k, 0) })
+const hbench = document.getElementById("hbench")
+hbench.style.display = "grid"
+hbench.style.gap = "10px"
+BOARD.forEach((k) => {
+  const row = document.createElement("div")
+  row.className = "hrow" + (k.us ? " us" : "")
+  row.innerHTML = '<span class="n"></span><span class="lic"></span><span class="t"><i></i></span><b>' + k.rate.toFixed(1) + "%</b>" +
+    '<span class="ms">' + k.ms[0] + " ms</span>"
+  row.querySelector(".n").textContent = k.label
+  row.querySelector(".lic").textContent = k.license
+  row.dataset.tip = k.label + " " + k.ver + " · " + k.license + "|" + k.n[0] + " of " + TOTAL +
+    " cases hold to 1e-7 mm. Median " + k.ms[0] + " ms per case; half take " + k.ms[1] + " to " +
+    k.ms[2] + " ms."
+  hbench.appendChild(row)
+})
+requestAnimationFrame(() => requestAnimationFrame(() => {
+  hbench.querySelectorAll(".hrow .t i").forEach((el, i) => { el.style.width = BOARD[i].rate + "%" })
+}))
+const board = document.getElementById("board")
+const pct = (v) => v.toFixed(1) + "%"
+BOARD.forEach((k) => {
+  const tr = document.createElement("tr")
+  if (k.us) tr.className = "us"
+  // Each band's stripe is revealed after the ones before it, so the meter fills left to right.
+  let cum = 0
+  const segs = BANDS.map((b) => {
+    const c = bandCount(k, b)
+    if (!c) return ""
+    const delay = Math.round(cum / TOTAL * 1100)
+    cum += c
+    return '<span data-g="' + b.g + '" style="flex:' + c + " 0 0;transition-delay:0ms," + delay + 'ms"></span>'
+  }).join("")
+  tr.innerHTML =
+    '<td class="k"><b></b><small></small></td>' +
+    '<td class="bar-cell"><div class="tbar" role="img"></div><div class="ruler"><span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div></td>' +
+    '<td class="p7"><span data-to="' + atOrBetter(k, 0) + '" data-dp="1" data-unit="%"></span></td>' +
+    '<td class="px"><span data-to="' + atOrBetter(k, 2) + '" data-dp="1" data-unit="%"></span></td>' +
+    '<td class="mt"><b><span data-to="' + k.ms[0] + '" data-dp="' + (k.ms[0] < 100 ? 1 : 0) +
+    '"></span><small>ms</small></b></td>'
+  tr.querySelector(".k b").textContent = k.label
+  tr.querySelector(".k small").textContent = k.ver + " · " + k.license
+  const bar = tr.querySelector(".tbar")
+  bar.innerHTML = segs
+  const shown = BANDS.filter((b) => bandCount(k, b))
+  bar.setAttribute("aria-label", shown.map((b) => b.name + " " + bandCount(k, b)).join(", ") + " of " + TOTAL)
+  const spans = [...bar.children]
+  const cell = tr.querySelector(".bar-cell")
+  cell.dataset.tip = ""
+  cell.tipFor = (e) => {
+    let hot = 0
+    let best = Infinity
+    spans.forEach((s, i) => {
+      const r = s.getBoundingClientRect()
+      const d = e.clientX < r.left ? r.left - e.clientX : e.clientX > r.right ? e.clientX - r.right : 0
+      if (d < best) { best = d; hot = i }
+    })
+    spans.forEach((s, i) => s.classList.toggle("hot", i === hot))
+    bar.classList.add("picking")
+    const w = Math.max(...shown.map((b) => b.name.length))
+    const rows = shown.map((b, i) => {
+      const c = bandCount(k, b)
+      const line = (i === hot ? "▸ " : "  ") + b.name.padEnd(w) + String(c).padStart(5) +
+        pct(c / TOTAL * 100).padStart(8)
+      return i === hot ? "<b>" + line + "</b>" : line
+    })
+    return [k.label + " " + k.ver + " · " + shown[hot].says, rows.join("\n")]
+  }
+  cell.addEventListener("pointerleave", () => bar.classList.remove("picking"))
+  tr.querySelector(".mt").dataset.tip = k.label + " · median " + k.ms[0] + " ms per case|" +
+    "half of its cases take " + k.ms[1] + " to " + k.ms[2] + " ms. Timed only on cases every kernel answered."
+  board.appendChild(tr)
+})
+document.getElementById("full-report").addEventListener("click", (e) => e.preventDefault())
+
+const figures = [...board.querySelectorAll("[data-to]")]
+const show = (el, f) => {
+  el.textContent = (Number(el.dataset.to) * f).toFixed(Number(el.dataset.dp)) + (el.dataset.unit || "")
+}
+const COUNT_MS = 1100
+function lightBoard() {
+  board.closest("table").classList.add("lit")
+  if (reduce) return figures.forEach((el) => show(el, 1))
+  const t0 = performance.now()
+  const step = (t) => {
+    const x = Math.min(1, (t - t0) / COUNT_MS)
+    const f = 1 - Math.pow(1 - x, 3)
+    figures.forEach((el) => show(el, f))
+    if (x < 1) requestAnimationFrame(step)
+  }
+  requestAnimationFrame(step)
+}
+figures.forEach((el) => show(el, reduce ? 1 : 0))
+new IntersectionObserver(([en], io) => {
+  if (!en.isIntersecting) return
+  io.disconnect()
+  lightBoard()
+}, { threshold: 0.35 }).observe(board)
+
+const legend = document.getElementById("legend")
+BANDS.filter((b) => BOARD.some((k) => bandCount(k, b))).forEach((b) => {
+  const li = document.createElement("li")
+  li.innerHTML = '<i data-g="' + b.g + '"></i>'
+  li.append(b.name)
+  legend.appendChild(li)
+})
+
+function alignDeck() {
+  const h = document.querySelector("#bench .sh h2")
+  const p = document.querySelector("#bench .sh p")
+  const fs = parseFloat(getComputedStyle(h).fontSize)
+  const lh = parseFloat(getComputedStyle(h).lineHeight) || fs
+  const pf = parseFloat(getComputedStyle(p).fontSize)
+  const pl = parseFloat(getComputedStyle(p).lineHeight) || pf * 1.5
+  // Capitals sit about 0.72 em tall, centred on the line box with the face's descent below them.
+  const capTop = (lh - fs) / 2 + fs * 0.2
+  const pCapTop = (pl - pf) / 2 + pf * 0.2
+  p.style.setProperty("--cap-drop", Math.max(0, capTop - pCapTop) + "px")
+}
+alignDeck()
+document.fonts && document.fonts.ready.then(alignDeck)
+addEventListener("resize", alignDeck)
+
+const tip = document.createElement("div")
+tip.className = "tip"
+tip.setAttribute("aria-hidden", "true")
+document.body.appendChild(tip)
+document.addEventListener("pointermove", (e) => {
+  const el = e.target.closest("[data-tip]")
+  if (!el) return tip.classList.remove("on")
+  if (el.tipFor) {
+    const [head, rows] = el.tipFor(e)
+    tip.textContent = head
+    const box = document.createElement("span")
+    box.className = "rows"
+    box.innerHTML = rows
+    tip.appendChild(box)
+  } else {
+    const [head, body] = el.dataset.tip.split("|")
+    tip.textContent = head
+    const small = document.createElement("small")
+    small.textContent = body
+    tip.appendChild(small)
+  }
+  const r = tip.getBoundingClientRect()
+  tip.style.left = Math.min(e.clientX + 14, innerWidth - r.width - 8) + "px"
+  tip.style.top = (e.clientY + 18) + "px"
+  tip.classList.add("on")
+})
+document.addEventListener("pointerleave", () => tip.classList.remove("on"))
+
+</script>
