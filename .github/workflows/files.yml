@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MIT
+name: Files
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  allowed-files:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: No binary, and no file type that is not source, outside a fixture folder
+        run: .github/allowed-files.sh
