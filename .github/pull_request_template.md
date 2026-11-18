@@ -22,6 +22,5 @@ explains each line.
 - [ ] It names no proprietary CAD kernel or program, nor its vendor or API, in code, tests, comments
       or documents.
 - [ ] It adds no compiled binary, no vendor SDK file, and no CAD file outside a fixture folder.
-- [ ] Every new dependency is under a licence that
-      [`deny.toml`](https://github.com/springcraft-ai/springrep/blob/main/deny.toml) allows.
+- [ ] It adds no dependency.
 - [ ] Every commit carries a `Signed-off-by` line.

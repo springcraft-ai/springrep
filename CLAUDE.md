@@ -25,10 +25,9 @@ expected value from one. An expected value is a closed form, or a figure the tes
 
 ## Dependencies and files
 
-springrep has no dependencies; do not add one without a maintainer's agreement. If one is agreed, it
-is under a permissive licence from crates.io: [`deny.toml`](deny.toml) is the list. No GPL or LGPL
-dependency, no compiled binary, no vendor SDK file, and no CAD file outside a folder named
-`fixtures`.
+springrep has no dependencies: do not add one, not a build or development dependency either. A
+check fails a pull request whose `Cargo.lock` lists any package but springrep. No compiled binary,
+no vendor SDK file, and no CAD file outside a folder named `fixtures`.
 
 ## Commits
 

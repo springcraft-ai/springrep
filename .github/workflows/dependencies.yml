@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: MIT
+name: Dependencies
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  no-dependencies:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      # The ci workflow builds with --locked, so Cargo.lock lists every package a build uses.
+      - name: Cargo.lock lists springrep and nothing else
+        run: |
+          packages=$(grep -A1 '^\[\[package\]\]' Cargo.lock | sed -n 's/^name = "\(.*\)"$/\1/p')
+          if [ "$packages" != springrep ]; then
+              echo "springrep has no dependencies, and Cargo.lock lists:"
+              echo "$packages"
+              echo ".github/CONTRIBUTING.md states the rule."
+              exit 1
+          fi
+          echo "Cargo.lock lists springrep alone."

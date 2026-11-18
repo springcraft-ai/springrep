@@ -51,10 +51,10 @@ the project is built and hosted with are named as usual.
 
 ## Dependencies
 
-springrep has no dependencies, and a change that adds one says why the kernel cannot do without it.
-A dependency is under a permissive licence only: [`deny.toml`](../deny.toml) lists them, and
-`cargo deny check licenses sources` checks every pull request. The GPL and the LGPL are refused. A
-dependency comes from crates.io, not from a git repository.
+springrep has no dependencies: it builds from the Rust standard library alone, and a pull request
+does not add one. The `no-dependencies` check fails a pull request whose `Cargo.lock` lists any
+package but springrep. To propose a dependency, open an issue first and say why the kernel cannot
+do without it.
 
 ## Licence of contributions
 
