@@ -449,7 +449,7 @@ Things to know:
         <span class="annot" id="run-id"></span>
         <div class="actions">
           <a class="btn" href="https://github.com/springcraft-ai/brep-conformance" target="_blank" rel="noopener">{{GH}}brep-conformance GitHub</a>
-          <a class="btn" href="#" id="full-report">full benchmark results</a>
+          <a class="btn" href="https://springcraft-ai.github.io/brep-conformance/" target="_blank" rel="noopener">full benchmark results</a>
         </div>
       </div>
     </div>
@@ -1161,7 +1161,6 @@ BOARD.forEach((k) => {
     "half of its cases take " + k.ms[1] + " to " + k.ms[2] + " ms. Timed only on cases every kernel answered."
   board.appendChild(tr)
 })
-document.getElementById("full-report").addEventListener("click", (e) => e.preventDefault())
 
 const figures = [...board.querySelectorAll("[data-to]")]
 const show = (el, f) => {
