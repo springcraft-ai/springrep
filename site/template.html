@@ -350,7 +350,8 @@ tr.us .tbar [data-g="1e-7"] { --c: var(--accent); }
 
 footer { border-top: 1px solid var(--rule-soft); padding-block: 28px; }
 .foot { display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; }
-.foot > img { height: 15px; width: auto; display: block; }
+.foot .logo { display: block; }
+.foot .logo img { height: 15px; width: auto; display: block; }
 .foot nav { display: flex; gap: 22px; flex-wrap: wrap; }
 .foot nav a { color: var(--ink-2); font-size: 12px; transition: color var(--dur) linear; }
 .foot nav a:hover { color: var(--ink-1); }
@@ -403,9 +404,9 @@ footer { border-top: 1px solid var(--rule-soft); padding-block: 28px; }
   <section class="sec band" id="what">
     <div class="wrap">
       <div class="pillars">
-        <div><h3>Accurate to <span class="num">1e-7</span> mm</h3><p>Surfaces are analytic or NURBS, never triangles, so volume, area and mass come straight from the exact shape. Every brep-conformance case holds to a ten-millionth of a millimetre.</p></div>
-        <div><h3>Valid, and named</h3><p>Each operation's output passes a validity check, or you get an error instead of a broken solid. Faces are named for the operation that made them, like <code class="mono">plate.end</code>, so a changed dimension never loses a fillet or a reference.</p></div>
-        <div><h3>Safe and fast</h3><p>100% Rust with no dependencies and no unsafe code. The fastest median case time on brep-conformance, and it compiles to WebAssembly to run in the browser.</p></div>
+        <div><h3>Exact to <span class="num">1e-7</span> mm</h3><p>Surfaces are analytic or NURBS, not meshes, so volume, area, and mass properties are computed from the real shape.</p></div>
+        <div><h3>Valid or a clear error</h3><p>Every result is checked for validity, and if it fails you get an error instead of a broken solid, so nothing downstream gets built on a bad shape.</p></div>
+        <div><h3>Fast and safe</h3><p>It has the fastest median case time on brep-conformance, with public results anyone can check. It's pure Rust with no dependencies and no unsafe code, and it compiles to WebAssembly.</p></div>
       </div>
     </div>
   </section>
@@ -501,7 +502,7 @@ Things to know:
 
 <footer class="band">
   <div class="wrap foot">
-    <img src="{{SC}}/assets/logo-full.svg" alt="Springcraft">
+    <a class="logo" href="https://springcraft.ai/?utm_source=springrep&amp;utm_medium=referral&amp;utm_content=footer_logo" target="_blank" rel="noopener"><img src="{{SC}}/assets/logo-full.svg" alt="Springcraft"></a>
     <nav aria-label="Links">
       <a href="https://github.com/springcraft-ai/springrep" target="_blank" rel="noopener">github</a>
       <a href="https://github.com/springcraft-ai/brep-conformance" target="_blank" rel="noopener">brep-conformance</a>
