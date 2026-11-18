@@ -26,6 +26,10 @@ The [pages workflow](../.github/workflows/pages.yml) publishes the page to GitHu
 crate's `cargo doc` output under `api/`, where the page's API docs link points. A local build has no
 `api/` folder, so that link only works on the published site.
 
+The link-preview image (`og:image`) is a 1200×630 PNG of the hero with the finished part and without
+the leaderboard. It lives on the CDN under `springrep/`, with a content hash in its name so it can be
+cached for good: a new image gets a new name, and the template's `og:image` tag changes with it.
+
 The benchmark figures on the page are specimen data until brep-conformance publishes real results.
 
 ## Setup
