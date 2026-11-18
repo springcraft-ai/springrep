@@ -47,10 +47,11 @@ def inline_sc(page):
     page = page.replace(f'@import url("{SC}/sc.css") layer(sc);', layered + f"@layer sc {{{rest}}}")
 
     def data_uri(m):
-        svg = re.sub(r"<metadata>.*?</metadata>", "", fetch(m.group(1)), flags=re.S)
-        return 'src="data:image/svg+xml;base64,' + base64.b64encode(svg.encode()).decode() + '"'
+        svg = re.sub(r"<metadata>.*?</metadata>", "", fetch(m.group(2)), flags=re.S)
+        data = base64.b64encode(svg.encode()).decode()
+        return f'{m.group(1)}="data:image/svg+xml;base64,{data}"'
 
-    return re.sub(rf'src="{re.escape(SC)}/(assets/[^"]+)"', data_uri, page)
+    return re.sub(rf'(src|href)="{re.escape(SC)}/(assets/[^"]+)"', data_uri, page)
 
 
 def highlight(src):
