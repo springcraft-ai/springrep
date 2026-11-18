@@ -30,7 +30,8 @@ tagline and MIT badge on the left, and the finished flanged tube drawn by its ex
 right. It lives on the CDN under `springrep/`, with a version stamp in its name so it can be cached
 for good: a new image gets a new name, and the template's `og:image` tag changes with it.
 
-The benchmark figures on the page are specimen data until brep-conformance publishes real results.
+The leaderboard is brep-conformance's verified run of 11-18-2026, copied into the template's
+`BOARD` and `RUN` from the figures its results site computes. A new run is copied in the same way.
 
 ## Setup
 

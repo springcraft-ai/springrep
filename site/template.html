@@ -1099,13 +1099,15 @@ document.querySelectorAll("[data-copy-from]").forEach((b) => b.addEventListener(
   copyText(document.getElementById(b.dataset.copyFrom).textContent, b)
 }))
 
-/* n: cases by tightest tolerance passed (1e-7, 1e-6, 1e-5, 1e-3), then fail, unsupported, and
-   refused/timeout/crash. */
+/* The verified benchmark run of 11-18-2026, as the brep-conformance results site computes it from
+   the reports in that repository's reports/ folder. n: cases by tightest tolerance passed (1e-7,
+   1e-6, 1e-5, 1e-3), then fail, unsupported, and refused/timeout/crash. ms: median, first and third
+   quartile per case, on the cases every kernel answered. */
 const BOARD = [
-  { label: "springrep", ver: "1.0.0", license: "MIT", n: [442, 0, 0, 0, 0, 0, 0], ms: [47.1, 16.3, 394], us: true },
-  { label: "kernel A", ver: "x.y.z", license: "—", n: [428, 6, 0, 0, 8, 0, 0], ms: [59.7, 36.2, 300] },
-  { label: "kernel B", ver: "x.y.z", license: "—", n: [323, 0, 0, 0, 0, 80, 39], ms: [119, 51.1, 3881] },
-  { label: "kernel C", ver: "x.y.z", license: "—", n: [317, 0, 0, 0, 66, 59, 0], ms: [313, 113, 5359] },
+  { label: "springrep", ver: "1.0.0", license: "MIT", n: [3487, 0, 0, 0, 0, 0, 0], ms: [87.3, 9.2, 260], us: true },
+  { label: "opencascade", ver: "8.0.1.1.0", license: "LGPL-2.1", n: [2823, 27, 3, 5, 304, 271, 54], ms: [195, 45.6, 434] },
+  { label: "arris", ver: "0.10.0", license: "MIT/Apache", n: [2111, 0, 0, 0, 85, 839, 452], ms: [210, 56.7, 989] },
+  { label: "solidcore", ver: "1.0.1", license: "Apache-2.0", n: [1727, 10, 2, 0, 500, 1110, 138], ms: [2093, 109, 8611] },
 ]
 const GRADES = ["1e-7", "1e-6", "1e-5", "1e-3", "fail", "unsupported", "quiet"]
 // The bar shows 1e-6 with 1e-5, so neighbouring segments always differ clearly in colour.
@@ -1120,8 +1122,8 @@ const BANDS = [
 const bandCount = (k, b) => b.of.reduce((a, i) => a + k.n[i], 0)
 // The run the board shows, in the report's own fields (suite, run.unix, environment, and
 // kernel.tolerance, the precision the cases were run and graded to).
-const RUN = { suite: "1.0.0", unix: 1794938400, os: "macos", arch: "aarch64", cores: 10, tolerance: 1e-7 }
-const TOTAL = 442
+const RUN = { suite: "1.0.0", unix: 1794975567, os: "linux", arch: "x86_64", cores: 24, tolerance: 1e-7 }
+const TOTAL = 3487
 const [ry, rm, rd] = new Date(RUN.unix * 1000).toISOString().slice(0, 10).split("-")
 const runDate = rm + "-" + rd + "-" + ry
 document.getElementById("hrun").textContent = runDate + " run"
