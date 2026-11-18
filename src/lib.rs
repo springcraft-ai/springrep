@@ -33,3 +33,6 @@ pub use error::{Error, Result};
 /// A digest of the kernel's sources, unit tests aside: two builds with the same one build the same
 /// geometry, so a cache of built parts keys on it.
 pub const SOURCE: &str = env!("SPRINGREP_SOURCE");
+
+/// The release this build is, as published: what an adapter reports as the kernel's version.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
