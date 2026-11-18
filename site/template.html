@@ -135,9 +135,8 @@ header.chrome { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 9
 .hbench a.more:hover { color: var(--ink-1); }
 @media (prefers-reduced-motion: reduce) { .hrow .t i { transition: none; } }
 @media (max-width: 520px) {
-  .hrow { grid-template-columns: 72px minmax(0, 1fr) 56px 54px; gap: 8px; }
+  .hrow { grid-template-columns: 70px minmax(0, 1fr) 54px 64px; gap: 8px; }
   .hrow .lic, .hcols > span:nth-child(2) { display: none; }
-  .status, .status > div { flex-wrap: wrap; row-gap: 8px; }
 }
 .hero-copy { display: grid; gap: 38px; }
 .hero .sub { font-size: clamp(22px, 2.2vw, 30px); letter-spacing: -.02em; line-height: 1; color: var(--ink-2); }
@@ -158,6 +157,16 @@ header.chrome { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 9
 .figure .bl { left: 0; bottom: 0; border-left-width: 1px; border-bottom-width: 1px; }
 .figure .brr { right: 0; bottom: 0; border-right-width: 1px; border-bottom-width: 1px; }
 .status { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-top: 14px; }
+/* On a phone the build reads as two centred lines: the steps and the one being built, then what it
+   made, which keeps a line of its own whatever the step's name. */
+@media (max-width: 760px) {
+  .status { flex-direction: column; align-items: center; gap: 10px; }
+  .status > div { justify-content: center; gap: 12px !important; }
+  .status .result { flex: none; overflow: visible; text-align: center; }
+  /* The step's name holds the longest name's width, so the row does not shift as it changes. */
+  .status .op { min-width: 21ch; font-size: 11px; }
+  .status .ticks button { width: 22px; }
+}
 .ticks { display: flex; align-items: center; }
 .ticks button { width: 26px; height: 28px; padding: 0 2px; border: 0; background: transparent; cursor: pointer; display: grid; align-items: center; }
 .ticks button i { display: block; height: 3px; background: var(--ink-4); transition: background var(--dur) linear, height var(--dur) linear; }
@@ -207,6 +216,12 @@ section.sec { padding-block: 104px; }
 
 /* what it is */
 #what { padding-block: 16px 40px; }
+/* A phone's sections stand closer: the gaps keep their order, desktop's were for a wide page. */
+@media (max-width: 760px) {
+  .hero { padding-block: 24px 32px; }
+  section.sec { padding-block: 56px; }
+  #what { padding-block: 8px 0; }
+}
 .pillars { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; }
 .pillars h3 .num { text-transform: none; }
 .pillars > div { padding: 0 28px 0 0; display: grid; gap: 14px; align-content: start; }
@@ -291,6 +306,23 @@ tr.us .tbar [data-g="1e-7"] { --c: var(--accent); }
 }
 .tbar [data-g="quiet"] { --c: var(--gquiet); }
 @media (prefers-reduced-motion: reduce) { .tbar span { transition: opacity var(--dur) linear; } }
+/* A phone stacks each kernel: its name, the whole-width bar, then the three figures, each labelled
+   since the table's head is gone. */
+@media (max-width: 760px) {
+  .board { min-width: 0; }
+  .board thead { display: none; }
+  .board tr { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px 12px; padding: 20px 0; border-bottom: 1px solid var(--line); }
+  .board td { padding: 0; border: 0; text-align: left; }
+  .board td.k, .board .bar-cell { grid-column: 1 / -1; width: auto; min-width: 0; }
+  .board .p7::before, .board .px::before, .board .mt::before {
+    display: block; margin-bottom: 8px; font: 600 9px/1 var(--font-display); letter-spacing: .14em;
+    text-transform: uppercase; color: var(--fg-2);
+  }
+  .board .p7::before { content: "pass at 1e-7"; }
+  .board .px::before { content: "pass at 1e-5"; }
+  .board .mt::before { content: "speed"; }
+  .board .p7, .board .px, .board .mt b { font-size: 16px; }
+}
 .legend [data-g="1e-7"] { background: var(--g7); }
 .legend [data-g="1e-5"] { background: var(--g5); }
 .legend [data-g="1e-3"] { background: var(--g3); }
