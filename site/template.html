@@ -1,4 +1,7 @@
+<!doctype html>
+<html lang="en">
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Open-source B-rep CAD kernel in Rust | springrep</title>
 <meta name="description" content="An open-source B-rep geometry kernel in safe Rust with zero dependencies, covering booleans, fillets, sweeps, STEP, and exact measurement. MIT licensed.">
 <link rel="canonical" href="https://springcraft-ai.github.io/springrep/">
@@ -131,6 +134,11 @@ header.chrome { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 9
 .hbench a.more { justify-self: start; font-size: 12px; color: var(--ink-2); border-bottom: 1px solid var(--ink-3); transition: color var(--dur) linear; }
 .hbench a.more:hover { color: var(--ink-1); }
 @media (prefers-reduced-motion: reduce) { .hrow .t i { transition: none; } }
+@media (max-width: 520px) {
+  .hrow { grid-template-columns: 72px minmax(0, 1fr) 56px 54px; gap: 8px; }
+  .hrow .lic, .hcols > span:nth-child(2) { display: none; }
+  .status, .status > div { flex-wrap: wrap; row-gap: 8px; }
+}
 .hero-copy { display: grid; gap: 38px; }
 .hero .sub { font-size: clamp(22px, 2.2vw, 30px); letter-spacing: -.02em; line-height: 1; color: var(--ink-2); }
 .hero .sub b { color: var(--ink-1); font-weight: 700; }
@@ -213,7 +221,7 @@ section.sec { padding-block: 104px; }
 /* get started */
 .start { display: grid; grid-template-columns: minmax(0, 4fr) minmax(0, 8fr); gap: 40px; align-items: start; }
 .steps { display: grid; gap: 32px; }
-.step { display: grid; gap: 12px; }
+.step { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .step .h { display: flex; gap: 12px; align-items: baseline; }
 .step .h span { font: 400 12px/1 var(--font-machine); color: var(--fg-3); }
 .step .h b { font: 600 10px/1 var(--font-display); letter-spacing: .16em; text-transform: uppercase; }
@@ -319,7 +327,7 @@ footer { border-top: 1px solid var(--rule-soft); padding-block: 28px; }
   <div class="wrap row">
     <a class="brand" href="#top" aria-label="springrep, top of page"><img src="{{SC}}/assets/logo.svg" alt=""><span>spring<span class="rep">rep</span></span></a>
     <nav class="nav" aria-label="Links">
-      <a href="api/springrep/">API docs</a>
+      <a href="https://docs.rs/springrep" target="_blank" rel="noopener">API docs</a>
     </nav>
     <a class="btn sm gh" href="https://github.com/springcraft-ai/springrep" target="_blank" rel="noopener">{{GH}}github</a>
   </div>

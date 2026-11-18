@@ -22,9 +22,8 @@ dist folder here. The crate's manifest excludes this folder, so the site never s
 For a host that loads nothing from other origins, such as a sandboxed preview, `--preview` fetches
 the CDN files at build time and writes them into springrep.preview.html instead.
 
-The [pages workflow](../.github/workflows/pages.yml) publishes the page to GitHub Pages, with the
-crate's `cargo doc` output under `api/`, where the page's API docs link points. A local build has no
-`api/` folder, so that link only works on the published site.
+The [pages workflow](../.github/workflows/pages.yml) publishes the page to GitHub Pages. The API
+docs link points to docs.rs, which documents the version published on crates.io.
 
 The link-preview image (`og:image`) is a 1200×630 PNG of the hero with the finished part and without
 the leaderboard. It lives on the CDN under `springrep/`, with a content hash in its name so it can be
