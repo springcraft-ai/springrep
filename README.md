@@ -2,6 +2,8 @@
 
 An exact boundary-representation geometry kernel, in safe Rust with no dependencies.
 
+Website: <https://springcraft-ai.github.io/springrep/>
+
 ## Overview
 
 Solids are exact analytic and swept surfaces bounded by curves, held in a typed arena
