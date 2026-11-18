@@ -59,20 +59,3 @@ do without it.
 ## Licence of contributions
 
 Contributions are accepted under this repository's [MIT licence](../LICENSE).
-
-## Sign your commits
-
-Every commit in a pull request carries a `Signed-off-by` line with your name and email:
-
-```bash
-git commit -s
-```
-
-By adding it you certify the [Developer Certificate of Origin](https://developercertificate.org/),
-version 1.1: that you wrote the change or have the right to submit it under the licence above. A
-pull request with a commit that lacks the line fails the DCO check. To sign commits you have already
-made:
-
-```bash
-git rebase --signoff main
-```

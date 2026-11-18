@@ -23,4 +23,3 @@ explains each line.
       or documents.
 - [ ] It adds no compiled binary, no vendor SDK file, and no CAD file outside a fixture folder.
 - [ ] It adds no dependency.
-- [ ] Every commit carries a `Signed-off-by` line.

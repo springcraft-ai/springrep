@@ -28,7 +28,3 @@ expected value from one. An expected value is a closed form, or a figure the tes
 springrep has no dependencies: do not add one, not a build or development dependency either. A
 check fails a pull request whose `Cargo.lock` lists any package but springrep. No compiled binary,
 no vendor SDK file, and no CAD file outside a folder named `fixtures`.
-
-## Commits
-
-Sign every commit with `git commit -s`. A pull request with an unsigned commit fails the DCO check.
