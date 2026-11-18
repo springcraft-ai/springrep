@@ -333,7 +333,8 @@ tr.us .tbar [data-g="1e-7"] { --c: var(--accent); }
 .board .mt { cursor: default; }
 .board .mt b { border-bottom: 1px dotted var(--fg-3); }
 .tip {
-  position: fixed; z-index: 10; pointer-events: none; max-width: 280px; padding: 8px 10px;
+  position: fixed; z-index: 10; pointer-events: none; min-width: min-content; max-width: 280px;
+  padding: 8px 10px;
   background: #111214; border: 1px solid var(--line); color: var(--fg);
   font: 400 12px/1.45 var(--font-machine); opacity: 0; transition: opacity 120ms linear;
 }
@@ -1275,7 +1276,7 @@ document.addEventListener("pointermove", (e) => {
     tip.appendChild(small)
   }
   const r = tip.getBoundingClientRect()
-  tip.style.left = Math.min(e.clientX + 14, innerWidth - r.width - 8) + "px"
+  tip.style.left = Math.max(8, Math.min(e.clientX + 14, innerWidth - r.width - 8)) + "px"
   tip.style.top = (e.clientY + 18) + "px"
   tip.classList.add("on")
 })
