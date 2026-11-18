@@ -350,8 +350,7 @@ tr.us .tbar [data-g="1e-7"] { --c: var(--accent); }
 
 footer { border-top: 1px solid var(--rule-soft); padding-block: 28px; }
 .foot { display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; }
-.foot .logo { display: block; }
-.foot .logo img { height: 15px; width: auto; display: block; }
+.foot > img { height: 15px; width: auto; display: block; }
 .foot nav { display: flex; gap: 22px; flex-wrap: wrap; }
 .foot nav a { color: var(--ink-2); font-size: 12px; transition: color var(--dur) linear; }
 .foot nav a:hover { color: var(--ink-1); }
@@ -502,7 +501,7 @@ Things to know:
 
 <footer class="band">
   <div class="wrap foot">
-    <a class="logo" href="https://springcraft.ai/?utm_source=springrep&amp;utm_medium=referral&amp;utm_content=footer_logo" target="_blank" rel="noopener"><img src="{{SC}}/assets/logo-full.svg" alt="Springcraft"></a>
+    <img src="{{SC}}/assets/logo-full.svg" alt="Springcraft">
     <nav aria-label="Links">
       <a href="https://github.com/springcraft-ai/springrep" target="_blank" rel="noopener">github</a>
       <a href="https://github.com/springcraft-ai/brep-conformance" target="_blank" rel="noopener">brep-conformance</a>
