@@ -8,6 +8,7 @@ repository = "https://github.com/springcraft-ai/springrep"
 exclude = ["site"]
 
 [dependencies]
+libm = "0.2"
 
 # The tests build helical gears and blends: unoptimised they take minutes. Level 1 is nearly as
 # fast as 3 and compiles quicker.
