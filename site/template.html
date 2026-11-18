@@ -404,9 +404,9 @@ footer { border-top: 1px solid var(--rule-soft); padding-block: 28px; }
   <section class="sec band" id="what">
     <div class="wrap">
       <div class="pillars">
-        <div><h3>Accurate to <span class="num">1e-7</span> mm</h3><p>Surfaces are analytic or NURBS, never triangles, so volume, area and mass come straight from the exact shape. Every brep-conformance case holds to a ten-millionth of a millimetre.</p></div>
-        <div><h3>Valid, and named</h3><p>Each operation's output passes a validity check, or you get an error instead of a broken solid. Faces are named for the operation that made them, like <code class="mono">plate.end</code>, so a changed dimension never loses a fillet or a reference.</p></div>
-        <div><h3>Safe and fast</h3><p>100% Rust with no dependencies and no unsafe code. The fastest median case time on brep-conformance, and it compiles to WebAssembly to run in the browser.</p></div>
+        <div><h3>Exact to <span class="num">1e-7</span> mm</h3><p>Surfaces are analytic or NURBS, not meshes, so volume, area, and mass properties are computed from the real shape.</p></div>
+        <div><h3>Valid or a clear error</h3><p>Every result is checked for validity, and if it fails you get an error instead of a broken solid, so nothing downstream gets built on a bad shape.</p></div>
+        <div><h3>Fast and safe</h3><p>It has the fastest median case time on brep-conformance, with public results anyone can check. It's pure Rust with no dependencies and no unsafe code, and it compiles to WebAssembly.</p></div>
       </div>
     </div>
   </section>
