@@ -38,7 +38,18 @@ pub(crate) fn coedge_params(b: &Brep, c: CoedgeId, n: usize) -> Vec<f64> {
     let co = b.coedge(c);
     let (t0, t1) = b.edge(co.edge).range;
     let (a, z) = if co.reversed { (t1, t0) } else { (t0, t1) };
-    (0..=n).map(|i| a + (z - a) * i as f64 / n as f64).collect()
+    spaced(a, z, n)
+}
+
+/// `n + 1` parameters from `a` to `z`, evenly spaced, the last exactly `z`: an end an ulp inside
+/// the edge would be taken for an interior point.
+fn spaced(a: f64, z: f64, n: usize) -> Vec<f64> {
+    (0..=n)
+        .map(|i| match i {
+            _ if i == n => z,
+            _ => a + (z - a) * i as f64 / n as f64,
+        })
+        .collect()
 }
 
 /// Where an intersection curve turns back on itself over `range`: its direction at two
@@ -84,6 +95,24 @@ fn uv_gap(b: &Brep, face: FaceId, p: Vec2, q: Vec2) -> f64 {
     let wu = if a <= 1e-9 * c { c } else { a };
     let wv = if c <= 1e-9 * a { a } else { c };
     (p.x - q.x).abs() * wu + (p.y - q.y).abs() * wv
+}
+
+/// Whether the two images `p` and `q` of the tolerant vertex that coedge `c` ends at are apart by
+/// no more than its diameter, as the surface carries the step between them. Each parameter's own
+/// speed overstates that step where the parameters run askew, as on a blend's spline: there the
+/// two speeds partly cancel.
+fn within_vertex(b: &Brep, face: FaceId, c: CoedgeId, p: Vec2, q: Vec2) -> bool {
+    let tol = b.vertex_tolerance(b.coedge_end(c));
+    if tol <= tol::LINEAR {
+        return false;
+    }
+    carried(&b.face(face).surface, p, q) <= 2.0 * (tol - tol::LINEAR) + 10.0 * tol::LINEAR
+}
+
+/// The length of the step from `p` to `q` in parameters as the surface carries it at `p`.
+fn carried(s: &Surface, p: Vec2, q: Vec2) -> f64 {
+    let (_, su, sv) = s.d1(p.x, p.y);
+    (su * (q.x - p.x) + sv * (q.y - p.y)).norm()
 }
 
 /// Checks every solid of `b` as one shape: solids of one result may touch, at vertices or along
@@ -385,7 +414,9 @@ fn check_with(b: &Brep, each: bool, sides: Option<&[Option<usize>]>, crossing: b
                     let slowest = su.norm().min(sv.norm()).clamp(1e-12, 1.0);
                     spread *= std::f64::consts::SQRT_2 / slowest;
                 }
-                if uv_gap(b, f, end, start) > 10.0 * tol::LINEAR + spread {
+                if uv_gap(b, f, end, start) > 10.0 * tol::LINEAR + spread
+                    && !within_vertex(b, f, cs[k], end, start)
+                {
                     issue(format!(
                         "face {} ({}) loop {li} does not close in parameters after coedge {}: \
                          ({:.6}, {:.6}) to ({:.6}, {:.6})",
@@ -1181,6 +1212,39 @@ mod tests {
     use super::*;
     use crate::geom::{BSpline, IntersectionCurve, Plane};
     use crate::math::{Frame, Vec3};
+
+    #[test]
+    fn a_step_on_a_surface_whose_parameters_run_askew_is_measured_as_it_lies_in_space() {
+        // A plane whose parameters run nearly opposite ways, as a blend's spline can near a
+        // corner: a step along both moves the point little, though each alone moves it far.
+        let (su, sv) = (Vec3::new(10.0, 0.0, 0.0), Vec3::new(-9.9, 0.5, 0.0));
+        let net = vec![Vec3::ZERO, sv, su, su + sv];
+        let knots = vec![0.0, 0.0, 1.0, 1.0];
+        let s = Surface::Nurbs(Box::new(
+            crate::geom::NurbsSurface::new((1, 1), (knots.clone(), knots), (2, 2), net, None)
+                .unwrap(),
+        ));
+        let (p, q) = (Vec2::new(0.2, 0.3), Vec2::new(0.21, 0.31));
+        let apart = s.eval(p.x, p.y).dist(s.eval(q.x, q.y));
+        assert!((carried(&s, p, q) - apart).abs() < 1e-12, "{apart}");
+        // Each speed alone, as the strict test of a vertex weighs a gap, overstates it twentyfold.
+        let each = (q.x - p.x).abs() * su.norm() + (q.y - p.y).abs() * sv.norm();
+        assert!(each > 20.0 * apart);
+    }
+
+    #[test]
+    fn a_coedge_s_samples_end_exactly_at_its_edge_s_ends() {
+        // Run backwards, `a + (z - a) * 1` falls an ulp short of `z` for this range, and a last
+        // sample inside the edge is taken for an interior point: at a cone's apex its angle is
+        // then any angle, and the loop seems not to close.
+        let (t0, t1) = (-2.9474992780948828, 2.9474992780505347);
+        for (a, z) in [(t1, t0), (t0, t1)] {
+            for n in [1, 8, 64] {
+                let ts = spaced(a, z, n);
+                assert_eq!((ts[0], ts[n]), (a, z), "{n} steps from {a} to {z}");
+            }
+        }
+    }
 
     fn fitted(points: &[Vec3]) -> Curve {
         let plane = |z: Vec3| {
