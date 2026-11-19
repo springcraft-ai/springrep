@@ -34,8 +34,10 @@ const TRIALS: [(f64, f64); 8] = [
     (1e-12, 0.0625),
     (1e-12, 0.015625),
 ];
-/// The conjugate-gradient iterations without the residual halving after which a solve stops.
-const CG_STALL: usize = 200;
+/// The conjugate-gradient iterations without the residual halving after which a solve stops. A
+/// stall on these nearly singular systems is lasting: past this many, more iterations only cost
+/// time.
+const CG_STALL: usize = 25;
 /// The fewest knot spans a moved B-spline surface has along each parameter.
 const MIN_SPANS: usize = 16;
 

@@ -755,6 +755,7 @@ pub(super) fn heal(raw: &mut Raw) -> Result<Ranges> {
     let mut start = HashMap::new();
     let mut samples: HashMap<usize, Vec<Point3>> = HashMap::new();
     let mut settled = true;
+    let mut failed_before = usize::MAX;
     let with_surfaces = |surfaces: &[Surface]| {
         let mut r = file.clone();
         for (f, s) in r.faces.iter_mut().zip(surfaces) {
@@ -796,9 +797,12 @@ pub(super) fn heal(raw: &mut Raw) -> Result<Ranges> {
             }
         }
         // Moving the surfaces again helps only where the last move closed every gap or the
-        // failures reached new faces.
+        // failures reached new faces, and only from a start no worse than the last one: a move
+        // that missed its targets and left more failing than before only spreads to more faces.
+        let worse = round > 0 && !settled && failures.len() > failed_before;
+        failed_before = failures.len();
         let stuck = round > 0 && chosen.len() == before && !settled;
-        if round == ADJUST_ROUNDS || stuck {
+        if round == ADJUST_ROUNDS || stuck || worse {
             let (id, why) = match &failures[0] {
                 Failure::Vertex(v, why) => (
                     file.edges
