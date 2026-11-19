@@ -1,8 +1,9 @@
 //! What a viewer draws: each face meshed as its own triangles, with the exact surface's normal at
 //! every node, and the solid's drawn edges as polylines. Faces share no nodes, so shading is
-//! smooth within a face and creased where two faces meet. Faces come in the order of the solid's
-//! shells, the order the STEP writer writes them; edges leave out seams, poles and the edges
-//! between faces on one surface, which are no creases.
+//! smooth within a face and creased where two faces meet. At a pole or an apex each triangle has
+//! its own node, so a cone shades along each ruling up to its point. Faces come in the order of the
+//! solid's shells, the order the STEP writer writes them; edges leave out seams, poles and the
+//! edges between faces on one surface, which are no creases.
 //!
 //! [`glb`] packs the faces as one binary glTF mesh in millimetres, z up: `POSITION`, `NORMAL`, a
 //! `_FACE` attribute holding each node's face index, the triangles, and `COLOR_0` when each face
@@ -15,6 +16,7 @@ use crate::{
     Result,
     boolean::same_domain,
     math::Point3,
+    tol,
     topo::{Brep, EdgeId, FaceId},
 };
 
@@ -89,13 +91,33 @@ pub fn display_within(b: &Brep, linear: f64, edge_linear: f64) -> Result<Display
         {
             let mut t = [0u32; 3];
             for (k, &g) in tri.iter().enumerate() {
-                t[k] = *local.entry(g).or_insert_with(|| {
-                    let p = mesh.positions[g as usize];
-                    let uv = face.surface.project(p);
-                    let n = face.surface.normal(uv.x, uv.y);
-                    let n = if face.reversed { -n } else { n };
+                let p = mesh.positions[g as usize];
+                let uv = face.surface.project(p);
+                let (_, su, sv) = face.surface.d1(uv.x, uv.y);
+                let outward = |u: f64, v: f64| {
+                    let n = face.surface.normal(u, v);
+                    f32s(if face.reversed { -n } else { n })
+                };
+                // At a pole or an apex one parameter moves the point nowhere, and the normal can
+                // turn with the other: there the triangle takes its own node, with the normal
+                // along the triangle's middle, at the far side's midpoint's parameter.
+                if su.norm() <= tol::LINEAR || sv.norm() <= tol::LINEAR {
+                    let far =
+                        [tri[(k + 1) % 3], tri[(k + 2) % 3]].map(|j| mesh.positions[j as usize]);
+                    let mid = face.surface.project(far[0].lerp(far[1], 0.5));
+                    let n = if su.norm() <= sv.norm() {
+                        outward(mid.x, uv.y)
+                    } else {
+                        outward(uv.x, mid.y)
+                    };
                     out.positions.push(f32s(p));
-                    out.normals.push(f32s(n));
+                    out.normals.push(n);
+                    t[k] = (out.positions.len() - 1) as u32;
+                    continue;
+                }
+                t[k] = *local.entry(g).or_insert_with(|| {
+                    out.positions.push(f32s(p));
+                    out.normals.push(outward(uv.x, uv.y));
                     (out.positions.len() - 1) as u32
                 });
             }
@@ -321,5 +343,60 @@ mod tests {
             u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize,
             bytes.len()
         );
+    }
+
+    #[test]
+    fn each_triangle_at_a_cone_apex_has_its_own_node_with_the_normal_along_its_middle() {
+        // A cone of radius 2 and height 4, its apex up: the apex has no one normal, so each
+        // triangle there has its own apex node, whose normal is that of the ruling halfway across
+        // the triangle.
+        let frame = Frame::new(Vec3::ZERO, Vec3::Z, Vec3::X).unwrap();
+        let b = crate::primitive::cone(&frame, 2.0, 0.0, 4.0, "cone").unwrap();
+        let d = display_within(&b, 0.01, 0.01).unwrap();
+        let (cos, sin) = (4.0 / 20f32.sqrt(), 2.0 / 20f32.sqrt());
+        let mut fans = 0;
+        for f in &d.faces {
+            let apex = |i: u32| {
+                let p = f.positions[i as usize];
+                (p[0].hypot(p[1]) + (p[2] - 4.0).abs()) < 1e-5
+            };
+            for t in &f.triangles {
+                let Some(k) = (0..3).find(|&k| apex(t[k])) else {
+                    continue;
+                };
+                fans += 1;
+                let a = t[k];
+                assert_eq!(
+                    f.triangles.iter().filter(|s| s.contains(&a)).count(),
+                    1,
+                    "apex node {a} is shared"
+                );
+                let [p, q] = [t[(k + 1) % 3], t[(k + 2) % 3]].map(|j| f.positions[j as usize]);
+                let mid = ((p[1] + q[1]) / 2.0).atan2((p[0] + q[0]) / 2.0);
+                let want = [cos * mid.cos(), cos * mid.sin(), sin];
+                let n = f.normals[a as usize];
+                assert!(
+                    (0..3).all(|j| (n[j] - want[j]).abs() < 1e-5),
+                    "apex normal {n:?} against {want:?}"
+                );
+            }
+        }
+        assert!(fans >= 8, "{fans} triangles at the apex");
+    }
+
+    #[test]
+    fn a_ball_keeps_one_normal_at_each_pole() {
+        let frame = Frame::new(Vec3::ZERO, Vec3::Z, Vec3::X).unwrap();
+        let b = crate::primitive::sphere(&frame, 3.0, "ball").unwrap();
+        let d = display_within(&b, 0.01, 0.01).unwrap();
+        for f in &d.faces {
+            for (p, n) in f.positions.iter().zip(&f.normals) {
+                let r = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+                assert!(
+                    (0..3).all(|j| (n[j] - p[j] / r).abs() < 1e-5),
+                    "{p:?} has {n:?}"
+                );
+            }
+        }
     }
 }
