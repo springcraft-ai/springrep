@@ -754,7 +754,7 @@ fn fillet_variable_raw(s: &Brep, e: EdgeId, from: Point3, r_from: f64, r_to: f64
 
 /// `s` with each of `edges` rounded at its own radius, each edge with its tangent chain. Where
 /// three rounds of different radii meet at a corner of three planes the corner is closed without
-/// a crease ([`uneven`]); where rounds of different radii meet any other way they are mitred, the
+/// a crease (`uneven`); where rounds of different radii meet any other way they are mitred, the
 /// solid less every round's region.
 pub fn fillet_radii(s: &Brep, edges: &[(EdgeId, f64)], feature: &str) -> Result<Brep> {
     Ok(named_made(fillet_radii_raw(s, edges)?, feature))

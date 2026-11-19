@@ -1,4 +1,4 @@
-//! STEP AP214 import and export: [`write`] turns an arena's solids into an exchange file whose
+//! STEP AP214 import and export: [`write()`] turns an arena's solids into an exchange file whose
 //! faces carry their names, and [`write_assembly`] several parts placed by their instances;
 //! [`read`] turns a file's advanced B-reps, placed by its product structure, into checked kernel
 //! solids, each with its product's name and its colour.

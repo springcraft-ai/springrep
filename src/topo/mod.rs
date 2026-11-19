@@ -116,7 +116,7 @@ pub struct Solid {
     pub outer: usize,
 }
 
-/// What [`Brep::add_loop`] needs for each coedge.
+/// What `Brep::add_loop` needs for each coedge.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CoedgeSpec {
     pub edge: EdgeId,

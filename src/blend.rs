@@ -1,13 +1,13 @@
 //! Chamfers and fillets on solid edges. Each comes three ways: `fillet` and `chamfer` pick every
 //! edge where the surfaces of two named faces meet; the `_named` forms take [`EdgeName`]s, which
 //! can also pick only where the faces carrying the names meet; the `_edges` forms take the edges
-//! themselves. The shaped blends ([`shaped`]) take edges or faces.
+//! themselves. The shaped blends (`shaped`) take edges or faces.
 //!
 //! A blend's material is the region between the edge and the blend face: a prism along a straight
 //! edge, or a ring (whole or a sector) about a circular one, of the cross-section that the two
 //! faces and the chamfer line or fillet arc bound, swept into a tool solid whose sides lie on the
 //! two faces, so the blend surface's tangent contact lies on the tool's own edges. The tools' blend
-//! faces are sewn into the body ([`sew`]); where they do not close up that way each region is cut
+//! faces are sewn into the body (`sew`); where they do not close up that way each region is cut
 //! away at a convex edge and added at a concave one with the kernel's booleans instead.
 //!
 //! Each piece ends where its edge does. Pieces whose edges continue each other tangentially share
@@ -15,7 +15,7 @@
 //! of each other, are trimmed on the plane between them; two convex pieces at a corner each leaves
 //! through the other's wall into air run on through it, and their crease is where the two cuts
 //! meet; a piece whose edge runs into one other face is extended past it and trimmed by that face's
-//! surface, and by the faces past any short edge its contact runs beyond ([`run`]); on a curved
+//! surface, and by the faces past any short edge its contact runs beyond (`run`); on a curved
 //! face met at a glancing angle it runs on only until that surface takes in its whole section. A
 //! concave piece whose strip is wider than its face runs over the face's convex edge and is
 //! trimmed by the face past it. Three fillets

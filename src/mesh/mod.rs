@@ -1,7 +1,7 @@
 //! Tessellation. Each edge is discretised once and both its faces use those points, so the mesh of
 //! a valid solid is watertight by construction. Each face is a constrained Delaunay triangulation
 //! of those points in its parameter plane, refined until every triangle is within the deflection
-//! limits of the surface ([`face`]).
+//! limits of the surface (`face`).
 
 pub(crate) mod bvh;
 mod cdt;

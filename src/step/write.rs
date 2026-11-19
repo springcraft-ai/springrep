@@ -999,7 +999,7 @@ pub fn write(b: &Brep, name: &str) -> Result<String> {
     write_faces(b, name).map(|(text, _)| text)
 }
 
-/// [`write`], and the faces in the order the file holds them: the n-th `ADVANCED_FACE` of the
+/// [`write()`], and the faces in the order the file holds them: the n-th `ADVANCED_FACE` of the
 /// file is the n-th face here. A reader that keeps the file's order can tell its faces by it.
 pub fn write_faces(b: &Brep, name: &str) -> Result<(String, Vec<FaceId>)> {
     let mut w = Writer::new();

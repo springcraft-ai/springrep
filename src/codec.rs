@@ -1,6 +1,6 @@
 //! A compact binary encoding of built geometry, for build states kept on disk. Numbers are written
 //! as their bits, so a decoded solid is the encoded one exactly. A struct is encoded field by field
-//! through [`fields!`], which names every field without `..`: a field added to the struct and not
+//! through `fields!`, which names every field without `..`: a field added to the struct and not
 //! to its encoding does not compile.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};

@@ -2,16 +2,16 @@
 //!
 //! The steps, each in its own module:
 //!
-//! 1. Every edge of one solid is intersected with every face of the other ([`csi`]), coplanar edges
-//!    with each other, and every face pair's surfaces with each other ([`ssi`], [`march`]). Each
+//! 1. Every edge of one solid is intersected with every face of the other (`csi`), coplanar edges
+//!    with each other, and every face pair's surfaces with each other (`ssi`, `march`). Each
 //!    meeting point becomes a vertex, shared by every curve through it.
 //! 2. Every edge and intersection curve is split at every vertex on it, and an edge lying on a face
 //!    of the other solid cuts it. Pieces that run along each other are one edge, so both faces of
 //!    every edge use the same one.
 //! 3. Each face is split by the intersection pieces inside it, and by the boundary of any face of
-//!    the other solid that lies on its surface ([`arrange`]).
-//! 4. Each piece of face is classified inside, outside, or on the other solid ([`classify`]); the
-//!    operation selects pieces, and [`sew`] joins them, merges faces on one surface, and checks the
+//!    the other solid that lies on its surface (`arrange`).
+//! 4. Each piece of face is classified inside, outside, or on the other solid (`classify`); the
+//!    operation selects pieces, and `sew` joins them, merges faces on one surface, and checks the
 //!    result.
 
 mod arrange;
