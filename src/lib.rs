@@ -1,5 +1,4 @@
-//! An exact boundary-representation kernel. The representation, the tolerance policy and
-//! the history rules are in `doc/design.md`.
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 #![warn(unreachable_pub)]
 
