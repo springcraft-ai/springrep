@@ -1312,7 +1312,8 @@ function drawBoard() {
 }
 
 const LIVE = "https://springcraft-ai.github.io/brep-conformance/leaderboard.json"
-const shortLicense = (spdx) => spdx.replace(/ WITH .*$/, "").replace(/-only|-or-later/g, "").replace(/ OR /g, "/")
+const shortLicense = (spdx) =>
+  spdx.replace(/ WITH .*$/, "").replace(/-only|-or-later/g, "").replace(/ OR /g, "/")
 const shortMs = (v) => v < 100 ? Math.round(v * 10) / 10 : Math.round(v)
 // The results site's leaderboard.json in this page's terms. Throws on data the board cannot draw,
 // which leaves the copy above in place.
@@ -1322,7 +1323,7 @@ function fromLive(d) {
     label: k.kernel,
     ver: k.version,
     license: shortLicense(k.license),
-    n: [at(k, "1e-7"), at(k, "1e-6"), at(k, "1e-5"), at(k, "1e-3"), at(k, "fail"), at(k, "unsupported"),
+    n: [...["1e-7", "1e-6", "1e-5", "1e-3", "fail", "unsupported"].map((g) => at(k, g)),
       at(k, "refused", "timeout", "crash")],
     ms: [k.time.median, k.time.q1, k.time.q3].map(shortMs),
     ...(k.maintainers ? { us: true } : {}),
@@ -1338,7 +1339,7 @@ function fromLive(d) {
 // Taken before drawing, which adds each row's rate to it.
 const drawn = JSON.stringify([BOARD, RUN, TOTAL])
 drawBoard()
-fetch(LIVE, { signal: AbortSignal.timeout(8000) })
+fetch(LIVE)
   .then((r) => r.ok ? r.json() : Promise.reject(new Error("leaderboard.json: " + r.status)))
   .then((d) => {
     const live = fromLive(d)
