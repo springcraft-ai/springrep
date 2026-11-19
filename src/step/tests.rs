@@ -1769,3 +1769,110 @@ fn loose_faces_a_hair_apart_and_some_inside_out_sew_into_their_solid() {
     assert_eq!(b.face_count(), 4);
     assert!((measure::volume(&b) - 1.0 / 6.0).abs() < 1e-4);
 }
+
+/// A cylinder of radius 2 and height 3 whose side is a rational spline surface, straight along its
+/// axis and an exact circle round it, so periodic round it: its side is bounded by the two circles
+/// alone, a band with no seam, between two plane ends. `top_first` lists the top circle's bound
+/// first, so that the seam's first end comes last along the surface's iso line.
+fn spline_band_cylinder(top_first: bool) -> String {
+    let (r, h, w) = (2.0, 3.0, std::f64::consts::FRAC_1_SQRT_2);
+    let round = [
+        (1.0, 0.0),
+        (1.0, 1.0),
+        (0.0, 1.0),
+        (-1.0, 1.0),
+        (-1.0, 0.0),
+        (-1.0, -1.0),
+        (0.0, -1.0),
+        (1.0, -1.0),
+        (1.0, 0.0),
+    ];
+    let mut out = String::new();
+    let mut ids = [Vec::new(), Vec::new()];
+    for (row, z) in [0.0, h].iter().enumerate() {
+        for (k, (x, y)) in round.iter().enumerate() {
+            let id = 100 + 10 * row + k;
+            out += &format!("#{id}=CARTESIAN_POINT('',({},{},{z:?}));\n", x * r, y * r);
+            ids[row].push(format!("#{id}"));
+        }
+    }
+    let weights: Vec<String> = (0..9)
+        .map(|k| {
+            if k % 2 == 0 {
+                "1.".into()
+            } else {
+                format!("{w:?}")
+            }
+        })
+        .collect();
+    let row = |i: usize| format!("({})", ids[i].join(","));
+    let wrow = format!("({})", weights.join(","));
+    out += &format!(
+        "#1=(BOUNDED_SURFACE() B_SPLINE_SURFACE(1,2,({},{}),.UNSPECIFIED.,.F.,.T.,.F.) \
+         B_SPLINE_SURFACE_WITH_KNOTS((2,2),(3,2,2,2,3),(0.,1.),(0.,0.25,0.5,0.75,1.),.UNSPECIFIED.) \
+         GEOMETRIC_REPRESENTATION_ITEM() RATIONAL_B_SPLINE_SURFACE(({wrow},{wrow})) \
+         REPRESENTATION_ITEM('') SURFACE());\n",
+        row(0),
+        row(1)
+    );
+    let bounds = if top_first { "#25,#24" } else { "#24,#25" };
+    out += &format!(
+        "#2=DIRECTION('',(0.,0.,1.));
+#3=DIRECTION('',(1.,0.,0.));
+#4=CARTESIAN_POINT('',(0.,0.,0.));
+#5=CARTESIAN_POINT('',(0.,0.,{h:?}));
+#6=AXIS2_PLACEMENT_3D('',#4,#2,#3);
+#7=AXIS2_PLACEMENT_3D('',#5,#2,#3);
+#8=CIRCLE('',#6,{r:?});
+#9=CIRCLE('',#7,{r:?});
+#10=CARTESIAN_POINT('',({r:?},0.,0.));
+#11=CARTESIAN_POINT('',({r:?},0.,{h:?}));
+#12=VERTEX_POINT('',#10);
+#13=VERTEX_POINT('',#11);
+#14=EDGE_CURVE('',#12,#12,#8,.T.);
+#15=EDGE_CURVE('',#13,#13,#9,.T.);
+#20=ORIENTED_EDGE('',*,*,#14,.T.);
+#21=EDGE_LOOP('',(#20));
+#22=ORIENTED_EDGE('',*,*,#15,.F.);
+#23=EDGE_LOOP('',(#22));
+#24=FACE_BOUND('',#21,.T.);
+#25=FACE_BOUND('',#23,.T.);
+#26=ADVANCED_FACE('',({bounds}),#1,.F.);
+#30=ORIENTED_EDGE('',*,*,#14,.F.);
+#31=EDGE_LOOP('',(#30));
+#32=FACE_OUTER_BOUND('',#31,.T.);
+#33=PLANE('',#6);
+#34=ADVANCED_FACE('',(#32),#33,.F.);
+#40=ORIENTED_EDGE('',*,*,#15,.T.);
+#41=EDGE_LOOP('',(#40));
+#42=FACE_OUTER_BOUND('',#41,.T.);
+#43=PLANE('',#7);
+#44=ADVANCED_FACE('',(#42),#43,.T.);
+#50=CLOSED_SHELL('',(#26,#34,#44));
+#51=MANIFOLD_SOLID_BREP('',#50);
+"
+    );
+    format!("ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\n{out}ENDSEC;\nEND-ISO-10303-21;\n")
+}
+
+#[test]
+fn a_band_of_a_spline_surface_closed_round_one_parameter_is_read() {
+    // The side's two circles each go once round the surface's period, opposite ways; the reader
+    // joins them with a seam along the surface, as it does for a cylinder of its own.
+    for top_first in [false, true] {
+        let imp = read(spline_band_cylinder(top_first).as_bytes(), "band").unwrap();
+        assert!(imp.rejected.is_empty(), "{top_first}: {:?}", imp.rejected);
+        // The file is exact: it reads with nothing healed and no tolerance widened.
+        assert!(
+            imp.healed.is_empty() && imp.tolerant.is_empty(),
+            "{top_first}: healed {:?}, tolerant {:?}",
+            imp.healed,
+            imp.tolerant
+        );
+        let b = imp.brep;
+        assert_eq!(b.solid_ids().count(), 1);
+        assert!(check::check(&b).is_empty(), "{:?}", check::check(&b));
+        let want = PI * 4.0 * 3.0;
+        assert!((measure::volume(&b) - want).abs() < 1e-6 * want);
+    }
+}

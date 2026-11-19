@@ -1046,6 +1046,43 @@ impl NurbsSurface {
         (s, su, sv)
     }
 
+    /// The surface along one parameter with the other held at `at`, as a curve of its own: along
+    /// `v` with `u = at` when `along_v`, else along `u` with `v = at`. Each control point of the
+    /// curve is a row of the net, in homogeneous coordinates, blended by the held parameter's basis
+    /// there, so the curve is the surface exactly.
+    pub fn iso_curve(&self, along_v: bool, at: f64) -> NurbsCurve {
+        let (held, free, period) = if along_v {
+            (&self.bu, &self.bv, self.u_period)
+        } else {
+            (&self.bv, &self.bu, self.v_period)
+        };
+        let at = held.wrap(at, period);
+        let (p, i) = (held.degree, held.span(at));
+        let funs = &held.ders::<M>(i, at, 0)[0];
+        let index = |h: usize, f: usize| {
+            if along_v {
+                h * self.bv.n + f
+            } else {
+                f * self.bv.n + h
+            }
+        };
+        let mut ctrl = Vec::with_capacity(free.n);
+        let mut weights = Vec::with_capacity(free.n);
+        for f in 0..free.n {
+            let (mut sum, mut w) = (Vec3::ZERO, 0.0);
+            for (k, n) in funs.iter().enumerate().take(p + 1) {
+                let idx = index(i - p + k, f);
+                let wk = self.weights.as_ref().map_or(1.0, |ws| ws[idx]) * n;
+                sum += self.ctrl[idx] * wk;
+                w += wk;
+            }
+            ctrl.push(sum / w);
+            weights.push(w);
+        }
+        NurbsCurve::new(free.degree, free.knots.clone(), ctrl, Some(weights))
+            .expect("a row of a valid net is a valid curve")
+    }
+
     /// The surface along one parameter with the other held at `at`: [`IsoLine::d1`] gives what
     /// [`NurbsSurface::d1`] does there, the held parameter's basis worked out once.
     #[allow(clippy::needless_range_loop)]
@@ -2196,6 +2233,38 @@ pub(crate) mod tests {
                             && on.to_array()[k] <= bb.max.to_array()[k] + 1e-9
                     });
                     assert!(inside, "{on:?} outside {bb:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_iso_curve_is_the_surface_along_one_parameter() {
+        let mut surfaces = vec![warped()];
+        surfaces.extend(uneven());
+        for s in surfaces {
+            let ((u0, u1), (v0, v1)) = s.domain();
+            let size = s.eval(u0, v0).norm() + 1.0;
+            for along_v in [true, false] {
+                for a in [0.0, 0.3, 0.5, 0.75, 1.0] {
+                    let at = if along_v {
+                        u0 + (u1 - u0) * a
+                    } else {
+                        v0 + (v1 - v0) * a
+                    };
+                    let c = s.iso_curve(along_v, at);
+                    let (t0, t1) = c.domain();
+                    assert_eq!((t0, t1), if along_v { (v0, v1) } else { (u0, u1) });
+                    for b in [0.0, 0.2, 0.45, 0.5, 0.9, 1.0] {
+                        let t = t0 + (t1 - t0) * b;
+                        let want = if along_v {
+                            s.eval(at, t)
+                        } else {
+                            s.eval(t, at)
+                        };
+                        let off = c.eval(t).dist(want);
+                        assert!(off < 1e-12 * size, "{off} at {at}, {t}, along v {along_v}");
+                    }
                 }
             }
         }

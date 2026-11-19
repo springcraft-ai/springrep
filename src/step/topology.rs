@@ -274,6 +274,14 @@ fn join_contacts(mut raw: Raw) -> Raw {
 }
 
 /// The vertex a use starts at.
+/// A point's angle about `frame`'s axis.
+fn about(frame: &Frame) -> impl Fn(Point3) -> f64 + '_ {
+    move |p| {
+        let l = frame.to_local(p);
+        l.y.atan2(l.x)
+    }
+}
+
 fn use_start(raw: &Raw, u: &Use) -> usize {
     let e = &raw.edges[u.edge];
     if u.reversed { e.end } else { e.start }
@@ -537,11 +545,15 @@ impl<'g, 'a> Reader<'g, 'a> {
         v
     }
 
-    /// Where `uses` cross the angle `at` about `frame`'s axis, as an edge and its parameter.
-    fn crossing(&self, frame: &Frame, uses: &[Use], at: f64) -> Option<(usize, f64)> {
+    /// Where `uses` cross the angle `at`, as an edge and its parameter, `angle` giving a point's.
+    fn crossing(
+        &self,
+        angle: &dyn Fn(Point3) -> f64,
+        uses: &[Use],
+        at: f64,
+    ) -> Option<(usize, f64)> {
         let off = |p: Point3| {
-            let l = frame.to_local(p);
-            (l.y.atan2(l.x) - at + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+            (angle(p) - at + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
                 - std::f64::consts::PI
         };
         for u in uses {
@@ -577,10 +589,11 @@ impl<'g, 'a> Reader<'g, 'a> {
     /// direction; `None` where an edge's span between its vertices cannot be found, or where the
     /// loop passes over the axis, as a seam through a pole does, and its angle jumps.
     fn swept(&self, frame: &Frame, uses: &[Use]) -> Option<f64> {
-        let angle = |p: Point3| {
-            let l = frame.to_local(p);
-            l.y.atan2(l.x)
-        };
+        self.swept_by(&about(frame), uses)
+    }
+
+    /// The angle `uses` sweep, `angle` giving a point's: [`Reader::swept`] about any measure of it.
+    fn swept_by(&self, angle: &dyn Fn(Point3) -> f64, uses: &[Use]) -> Option<f64> {
         let mut total = 0.0;
         for u in uses {
             let e = &self.raw.edges[u.edge];
@@ -666,7 +679,7 @@ impl<'g, 'a> Reader<'g, 'a> {
                 // there, in every face that uses it.
                 let va = use_start(&self.raw, &a[0]);
                 let la = frame.to_local(self.raw.points[va]);
-                let (e, t) = self.crossing(&frame, b, la.y.atan2(la.x))?;
+                let (e, t) = self.crossing(&about(&frame), b, la.y.atan2(la.x))?;
                 let v = self.split_edge(e, t, bounds);
                 let (a, b) = (bounds[ka].1.clone(), bounds[kb].1.clone());
                 let ia = a.iter().position(|u| use_start(&self.raw, u) == va)?;
@@ -727,6 +740,109 @@ impl<'g, 'a> Reader<'g, 'a> {
         out.push(Use {
             edge: seam,
             reversed: true,
+        });
+        bounds.remove(ka.max(kb));
+        bounds.remove(ka.min(kb));
+        bounds.insert(0, (true, out));
+        Some(())
+    }
+
+    /// A spline face closed round one of its parameters with two loops that each go once round
+    /// it, the ways opposite, and no seam: [`Reader::seamed_band`] with that parameter for the
+    /// angle, and the surface's own iso curve for the seam. `None` when the face is not such a
+    /// band.
+    fn seamed_spline_band(
+        &mut self,
+        id: u64,
+        surface: &Surface,
+        bounds: &mut Vec<(bool, Vec<Use>)>,
+    ) -> Option<()> {
+        let Surface::Nurbs(n) = surface else {
+            return None;
+        };
+        let (in_v, period) = match (surface.u_period(), surface.v_period()) {
+            (None, Some(p)) => (true, p),
+            (Some(p), None) => (false, p),
+            _ => return None,
+        };
+        const TAU: f64 = std::f64::consts::TAU;
+        let angle = |p: Point3| {
+            let uv = surface.project(p);
+            (if in_v { uv.y } else { uv.x }) / period * TAU
+        };
+        let full = |w: f64| (w.abs() - TAU).abs() < 0.1;
+        let mut winding = Vec::new();
+        for (k, (_, uses)) in bounds.iter().enumerate() {
+            let w = self.swept_by(&angle, uses)?;
+            if full(w) {
+                winding.push((k, w));
+            }
+        }
+        let &[(ka, wa), (kb, wb)] = winding.as_slice() else {
+            return None;
+        };
+        if wa * wb >= 0.0 {
+            return None;
+        }
+        // The seam runs where it is farthest round from every vertex of the two loops, the middle
+        // of the widest gap between their angles, so that splitting a loop for it there leaves no
+        // sliver beside a vertex a file placed a little off the line.
+        let mut angles: Vec<f64> = [ka, kb]
+            .iter()
+            .flat_map(|&k| bounds[k].1.iter())
+            .map(|u| angle(self.raw.points[use_start(&self.raw, u)]).rem_euclid(TAU))
+            .collect();
+        angles.sort_by(f64::total_cmp);
+        let at = (0..angles.len())
+            .map(|i| {
+                let (lo, hi) = (angles[i], angles[(i + 1) % angles.len()]);
+                let gap = (hi - lo).rem_euclid(TAU);
+                let gap = if gap == 0.0 { TAU } else { gap };
+                (gap, lo + 0.5 * gap)
+            })
+            .max_by(|x, y| x.0.total_cmp(&y.0))?
+            .1;
+        let seam = Curve::Nurbs(Box::new(n.iso_curve(!in_v, at / TAU * period)));
+        let on_seam = |raw: &Raw, u: &Use| {
+            let q = raw.points[use_start(raw, u)];
+            seam.eval(param_of(&seam, q)).dist(q) <= tol::LINEAR
+        };
+        // A vertex of each loop on the seam, the loop's edge split there where it has none.
+        let mut ends = [0usize; 2];
+        for (slot, k) in [ka, kb].into_iter().enumerate() {
+            ends[slot] = match bounds[k].1.iter().find(|u| on_seam(&self.raw, u)) {
+                Some(u) => use_start(&self.raw, u),
+                None => {
+                    let uses = bounds[k].1.clone();
+                    let (e, t) = self.crossing(&angle, &uses, at)?;
+                    self.split_edge(e, t, bounds)
+                }
+            };
+        }
+        let [va, vb] = ends;
+        let (a, b) = (bounds[ka].1.clone(), bounds[kb].1.clone());
+        let ia = a.iter().position(|u| use_start(&self.raw, u) == va)?;
+        let ib = b.iter().position(|u| use_start(&self.raw, u) == vb)?;
+        // An edge runs the way its curve does: from whichever end comes first along the iso.
+        let back = param_of(&seam, self.raw.points[va]) > param_of(&seam, self.raw.points[vb]);
+        let (start, end) = if back { (vb, va) } else { (va, vb) };
+        self.raw.edges.push(RawEdge {
+            id,
+            curve: seam,
+            start,
+            end,
+            faces: Vec::new(),
+        });
+        let edge = self.raw.edges.len() - 1;
+        let mut out: Vec<Use> = a[ia..].iter().chain(&a[..ia]).copied().collect();
+        out.push(Use {
+            edge,
+            reversed: back,
+        });
+        out.extend(b[ib..].iter().chain(&b[..ib]).copied());
+        out.push(Use {
+            edge,
+            reversed: !back,
         });
         bounds.remove(ka.max(kb));
         bounds.remove(ka.min(kb));
@@ -902,6 +1018,7 @@ impl<'g, 'a> Reader<'g, 'a> {
         if self
             .seamed_band(id, &surface, reversed, &mut bounds)
             .is_none()
+            && self.seamed_spline_band(id, &surface, &mut bounds).is_none()
             && apexes.is_empty()
         {
             self.capped(id, &mut surface, reversed, &mut bounds)?;
