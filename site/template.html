@@ -1167,14 +1167,15 @@ document.querySelectorAll("[data-copy-from]").forEach((b) => b.addEventListener(
   copyText(document.getElementById(b.dataset.copyFrom).textContent, b)
 }))
 
-/* The verified benchmark run of 11-18-2026, as the brep-conformance results site computes it from
-   the reports in that repository's reports/ folder. n: cases by tightest tolerance passed (1e-7,
-   1e-6, 1e-5, 1e-3), then fail, unsupported, and refused/timeout/crash. ms: median, first and third
-   quartile per case, on the cases every kernel answered. */
-const BOARD = [
+/* The leaderboard, drawn from this copy of the verified run of 11-18-2026 and again from the
+   results site's current one once that has loaded, so it follows a new run without a change here.
+   n: cases by tightest tolerance passed (1e-7, 1e-6, 1e-5, 1e-3), then fail, unsupported, and
+   refused/timeout/crash. ms: median, first and third quartile per case, on the cases every kernel
+   answered. */
+let BOARD = [
   { label: "springrep", ver: "1.0.0", license: "MIT", n: [3487, 0, 0, 0, 0, 0, 0], ms: [87.3, 9.2, 260], us: true },
   { label: "opencascade", ver: "8.0.1.1.0", license: "LGPL-2.1", n: [2823, 27, 3, 5, 304, 271, 54], ms: [195, 45.6, 434] },
-  { label: "arris", ver: "0.10.0", license: "MIT/Apache", n: [2111, 0, 0, 0, 85, 839, 452], ms: [210, 56.7, 989] },
+  { label: "arris", ver: "0.10.0", license: "MIT/Apache-2.0", n: [2111, 0, 0, 0, 85, 839, 452], ms: [210, 56.7, 989] },
   { label: "solidcore", ver: "1.0.1", license: "Apache-2.0", n: [1727, 10, 2, 0, 500, 1110, 138], ms: [2093, 109, 8611] },
 ]
 const GRADES = ["1e-7", "1e-6", "1e-5", "1e-3", "fail", "unsupported", "quiet"]
@@ -1190,120 +1191,162 @@ const BANDS = [
 const bandCount = (k, b) => b.of.reduce((a, i) => a + k.n[i], 0)
 // The run the board shows, in the report's own fields (suite, run.unix, environment, and
 // kernel.tolerance, the precision the cases were run and graded to).
-const RUN = { suite: "1.0.0", unix: 1794975567, os: "linux", arch: "x86_64", cores: 24, tolerance: 1e-7 }
-const TOTAL = 3487
-const [ry, rm, rd] = new Date(RUN.unix * 1000).toISOString().slice(0, 10).split("-")
-const runDate = rm + "-" + rd + "-" + ry
-document.getElementById("hrun").textContent = runDate + " run"
-document.getElementById("run-id").textContent = runDate + " run · brep-conformance " + RUN.suite +
-  " · " + TOTAL + " cases · " + RUN.os + " " + RUN.arch + ", " + RUN.cores + " cores · " +
-  RUN.tolerance.toExponential() + " mm precision"
-const atOrBetter = (k, i) => k.n.slice(0, i + 1).reduce((a, b) => a + b, 0) / TOTAL * 100
-BOARD.forEach((k) => { k.rate = atOrBetter(k, 0) })
-const hbench = document.getElementById("hbench")
-hbench.style.display = "grid"
-hbench.style.gap = "10px"
-BOARD.forEach((k) => {
-  const row = document.createElement("div")
-  row.className = "hrow" + (k.us ? " us" : "")
-  row.innerHTML = '<span class="n"></span><span class="lic"></span><span class="t"><i></i></span><b>' + k.rate.toFixed(1) + "%</b>" +
-    '<span class="ms">' + k.ms[0] + " ms</span>"
-  row.querySelector(".n").textContent = k.label
-  row.querySelector(".lic").textContent = k.license
-  row.dataset.tip = k.label + " " + k.ver + " · " + k.license + "|" + k.n[0] + " of " + TOTAL +
-    " cases hold to 1e-7 mm. Median " + k.ms[0] + " ms per case; half take " + k.ms[1] + " to " +
-    k.ms[2] + " ms."
-  hbench.appendChild(row)
-})
-requestAnimationFrame(() => requestAnimationFrame(() => {
-  hbench.querySelectorAll(".hrow .t i").forEach((el, i) => { el.style.width = BOARD[i].rate + "%" })
-}))
-const board = document.getElementById("board")
-const pct = (v) => v.toFixed(1) + "%"
-BOARD.forEach((k) => {
-  const tr = document.createElement("tr")
-  if (k.us) tr.className = "us"
-  // Each band's stripe is revealed after the ones before it, so the meter fills left to right.
-  let cum = 0
-  const segs = BANDS.map((b) => {
-    const c = bandCount(k, b)
-    if (!c) return ""
-    const delay = Math.round(cum / TOTAL * 1100)
-    cum += c
-    return '<span data-g="' + b.g + '" style="flex:' + c + " 0 0;transition-delay:0ms," + delay + 'ms"></span>'
-  }).join("")
-  tr.innerHTML =
-    '<td class="k"><b></b><small></small></td>' +
-    '<td class="bar-cell"><div class="tbar" role="img"></div><div class="ruler"><span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div></td>' +
-    '<td class="p7"><span data-to="' + atOrBetter(k, 0) + '" data-dp="1" data-unit="%"></span></td>' +
-    '<td class="px"><span data-to="' + atOrBetter(k, 2) + '" data-dp="1" data-unit="%"></span></td>' +
-    '<td class="mt"><b><span data-to="' + k.ms[0] + '" data-dp="' + (k.ms[0] < 100 ? 1 : 0) +
-    '"></span><small>ms</small></b></td>'
-  tr.querySelector(".k b").textContent = k.label
-  tr.querySelector(".k small").textContent = k.ver + " · " + k.license
-  const bar = tr.querySelector(".tbar")
-  bar.innerHTML = segs
-  const shown = BANDS.filter((b) => bandCount(k, b))
-  bar.setAttribute("aria-label", shown.map((b) => b.name + " " + bandCount(k, b)).join(", ") + " of " + TOTAL)
-  const spans = [...bar.children]
-  const cell = tr.querySelector(".bar-cell")
-  cell.dataset.tip = ""
-  cell.tipFor = (e) => {
-    let hot = 0
-    let best = Infinity
-    spans.forEach((s, i) => {
-      const r = s.getBoundingClientRect()
-      const d = e.clientX < r.left ? r.left - e.clientX : e.clientX > r.right ? e.clientX - r.right : 0
-      if (d < best) { best = d; hot = i }
-    })
-    spans.forEach((s, i) => s.classList.toggle("hot", i === hot))
-    bar.classList.add("picking")
-    const w = Math.max(...shown.map((b) => b.name.length))
-    const rows = shown.map((b, i) => {
+let RUN = { suite: "1.0.0", unix: 1794975567, os: "linux", arch: "x86_64", cores: 24, tolerance: 1e-7 }
+let TOTAL = 3487
+function drawBoard() {
+  const [ry, rm, rd] = new Date(RUN.unix * 1000).toISOString().slice(0, 10).split("-")
+  const runDate = rm + "-" + rd + "-" + ry
+  document.getElementById("hrun").textContent = runDate + " run"
+  document.getElementById("run-id").textContent = runDate + " run · brep-conformance " + RUN.suite +
+    " · " + TOTAL + " cases · " + RUN.os + " " + RUN.arch + ", " + RUN.cores + " cores · " +
+    RUN.tolerance.toExponential() + " mm precision"
+  const atOrBetter = (k, i) => k.n.slice(0, i + 1).reduce((a, b) => a + b, 0) / TOTAL * 100
+  BOARD.forEach((k) => { k.rate = atOrBetter(k, 0) })
+  const hbench = document.getElementById("hbench")
+  hbench.replaceChildren()
+  hbench.style.display = "grid"
+  hbench.style.gap = "10px"
+  BOARD.forEach((k) => {
+    const row = document.createElement("div")
+    row.className = "hrow" + (k.us ? " us" : "")
+    row.innerHTML = '<span class="n"></span><span class="lic"></span><span class="t"><i></i></span><b>' + k.rate.toFixed(1) + "%</b>" +
+      '<span class="ms">' + k.ms[0] + " ms</span>"
+    row.querySelector(".n").textContent = k.label
+    row.querySelector(".lic").textContent = k.license
+    row.dataset.tip = k.label + " " + k.ver + " · " + k.license + "|" + k.n[0] + " of " + TOTAL +
+      " cases hold to 1e-7 mm. Median " + k.ms[0] + " ms per case; half take " + k.ms[1] + " to " +
+      k.ms[2] + " ms."
+    hbench.appendChild(row)
+  })
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    hbench.querySelectorAll(".hrow .t i").forEach((el, i) => { el.style.width = BOARD[i].rate + "%" })
+  }))
+  const board = document.getElementById("board")
+  board.replaceChildren()
+  const pct = (v) => v.toFixed(1) + "%"
+  BOARD.forEach((k) => {
+    const tr = document.createElement("tr")
+    if (k.us) tr.className = "us"
+    // Each band's stripe is revealed after the ones before it, so the meter fills left to right.
+    let cum = 0
+    const segs = BANDS.map((b) => {
       const c = bandCount(k, b)
-      const line = (i === hot ? "▸ " : "  ") + b.name.padEnd(w) + String(c).padStart(5) +
-        pct(c / TOTAL * 100).padStart(8)
-      return i === hot ? "<b>" + line + "</b>" : line
-    })
-    return [k.label + " " + k.ver + " · " + shown[hot].says, rows.join("\n")]
-  }
-  cell.addEventListener("pointerleave", () => bar.classList.remove("picking"))
-  tr.querySelector(".mt").dataset.tip = k.label + " · median " + k.ms[0] + " ms per case|" +
-    "half of its cases take " + k.ms[1] + " to " + k.ms[2] + " ms. Timed only on cases every kernel answered."
-  board.appendChild(tr)
-})
+      if (!c) return ""
+      const delay = Math.round(cum / TOTAL * 1100)
+      cum += c
+      return '<span data-g="' + b.g + '" style="flex:' + c + " 0 0;transition-delay:0ms," + delay + 'ms"></span>'
+    }).join("")
+    tr.innerHTML =
+      '<td class="k"><b></b><small></small></td>' +
+      '<td class="bar-cell"><div class="tbar" role="img"></div><div class="ruler"><span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div></td>' +
+      '<td class="p7"><span data-to="' + atOrBetter(k, 0) + '" data-dp="1" data-unit="%"></span></td>' +
+      '<td class="px"><span data-to="' + atOrBetter(k, 2) + '" data-dp="1" data-unit="%"></span></td>' +
+      '<td class="mt"><b><span data-to="' + k.ms[0] + '" data-dp="' + (k.ms[0] < 100 ? 1 : 0) +
+      '"></span><small>ms</small></b></td>'
+    tr.querySelector(".k b").textContent = k.label
+    tr.querySelector(".k small").textContent = k.ver + " · " + k.license
+    const bar = tr.querySelector(".tbar")
+    bar.innerHTML = segs
+    const shown = BANDS.filter((b) => bandCount(k, b))
+    bar.setAttribute("aria-label", shown.map((b) => b.name + " " + bandCount(k, b)).join(", ") + " of " + TOTAL)
+    const spans = [...bar.children]
+    const cell = tr.querySelector(".bar-cell")
+    cell.dataset.tip = ""
+    cell.tipFor = (e) => {
+      let hot = 0
+      let best = Infinity
+      spans.forEach((s, i) => {
+        const r = s.getBoundingClientRect()
+        const d = e.clientX < r.left ? r.left - e.clientX : e.clientX > r.right ? e.clientX - r.right : 0
+        if (d < best) { best = d; hot = i }
+      })
+      spans.forEach((s, i) => s.classList.toggle("hot", i === hot))
+      bar.classList.add("picking")
+      const w = Math.max(...shown.map((b) => b.name.length))
+      const rows = shown.map((b, i) => {
+        const c = bandCount(k, b)
+        const line = (i === hot ? "▸ " : "  ") + b.name.padEnd(w) + String(c).padStart(5) +
+          pct(c / TOTAL * 100).padStart(8)
+        return i === hot ? "<b>" + line + "</b>" : line
+      })
+      return [k.label + " " + k.ver + " · " + shown[hot].says, rows.join("\n")]
+    }
+    cell.addEventListener("pointerleave", () => bar.classList.remove("picking"))
+    tr.querySelector(".mt").dataset.tip = k.label + " · median " + k.ms[0] + " ms per case|" +
+      "half of its cases take " + k.ms[1] + " to " + k.ms[2] + " ms. Timed only on cases every kernel answered."
+    board.appendChild(tr)
+  })
 
-const figures = [...board.querySelectorAll("[data-to]")]
-const show = (el, f) => {
-  el.textContent = (Number(el.dataset.to) * f).toFixed(Number(el.dataset.dp)) + (el.dataset.unit || "")
-}
-const COUNT_MS = 1100
-function lightBoard() {
-  board.closest("table").classList.add("lit")
-  if (reduce) return figures.forEach((el) => show(el, 1))
-  const t0 = performance.now()
-  const step = (t) => {
-    const x = Math.min(1, (t - t0) / COUNT_MS)
-    const f = 1 - Math.pow(1 - x, 3)
-    figures.forEach((el) => show(el, f))
-    if (x < 1) requestAnimationFrame(step)
+  const figures = [...board.querySelectorAll("[data-to]")]
+  const show = (el, f) => {
+    el.textContent = (Number(el.dataset.to) * f).toFixed(Number(el.dataset.dp)) + (el.dataset.unit || "")
   }
-  requestAnimationFrame(step)
-}
-figures.forEach((el) => show(el, reduce ? 1 : 0))
-new IntersectionObserver(([en], io) => {
-  if (!en.isIntersecting) return
-  io.disconnect()
-  lightBoard()
-}, { threshold: 0.35 }).observe(board)
+  const COUNT_MS = 1100
+  function lightBoard() {
+    board.closest("table").classList.add("lit")
+    if (reduce) return figures.forEach((el) => show(el, 1))
+    const t0 = performance.now()
+    const step = (t) => {
+      const x = Math.min(1, (t - t0) / COUNT_MS)
+      const f = 1 - Math.pow(1 - x, 3)
+      figures.forEach((el) => show(el, f))
+      if (x < 1) requestAnimationFrame(step)
+    }
+    requestAnimationFrame(step)
+  }
+  figures.forEach((el) => show(el, reduce ? 1 : 0))
+  new IntersectionObserver(([en], io) => {
+    if (!en.isIntersecting) return
+    io.disconnect()
+    lightBoard()
+  }, { threshold: 0.35 }).observe(board)
 
-const legend = document.getElementById("legend")
-BANDS.filter((b) => BOARD.some((k) => bandCount(k, b))).forEach((b) => {
-  const li = document.createElement("li")
-  li.innerHTML = '<i data-g="' + b.g + '"></i>'
-  li.append(b.name)
-  legend.appendChild(li)
-})
+  const legend = document.getElementById("legend")
+  legend.replaceChildren()
+  BANDS.filter((b) => BOARD.some((k) => bandCount(k, b))).forEach((b) => {
+    const li = document.createElement("li")
+    li.innerHTML = '<i data-g="' + b.g + '"></i>'
+    li.append(b.name)
+    legend.appendChild(li)
+  })
+}
+
+const LIVE = "https://springcraft-ai.github.io/brep-conformance/leaderboard.json"
+const shortLicense = (spdx) => spdx.replace(/ WITH .*$/, "").replace(/-only|-or-later/g, "").replace(/ OR /g, "/")
+const shortMs = (v) => v < 100 ? Math.round(v * 10) / 10 : Math.round(v)
+// The results site's leaderboard.json in this page's terms. Throws on data the board cannot draw,
+// which leaves the copy above in place.
+function fromLive(d) {
+  const at = (k, ...grades) => grades.reduce((a, g) => a + (k.counts[d.grades.indexOf(g)] || 0), 0)
+  const rows = d.kernels.map((k) => ({
+    label: k.kernel,
+    ver: k.version,
+    license: shortLicense(k.license),
+    n: [at(k, "1e-7"), at(k, "1e-6"), at(k, "1e-5"), at(k, "1e-3"), at(k, "fail"), at(k, "unsupported"),
+      at(k, "refused", "timeout", "crash")],
+    ms: [k.time.median, k.time.q1, k.time.q3].map(shortMs),
+    ...(k.maintainers ? { us: true } : {}),
+  }))
+  const run = (d.kernels.find((k) => k.maintainers) || d.kernels[0]).run
+  const unix = Date.parse(run.date) / 1000
+  const bad = !rows.length || !(d.cases > 0) || !(unix > 0) || !run.cores || !run.tolerance ||
+    rows.some((k) => k.n.reduce((a, b) => a + b, 0) !== d.cases || k.ms.some((v) => !(v >= 0)))
+  if (bad) throw new Error("leaderboard.json: not a board this page can draw")
+  const { os, arch, cores, tolerance } = run
+  return [rows, { suite: d.suite, unix, os, arch, cores, tolerance }, d.cases]
+}
+// Taken before drawing, which adds each row's rate to it.
+const drawn = JSON.stringify([BOARD, RUN, TOTAL])
+drawBoard()
+fetch(LIVE, { signal: AbortSignal.timeout(8000) })
+  .then((r) => r.ok ? r.json() : Promise.reject(new Error("leaderboard.json: " + r.status)))
+  .then((d) => {
+    const live = fromLive(d)
+    if (JSON.stringify(live) === drawn) return
+    ;[BOARD, RUN, TOTAL] = live
+    drawBoard()
+  })
+  .catch(() => {})
 
 function alignDeck() {
   const h = document.querySelector("#bench .sh h2")

@@ -30,8 +30,13 @@ tagline and MIT badge on the left, and the finished flanged tube drawn by its ex
 right. It lives on the CDN under `springrep/`, with a version stamp in its name so it can be cached
 for good: a new image gets a new name, and the template's `og:image` tag changes with it.
 
-The leaderboard is brep-conformance's verified run of 11-18-2026, copied into the template's
-`BOARD` and `RUN` from the figures its results site computes. A new run is copied in the same way.
+The leaderboard follows brep-conformance's results site. When the page loads it fetches that site's
+[leaderboard.json](https://springcraft-ai.github.io/brep-conformance/leaderboard.json) and draws the
+board from it, so a new run shows here once that site has deployed it, with no change to this
+folder. Until the fetch answers, and when it fails or returns a board the page cannot draw, the page
+shows the copy in the template's `BOARD`, `RUN` and `TOTAL`: the verified run of 11-18-2026. Keep
+that copy near the current run, so a reader rarely sees the figures change. The headline and prose
+around the board are fixed text, and do not follow the figures.
 
 ## Setup
 
