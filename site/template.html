@@ -109,7 +109,9 @@ header.chrome { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 9
   letter-spacing: -.01em; line-height: .8;
 }
 .gh-mark { width: 15px; height: 15px; display: block; fill: currentColor; }
-.hbench { display: grid; gap: 12px; max-width: 520px; padding-top: 4px; }
+/* The leaderboard sizes to its own width, not the window's: it sits in a phone's column, half of a
+   folded inner display, or the left of a desktop hero. */
+.hbench { display: grid; gap: 12px; max-width: 520px; padding-top: 4px; container-type: inline-size; }
 .hbench .hd { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-bottom: 6px; border-bottom: 1px solid var(--rule-soft); }
 .hrow { display: grid; grid-template-columns: 92px 112px minmax(0, 1fr) 54px 62px; gap: 12px; align-items: center; }
 .hrow .lic { font: 400 11px/1 var(--font-machine); color: var(--ink-3); white-space: nowrap; }
@@ -135,8 +137,8 @@ header.chrome { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 9
 .hbench a.more { justify-self: start; font-size: 12px; color: var(--ink-2); border-bottom: 1px solid var(--ink-3); transition: color var(--dur) linear; }
 .hbench a.more:hover { color: var(--ink-1); }
 @media (prefers-reduced-motion: reduce) { .hrow .t i { transition: none; } }
-@media (max-width: 520px) {
-  .hrow { grid-template-columns: 70px minmax(0, 1fr) 54px 64px; gap: 8px; }
+@container (max-width: 440px) {
+  .hrow { grid-template-columns: 84px minmax(0, 1fr) 54px 64px; gap: 8px; }
   .hrow .lic, .hcols > span:nth-child(2) { display: none; }
 }
 .hero-copy { display: grid; gap: 38px; }
@@ -149,7 +151,8 @@ header.chrome { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 9
 .hero p.lede { margin: 0; max-width: 40ch; color: var(--ink-2); font-size: 15px; font-weight: 300; }
 .actions { display: flex; flex-wrap: wrap; gap: 10px; }
 
-.figure { position: relative; height: 560px; touch-action: none; cursor: grab; user-select: none; outline: none; }
+/* The part never stands taller than the window can show below the header with its status line. */
+.figure { position: relative; height: min(560px, max(300px, 100svh - 160px)); touch-action: none; cursor: grab; user-select: none; outline: none; }
 .figure.dragging { cursor: grabbing; }
 .figure canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .figure .br { position: absolute; width: 14px; height: 14px; border: 0 solid var(--ink-3); pointer-events: none; }
@@ -165,6 +168,15 @@ header.chrome { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 9
   .status > div { justify-content: center; gap: 12px !important; }
   .status .result { flex: none; overflow: visible; text-align: center; }
   /* The step's name holds the longest name's width, so the row does not shift as it changes. */
+  .status .op { min-width: 21ch; font-size: 11px; }
+  .status .ticks button { width: 22px; }
+}
+/* The same two lines in a narrow column beside the hero copy, as on a landscape inner display. */
+.hero-grid > :last-child { container: fig / inline-size; }
+@container fig (max-width: 580px) {
+  .status { flex-direction: column; align-items: center; gap: 10px; }
+  .status > div { justify-content: center; gap: 12px !important; }
+  .status .result { flex: none; overflow: visible; text-align: center; }
   .status .op { min-width: 21ch; font-size: 11px; }
   .status .ticks button { width: 22px; }
 }
@@ -194,10 +206,15 @@ header.chrome { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 9
 #r-check.ok { color: var(--ok); transition: color 280ms ease-out; }
 #r-check.bad { color: var(--accent); }
 .hero-grid > :last-child { margin-top: calc(clamp(64px, 9vw, 132px) * .23); }
-@media (max-width: 1000px) {
+/* Below desktop width the hero stacks, unless the window is a wide landscape one, such as a phone's
+   unfolded inner display on its side: there the copy and the part share it in two even halves. */
+@media (max-width: 1000px) and (orientation: portrait), (max-width: 860px) {
   .hero-grid { grid-template-columns: minmax(0, 1fr); }
   .hero-grid > :last-child { margin-top: 0; }
-  .figure { height: 420px; }
+  .figure { height: min(420px, max(240px, 100svh - 176px)); }
+}
+@media (min-width: 861px) and (max-width: 1000px) and (orientation: landscape) {
+  .hero-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 /* section header */
@@ -308,8 +325,9 @@ tr.us .tbar [data-g="1e-7"] { --c: var(--accent); }
 .tbar [data-g="quiet"] { --c: var(--gquiet); }
 @media (prefers-reduced-motion: reduce) { .tbar span { transition: opacity var(--dur) linear; } }
 /* A phone stacks each kernel: its name, the whole-width bar, then the three figures, each labelled
-   since the table's head is gone. */
-@media (max-width: 760px) {
+   since the table's head is gone. So does a display folded like a book, which sets the kernels in
+   two columns, one each side of the fold. */
+@media (max-width: 760px), (horizontal-viewport-segments: 2) {
   .board { min-width: 0; }
   .board thead { display: none; }
   .board tr { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px 12px; padding: 20px 0; border-bottom: 1px solid var(--line); }
@@ -356,6 +374,51 @@ footer { border-top: 1px solid var(--rule-soft); padding-block: 28px; }
 .foot nav { display: flex; gap: 22px; flex-wrap: wrap; }
 .foot nav a { color: var(--ink-2); font-size: 12px; transition: color var(--dur) linear; }
 .foot nav a:hover { color: var(--ink-1); }
+
+/* A short landscape window, such as a phone's outer display on its side: a slimmer header and hero
+   leave the part room to show. */
+@media (max-height: 480px) and (orientation: landscape) {
+  html { scroll-padding-top: calc(44px + env(safe-area-inset-top, 0px)); }
+  .chrome .row, .nav { height: 44px; }
+  .hero { padding-block: 16px 32px; }
+  .hero-copy { gap: 28px; }
+}
+/* Wide enough for two columns, the part stands on the right beside the copy, and stays in view
+   below the header while the copy scrolls past it. */
+@media (max-height: 480px) and (orientation: landscape) and (min-width: 560px) {
+  .hero-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+  .hero h1 { font-size: 52px; }
+  .hero-grid > :last-child { margin-top: 0; position: sticky; top: calc(52px + env(safe-area-inset-top, 0px)); }
+  .figure { height: max(180px, 100svh - 44px - 124px); }
+  /* The steps and the step's name share a line where they fit, else the name goes under them. */
+  .status > div { flex-wrap: wrap; row-gap: 8px; }
+}
+
+/* A display folded like a book: two segments side by side. Everything that sat in columns takes
+   two even ones, one on each side, with the fold and a margin either side of it between them, so
+   no text, control or bar runs into the crease. The page is centred, so its halves meet at the
+   fold. Without the viewport segments API none of this applies. */
+@media (horizontal-viewport-segments: 2) {
+  :root {
+    --spine: calc(env(viewport-segment-left 1 0, 50vw) - env(viewport-segment-right 0 0, 50vw) + 56px);
+  }
+  .hero-grid, .start, .pillars, #bench .sh, .lb-head, .bench-foot, .foot {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--spine);
+  }
+  .pillars { row-gap: 40px; }
+  .pillars > div, .pillars > div + div { padding: 0; border-left: 0; }
+  .lb-head .legend, .bench-foot .actions, .foot nav { grid-column: 2; }
+  .foot { row-gap: 16px; }
+  .foot .annot { grid-column: 1; grid-row: 2; }
+  .board, .board tbody { display: block; }
+  .board tbody { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--spine); }
+}
+
+/* A display folded like a laptop: two segments one above the other. The part fits in one of them,
+   so it never folds across the crease as it is turned. */
+@media (vertical-viewport-segments: 2) {
+  .figure { height: min(420px, max(240px, env(viewport-segment-height 0 1, 50vh) - 120px)); }
+}
 </style>
 </head>
 <body>
