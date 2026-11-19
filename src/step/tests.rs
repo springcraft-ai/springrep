@@ -1666,6 +1666,32 @@ END-ISO-10303-21;
     assert_eq!(imp.brep.face_count(), 4);
 }
 
+#[test]
+fn a_tessellated_solid_of_triangle_strips_and_fans_reads_as_its_triangles() {
+    // The unit cube, corners 1 to 8: the bottom, top, front and back as strips, the back's with a
+    // triangle of no area at its end, as strips are joined; the left and right as fans. Each quad
+    // a, b, c, d counter-clockwise from outside is the strip b, c, a, d and the fan a, b, c, d.
+    let text = "ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION((''),'2;1');
+FILE_NAME('t','',(''),(''),'','','');
+FILE_SCHEMA(('AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF'));
+ENDSEC;
+DATA;
+#1=COORDINATES_LIST('',8,((0.,0.,0.),(1.,0.,0.),(1.,1.,0.),(0.,1.,0.),(0.,0.,1.),(1.,0.,1.),\
+(1.,1.,1.),(0.,1.,1.)));
+#2=COMPLEX_TRIANGULATED_FACE('',#1,0,(),$,(),((4,3,1,2),(6,7,5,8),(2,6,1,5),(4,8,3,7,7)),());
+#3=COMPLEX_TRIANGULATED_FACE('',#1,0,(),$,(),(),((1,5,8,4),(2,3,7,6)));
+#4=TESSELLATED_SOLID('',(#2,#3),$);
+ENDSEC;
+END-ISO-10303-21;
+";
+    let imp = read(text.as_bytes(), "t").unwrap();
+    assert!(imp.rejected.is_empty(), "{:?}", imp.rejected);
+    assert!(check::check(&imp.brep).is_empty());
+    assert!((measure::volume(&imp.brep) - 1.0).abs() < 1e-12);
+}
+
 /// The triangles as loose plane faces, each its own open shell with its own vertices and edges.
 fn loose_faces(tris: &[[[f64; 3]; 3]]) -> String {
     let mut lines: Vec<String> = Vec::new();

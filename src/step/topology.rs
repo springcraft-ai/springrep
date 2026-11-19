@@ -1567,9 +1567,9 @@ fn build(raw: &Raw, ranges: &[(f64, f64)], tolerated: Option<&heal::Tolerated>) 
     Ok(b)
 }
 
-/// An AP242 `TESSELLATED_SOLID`: each triangle of its `TRIANGULATED_FACE`s a plane face, the
-/// triangles sharing the edges between their corners. The triangles run counter-clockwise seen
-/// from outside, as the schema has them.
+/// An AP242 `TESSELLATED_SOLID`: each triangle of its `TRIANGULATED_FACE`s and
+/// `COMPLEX_TRIANGULATED_FACE`s a plane face, the triangles sharing the edges between their
+/// corners. The triangles run counter-clockwise seen from outside, as the schema has them.
 fn tessellated(geo: &mut Geometry, id: u64) -> Result<Brep> {
     let unit = geo.length_unit();
     let Some(solid) = geo
@@ -1586,13 +1586,14 @@ fn tessellated(geo: &mut Geometry, id: u64) -> Result<Brep> {
     let mut triangles: Vec<[usize; 3]> = Vec::new();
     for item in solid.get(1).and_then(Param::as_list).unwrap_or(&[]) {
         let fid = geo.reference(id, Some(item))?;
-        let Some(face) = geo
-            .file
-            .get(fid)
-            .and_then(|e| e.part("TRIANGULATED_FACE"))
-            .map(<[Param]>::to_vec)
-        else {
-            return unsupported(fid, "a tessellated face other than a triangulated one");
+        let entity = geo.file.get(fid);
+        let (face, complex) = match (
+            entity.and_then(|e| e.part("TRIANGULATED_FACE")),
+            entity.and_then(|e| e.part("COMPLEX_TRIANGULATED_FACE")),
+        ) {
+            (Some(f), _) => (f.to_vec(), false),
+            (None, Some(f)) => (f.to_vec(), true),
+            _ => return unsupported(fid, "a tessellated face other than a triangulated one"),
         };
         let list = geo.reference(fid, face.get(1))?;
         let Some(coords) = geo
@@ -1628,13 +1629,26 @@ fn tessellated(geo: &mut Geometry, id: u64) -> Result<Brep> {
             };
             (i < xyz.len()).then_some(i)
         };
-        for tri in face.get(6).and_then(Param::as_list).unwrap_or(&[]) {
-            let ks: Vec<i64> = tri
-                .as_list()
+        let lists = |at: usize| -> Vec<Vec<i64>> {
+            face.get(at)
+                .and_then(Param::as_list)
                 .unwrap_or(&[])
                 .iter()
-                .filter_map(Param::as_i64)
-                .collect();
+                .map(|l| {
+                    l.as_list()
+                        .unwrap_or(&[])
+                        .iter()
+                        .filter_map(Param::as_i64)
+                        .collect()
+                })
+                .collect()
+        };
+        let tris = if complex {
+            strips_and_fans(&lists(6), &lists(7))
+        } else {
+            lists(6)
+        };
+        for ks in tris {
             let idx: Option<Vec<usize>> = ks.iter().map(|&k| corner(k)).collect();
             let Some(idx) = idx.filter(|v| v.len() == 3) else {
                 return bad(fid, "a triangle needs three corners in its list");
@@ -1653,6 +1667,27 @@ fn tessellated(geo: &mut Geometry, id: u64) -> Result<Brep> {
         return bad(id, "a tessellated solid with no triangles");
     }
     crate::mesh::from_indexed(&points, &triangles)
+}
+
+/// The triangles of a `COMPLEX_TRIANGULATED_FACE`'s strips and fans, each keeping the face's
+/// turn: in a strip each point after the first two makes a triangle with the two before it, every
+/// second one taken the other way round; in a fan each point after the second makes one with the
+/// point before it and the first. A triangle with a corner twice, which joins two strips, has no
+/// area and is left out.
+fn strips_and_fans(strips: &[Vec<i64>], fans: &[Vec<i64>]) -> Vec<Vec<i64>> {
+    let strip = strips.iter().flat_map(|s| {
+        s.windows(3).enumerate().map(|(i, w)| match i % 2 {
+            0 => vec![w[0], w[1], w[2]],
+            _ => vec![w[1], w[0], w[2]],
+        })
+    });
+    let fan = fans
+        .iter()
+        .flat_map(|f| f.windows(2).skip(1).map(|w| vec![f[0], w[0], w[1]]));
+    strip
+        .chain(fan)
+        .filter(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2])
+        .collect()
 }
 
 /// Every face of the shells in `file`, each with its own vertices and edges, sewn into one solid:
