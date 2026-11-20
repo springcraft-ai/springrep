@@ -7,8 +7,8 @@
 //! in the basin of one of those seeds, so the least result is exact. Where a surface's nearest
 //! point lies outside its face, the face's minimum is on its boundary, which its edges' pieces
 //! cover. Whether a point lies on its face, and whether one solid holds another, are asked of the
-//! exact faces, as the booleans ask them: the meshes only seed the search. Solids one inside the
-//! other are at distance zero.
+//! exact faces, as the booleans ask them: the meshes only seed the search. Solids that share
+//! material are at distance zero, and a corner of one clearly inside the other says so at once.
 
 use std::collections::BTreeMap;
 
@@ -271,9 +271,54 @@ impl Side<'_> {
         {
             return None;
         }
+        let faces = self.solid_domains();
+        let faces: Vec<(&Domain, Aabb)> = faces.iter().map(|(d, bb)| (d, *bb)).collect();
+        // A corner no ray decides lies on this side's boundary within rounding: the next is asked.
+        corners(&inner.pieces)
+            .take(16)
+            .find_map(|p| classify::contains(&faces, p).map(|inside| inside.then_some(p)))
+            .flatten()
+    }
+
+    /// A corner of `other`'s mesh that one of this side's solids holds, farther from this side's
+    /// mesh, whose hierarchy is `tree`, than the mesh can lie from the faces: inside by more than
+    /// the tolerance, where the classifier is exact, so the two share material there. A few
+    /// corners spread over those in this side's box are asked; where none is held, `None`.
+    fn holds_corner(&self, other: &Side, tree: &Bvh) -> Option<Point3> {
+        if self.solid_faces.is_empty() {
+            return None;
+        }
+        let mut bb = Aabb::EMPTY;
+        self.pieces.iter().for_each(|p| bb.union(&p.bbox()));
+        let pad = self.deflection;
+        let boxed = |p: Point3| (0..3).all(|k| p[k] >= bb.min[k] - pad && p[k] <= bb.max[k] + pad);
+        let inside: Vec<Point3> = corners(&other.pieces).filter(|&p| boxed(p)).collect();
+        if inside.is_empty() {
+            return None;
+        }
+        let clear = 2.0 * self.deflection + tol::LINEAR;
+        let mut hits = Vec::new();
+        let mut is_clear = |p: Point3| {
+            tree.within(&Aabb { min: p, max: p }, clear, &mut hits);
+            hits.iter().all(|&i| gap(p, &self.pieces[i]) > clear)
+        };
+        let mut faces = None;
+        let n = inside.len();
+        let tries = n.min(HELD_TRIES);
+        (0..tries).map(|k| inside[k * n / tries]).find(|&p| {
+            if !is_clear(p) {
+                return false;
+            }
+            let faces = faces.get_or_insert_with(|| self.solid_domains());
+            let faces: Vec<(&Domain, Aabb)> = faces.iter().map(|(d, bb)| (d, *bb)).collect();
+            classify::contains(&faces, p) == Some(true)
+        })
+    }
+
+    /// The exact faces of this side's solids, each with its box widened by the tolerance.
+    fn solid_domains(&self) -> Vec<(Domain, Aabb)> {
         let pad = Vec3::new(tol::LINEAR, tol::LINEAR, tol::LINEAR);
-        let faces: Vec<(Domain, Aabb)> = self
-            .solid_faces
+        self.solid_faces
             .iter()
             .map(|&f| {
                 let bb = crate::measure::face_box(self.b, f);
@@ -283,18 +328,29 @@ impl Side<'_> {
                 };
                 (face_domain(self.b, f), padded)
             })
-            .collect();
-        let faces: Vec<(&Domain, Aabb)> = faces.iter().map(|(d, bb)| (d, *bb)).collect();
-        let corners = inner.pieces.iter().flat_map(|p| match *p {
-            Piece::Tri(_, t) => t.to_vec(),
-            Piece::Seg(_, s) => s.to_vec(),
-            Piece::Pt(_, q) => vec![q],
-        });
-        // A corner no ray decides lies on this side's boundary within rounding: the next is asked.
-        corners
-            .take(16)
-            .find_map(|p| classify::contains(&faces, p).map(|inside| inside.then_some(p)))
-            .flatten()
+            .collect()
+    }
+}
+
+/// Corners of a side's mesh asked whether the other side's solid holds them: enough, spread over
+/// the side, that solids sharing a fair part of their volume show it.
+const HELD_TRIES: usize = 16;
+
+/// The corners of mesh pieces, every one on its entity's exact geometry.
+fn corners(pieces: &[Piece]) -> impl Iterator<Item = Point3> + '_ {
+    pieces.iter().flat_map(|p| match *p {
+        Piece::Tri(_, t) => t.to_vec(),
+        Piece::Seg(_, s) => s.to_vec(),
+        Piece::Pt(_, q) => vec![q],
+    })
+}
+
+/// How far point `p` lies from mesh piece `x`.
+fn gap(p: Point3, x: &Piece) -> f64 {
+    match x {
+        Piece::Tri(_, t) => p.dist(on_triangle(p, t)),
+        Piece::Seg(_, s) => p.dist(on_segment(p, s[0], s[1])),
+        Piece::Pt(_, q) => p.dist(*q),
     }
 }
 
@@ -622,18 +678,31 @@ fn between(side_a: &Side, side_b: &Side) -> Result<Closest> {
     }
     let tree = Bvh::of_boxes(pb.iter().map(Piece::bbox).collect());
     let boxes: Vec<Aabb> = pa.iter().map(Piece::bbox).collect();
+    let tree_a = Bvh::of_boxes(boxes.clone());
 
-    // The closest pair of pieces, each query widened by the best so far.
-    let mut best = piece_distance(&pa[0], &pb[0]).0;
-    let mut hits = Vec::new();
-    for (i, x) in pa.iter().enumerate() {
-        tree.within(&boxes[i], best, &mut hits);
-        for &j in &hits {
-            best = best.min(piece_distance(x, &pb[j]).0);
-        }
+    // The closest pair of pieces.
+    let best = tree_a.least(&tree, |i, j| piece_distance(&pa[i], &pb[j]).0);
+    let margin = 2.0 * (side_a.deflection + side_b.deflection) + tol::LINEAR;
+    // Solids that share material are no distance apart. Boundaries farther apart than the meshes
+    // can err meet nowhere, so only a solid holding the other can; nearer, a corner of one inside
+    // the other shows the overlap before the search below, which would find it on the crossing.
+    let apart = best > margin;
+    let held = if apart {
+        side_b.holds(side_a).or_else(|| side_a.holds(side_b))
+    } else {
+        side_b
+            .holds_corner(side_a, &tree)
+            .or_else(|| side_a.holds_corner(side_b, &tree_a))
+    };
+    if let Some(p) = held {
+        return Ok(Closest {
+            distance: 0.0,
+            on_a: p,
+            on_b: p,
+        });
     }
     // Every pair the exact minimum could lie between.
-    let margin = 2.0 * (side_a.deflection + side_b.deflection) + tol::LINEAR;
+    let mut hits = Vec::new();
     let reach = best + margin;
     let spread = 4.0 * (side_a.deflection + side_b.deflection);
     // Nearest first, so the closest pair of pieces always seeds its entities: on parts smaller
@@ -675,9 +744,12 @@ fn between(side_a: &Side, side_b: &Side) -> Result<Closest> {
         _ => true,
     };
     let mut answer: Option<Closest> = None;
-    for ((ea, eb), list) in &seeds {
+    'seeds: for ((ea, eb), list) in &seeds {
         let (ga, gb) = (side_a.geo(*ea), side_b.geo(*eb));
         for &(p, q) in list {
+            if answer.is_some_and(|a| a.distance == 0.0) {
+                break 'seeds;
+            }
             let (x, y, z) = descend(ga, gb, ga.seed(p), gb.seed(q));
             if lies_on(side_a, false, *ea, [z[0], z[1]]) && lies_on(side_b, true, *eb, [z[2], z[3]])
             {
@@ -720,7 +792,8 @@ fn between(side_a: &Side, side_b: &Side) -> Result<Closest> {
         }
     };
     // Boundaries apart, however little, one solid may still hold the other.
-    if answer.distance > tol::LINEAR
+    if !apart
+        && answer.distance > tol::LINEAR
         && let Some(p) = side_b.holds(side_a).or_else(|| side_a.holds(side_b))
     {
         answer = Closest {

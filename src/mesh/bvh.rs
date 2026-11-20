@@ -1,9 +1,36 @@
 //! A bounding volume hierarchy over boxes, and the closest points and crossings of points,
 //! segments and triangles: the search structures the thin-place probe, distances and rays share.
 
+use std::{cmp::Reverse, collections::BinaryHeap};
+
 use crate::math::{Aabb, Point3, Transform, Vec3};
 
 use super::Mesh;
+
+/// A pair of nodes keyed by their boxes' gap, for a queue that opens the nearest first.
+struct Gap(f64, usize, usize);
+
+impl PartialEq for Gap {
+    fn eq(&self, other: &Gap) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for Gap {}
+
+impl PartialOrd for Gap {
+    fn partial_cmp(&self, other: &Gap) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Gap {
+    fn cmp(&self, other: &Gap) -> std::cmp::Ordering {
+        self.0
+            .total_cmp(&other.0)
+            .then((self.1, self.2).cmp(&(other.1, other.2)))
+    }
+}
 
 /// A bounding volume hierarchy over boxes: a mesh's triangles, or any primitives' boxes.
 pub(crate) struct Bvh {
@@ -248,6 +275,56 @@ impl Bvh {
         false
     }
 
+    /// The least `dist(i, j)` over box `i` of `self` and box `j` of `other`, where `dist` is never
+    /// less than the boxes' gap. Pairs of nodes are opened nearest first, so a near pair soon
+    /// bounds the rest; a pair farther apart than the least so far is skipped, as [`Bvh::within`]
+    /// skips it, and nothing is less than zero.
+    pub(crate) fn least(&self, other: &Bvh, mut dist: impl FnMut(usize, usize) -> f64) -> f64 {
+        let mut best = f64::INFINITY;
+        if self.nodes.is_empty() || other.nodes.is_empty() {
+            return best;
+        }
+        let gap = |a: usize, b: usize| box_gap(&self.nodes[a].0, &other.nodes[b].0);
+        let mut heap = BinaryHeap::new();
+        heap.push(Reverse(Gap(gap(0, 0), 0, 0)));
+        while let Some(Reverse(Gap(g, a, b))) = heap.pop() {
+            if g > best || best == 0.0 {
+                break;
+            }
+            let (ba, na) = &self.nodes[a];
+            let (bb, nb) = &other.nodes[b];
+            let pairs = match (na, nb) {
+                (Node::Leaf(alo, ahi), Node::Leaf(blo, bhi)) => {
+                    for &i in &self.order[*alo..*ahi] {
+                        for &j in &other.order[*blo..*bhi] {
+                            if box_gap(&self.boxes[i], &other.boxes[j]) <= best {
+                                best = best.min(dist(i, j));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                (Node::Inner(l, r), Node::Leaf(..)) => [(*l, b), (*r, b)],
+                (Node::Leaf(..), Node::Inner(l, r)) => [(a, *l), (a, *r)],
+                (Node::Inner(al, ar), Node::Inner(bl, br)) => {
+                    let (ea, eb) = (ba.max - ba.min, bb.max - bb.min);
+                    if ea.dot(ea) >= eb.dot(eb) {
+                        [(*al, b), (*ar, b)]
+                    } else {
+                        [(a, *bl), (a, *br)]
+                    }
+                }
+            };
+            for (x, y) in pairs {
+                let g = gap(x, y);
+                if g <= best {
+                    heap.push(Reverse(Gap(g, x, y)));
+                }
+            }
+        }
+        best
+    }
+
     /// Every box that meets `q`.
     pub(crate) fn query(&self, q: &Aabb, out: &mut Vec<usize>) {
         out.clear();
@@ -464,6 +541,45 @@ pub(crate) fn crossing(p: Point3, q: Point3, t: &[Point3; 3]) -> Option<Point3> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_least_pair_is_the_least_of_every_pair() {
+        // Segments scattered by a fixed linear congruential sequence, against every pair.
+        let mut x: u64 = 12345;
+        let mut next = || {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (x >> 11) as f64 / (1u64 << 53) as f64 * 10.0
+        };
+        let mut segs = |n: usize, off: f64| -> Vec<[Point3; 2]> {
+            (0..n)
+                .map(|_| {
+                    let p = Vec3::new(next() + off, next(), next());
+                    [p, p + Vec3::new(next(), next(), next()) * 0.2]
+                })
+                .collect()
+        };
+        for off in [0.0, 4.0, 30.0] {
+            let (a, b) = (segs(300, 0.0), segs(200, off));
+            let boxes = |s: &[[Point3; 2]]| -> Vec<Aabb> {
+                s.iter()
+                    .map(|s| {
+                        let mut bb = Aabb::EMPTY;
+                        s.iter().for_each(|&p| bb.add(p));
+                        bb
+                    })
+                    .collect()
+            };
+            let (ta, tb) = (Bvh::of_boxes(boxes(&a)), Bvh::of_boxes(boxes(&b)));
+            let dist = |i: usize, j: usize| segments(a[i][0], a[i][1], b[j][0], b[j][1]).0;
+            let every = (0..a.len())
+                .flat_map(|i| (0..b.len()).map(move |j| (i, j)))
+                .map(|(i, j)| dist(i, j))
+                .fold(f64::INFINITY, f64::min);
+            assert_eq!(ta.least(&tb, dist), every, "offset {off}");
+        }
+    }
 
     #[test]
     fn a_segment_in_a_tilted_triangle_s_plane_does_not_cross_it_from_afar() {

@@ -184,6 +184,43 @@ fn a_ball_inside_a_box_or_through_it_is_no_distance_away() {
 }
 
 #[test]
+fn balls_sharing_volume_meet_at_a_point_inside_both() {
+    let (c1, c2) = (Vec3::new(0.0, 0.0, 0.0), Vec3::new(2.5, 1.0, -0.5));
+    for (a, b) in [
+        (ball(c1, 2.0), ball(c2, 1.5)),
+        (ball(c2, 1.5), ball(c1, 2.0)),
+    ] {
+        let c = bodies(&a, &b);
+        assert_eq!(c.distance, 0.0);
+        assert_eq!(c.on_a, c.on_b);
+        let p = c.on_a;
+        assert!(
+            p.dist(c1) <= 2.0 + 1e-9 && p.dist(c2) <= 1.5 + 1e-9,
+            "{c:?}"
+        );
+    }
+}
+
+#[test]
+fn bars_crossed_with_no_corner_inside_the_other_are_no_distance_apart() {
+    // A plus sign: every vertex of each bar lies outside the other, yet they share a cube.
+    let a = block([-5.0, -1.0, 0.0], [5.0, 1.0, 2.0]);
+    let b = block([-1.0, -5.0, -1.0], [1.0, 5.0, 3.0]);
+    assert_distance(bodies(&a, &b), 0.0);
+    assert_distance(bodies(&b, &a), 0.0);
+}
+
+#[test]
+fn blocks_face_to_face_or_a_hair_apart_measure_the_gap() {
+    let a = block([0.0; 3], [4.0, 3.0, 2.0]);
+    for gap in [0.0, 1e-4, 3e-3] {
+        let b = block([1.0, 0.5, 2.0 + gap], [3.0, 2.5, 5.0]);
+        assert_distance(bodies(&a, &b), gap);
+        assert_distance(bodies(&b, &a), gap);
+    }
+}
+
+#[test]
 fn a_rod_inside_one_a_hair_wider_is_no_distance_away() {
     // The inner rod's side is 3.3 µm inside the outer's, far closer than the meshes' chords, so
     // most of its boundary's points sit within a chord of the outer mesh; its ends do not.
