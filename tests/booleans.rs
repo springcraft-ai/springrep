@@ -629,6 +629,42 @@ fn a_plane_a_millionth_off_a_cube_top_cuts_a_wedge() {
 }
 
 #[test]
+fn equal_boxes_a_millionth_apart_unite_as_one() {
+    // Two 2 × 3 × 5 boxes, the second turned θ = 1e-6 rad about an oblique axis through the
+    // middle and moved by d: every face of one lies within g of the other's, g at most θ times the
+    // farthest corner's distance from the axis plus |d|, a few millionths, and crosses it at θ, a
+    // sine at the tangent threshold, where the tolerance cannot place their crossing. Union and
+    // common differ from the first box, and the cut from nothing, by at most g times its area.
+    let a = block("a", [0.0; 3], [2.0, 3.0, 5.0]);
+    let mut b = block("b", [0.0; 3], [2.0, 3.0, 5.0]);
+    let (centre, axis, turn) = (Vec3::new(1.0, 1.5, 2.5), Vec3::new(0.6, 0.48, 0.64), 1e-6);
+    let d = Vec3::new(1e-6, -7e-7, 5e-7);
+    b.transform(&Transform::rotation(centre, axis, turn));
+    b.transform(&Transform::translation(d));
+    let far = a
+        .vertex_ids()
+        .map(|v| {
+            let r = a.vertex(v).point - centre;
+            (r - axis * r.dot(axis)).norm()
+        })
+        .fold(0.0, f64::max);
+    let gap = turn * far + d.norm();
+    let (va, area) = (30.0, 2.0 * (6.0 + 10.0 + 15.0));
+    let run = |r: Result<Brep, Error>, name: &str| {
+        let x = r.unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(check::check(&x).is_empty(), "{name}");
+        measure::volume(&x)
+    };
+    let joined = run(union(&a, &b), "union");
+    let common = run(intersection(&a, &b), "common");
+    let cut = run(difference(&a, &b), "cut");
+    for v in [joined, common] {
+        assert!((v - va).abs() <= gap * area, "{v}");
+    }
+    assert!(cut <= gap * area, "{cut}");
+}
+
+#[test]
 fn a_plane_a_ten_thousandth_over_a_paraboloids_vertex_cuts_its_tip() {
     // The paraboloid x² + y² ≤ 8z, z ≤ 8, turned from its parabola (a quadratic Bézier) about the
     // z axis, against a block whose top is z = h = 1e-4: the two meet in a circle of radius √(8h)

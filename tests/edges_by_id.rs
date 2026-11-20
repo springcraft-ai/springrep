@@ -4,8 +4,9 @@ use std::f64::consts::PI;
 
 use springrep::{
     blend::{EdgeName, chamfer_distances, chamfer_edges, fillet_conic, fillet_edges, fillet_radii},
+    boolean::union,
     edit,
-    math::{Frame, Vec2},
+    math::{Frame, Point3, Vec2, Vec3},
     measure,
     pick::edges_named,
     profile::Profile,
@@ -106,4 +107,38 @@ fn a_shaped_blend_names_what_it_makes_under_its_feature() {
         "{grown:?}"
     );
     assert_eq!(grown.len(), 6 + 12 + 1, "{grown:?}");
+}
+
+/// The edges of `b` along the line through `on` in direction `dir`.
+fn edges_along(b: &Brep, on: Point3, dir: Vec3) -> Vec<EdgeId> {
+    b.edge_ids()
+        .filter(|&e| {
+            let edge = b.edge(e);
+            let Some(c) = edge.curve.as_ref() else {
+                return false;
+            };
+            [edge.range.0, edge.range.1]
+                .iter()
+                .all(|&t| (c.eval(t) - on).cross(dir).norm() < 1e-9)
+        })
+        .collect()
+}
+
+#[test]
+fn a_fillet_of_one_half_of_a_split_edge_rounds_the_whole_of_it() {
+    // A 20 × 20 block 10 tall joined to its mirror image across its x = 10 side: the union's top
+    // and back faces each span both, and the edge between them stays two edges, split at the join.
+    let (left, _) = block_and_edge();
+    let mut right = left.clone();
+    let mirror = [[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    right
+        .transform_similar(mirror, Vec3::new(20.0, 0.0, 0.0))
+        .unwrap();
+    let b = union(&left, &right).unwrap();
+    let ridge = edges_along(&b, Point3::new(0.0, 10.0, 10.0), Vec3::X);
+    assert_eq!(ridge.len(), 2, "the model's edge is split in two");
+    let out = fillet_edges(&b, &ridge[..1], 2.0, "f").unwrap();
+    // The 2 × 2 square less a quarter disc of radius 2 goes along the whole 40 of the edge.
+    let want = 8000.0 - 40.0 * (4.0 - PI);
+    assert!((measure::volume(&out) - want).abs() < 1e-9 * want);
 }

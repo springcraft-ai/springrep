@@ -100,12 +100,14 @@ circle a cylinder; a revolved line is a cylinder, plane or cone, and a revolved 
 (centre on the axis) or torus. An arc whose circle's centre lies across the axis from it turns
 into the inner sheet of a spindle torus, where the torus's closed-form projection, which takes the
 half-plane the point lies in, finds the outer sheet; it is the surface of revolution of the arc's
-circle instead, which projects onto the arc. The torus primitive takes any tube: one as wide as
-its circle is the horn torus, its circle turned whole and pinched at the centre; a wider one is the
-spindle torus counted once, its outer arc turned between the two points it meets the axis at. Only
-other curves give extrusion or revolution surfaces. The ellipsoid primitive is the unit ball
-stretched along its frame's axes by the affine map (`edit::affine`), so its face is the exact
-rational image of the sphere's rational form; equal radii give the sphere itself.
+circle instead, which projects onto the arc. The torus primitive (`primitive::torus`) takes only a
+tube clear of its axis, and refuses one that reaches it. The tori whose tube reaches the axis have
+calls of their own: `primitive::horn_torus`, the tube as wide as its circle, turned whole and
+pinched at the centre; and `primitive::spindle_torus`, a wider tube counted once, its outer arc
+turned between the two points it meets the axis at. Only other curves give extrusion or revolution
+surfaces. The ellipsoid primitive is the unit ball stretched along its frame's axes by the affine
+map (`edit::affine`), so its face is the exact rational image of the sphere's rational form; equal
+radii give the sphere itself.
 
 A periodic B-spline of any degree up to 3 is made from its knots and control points
 (`BSpline::periodic`, the first `p` points repeated after the rest and the knots a period apart at
@@ -1204,7 +1206,12 @@ face left only poles (a ball's cap shrunk onto its pole) is taken out. A sphere 
 plane reads as touching it while the circle they meet in is still about √(2rε) across, ε the
 tolerance, so where nothing is shorter than ten times the tolerance, a closed edge that has shrunk
 to under a thousandth of its length since the last event counts as closed. Where every face closes,
-the solid is empty. The move goes on from there with every vertex settled again where its faces
+the solid is empty, unless a face with more than that distance of its move left faces another
+head on, their outward normals opposite: the two would pass through each other (a box's top
+pushed through its bottom, a shell's walls thicker than half the part), and the move is refused
+as invalid input, as `edit::shell` then refuses its shell. A face that closes onto its own axis or
+apex (a frustum's side shrunk past its apex) passes no other face, and leaves the solid empty. The
+move goes on from there with every vertex settled again where its faces
 meet, a pole put on its moved surface's pole, and faces left on one surface are merged at the end.
 Where nothing closes but the move cannot go on, a corner of four faces is being pulled apart (the
 T's corners where the bar's ridge meets the stem's walls): it becomes two corners of three faces,
@@ -1292,7 +1299,10 @@ merge) cannot be followed either. The moved solid is then the solid with the sla
 moved out added and those of the faces moved in taken away, where that is the moved solid: every
 face beside one that stays meets it square, so the slab's side lies on the other face, and two
 faces moved by one distance meet where the slabs leave a sharp corner (moved in at a convex edge,
-out at a concave one) or tangentially.
+out at a concave one) or tangentially. The slab's side lies on the face that stays only as far as
+that face reaches: where the edge carried along the moved face's normal leaves it (a step raised
+past the top its riser ends at), the face has passed the face it meets, and the move is refused
+as invalid input.
 
 ## Sheets
 

@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use springrep::{
+    Error,
     blend::fillet,
     boolean::unify,
     check,
@@ -83,6 +84,42 @@ fn a_shell_open_at_the_top_leaves_a_cup() {
     let names = b.name_counts();
     assert_eq!(names.get("hollow.inner"), Some(&5), "{names:?}");
     assert_eq!(names.get("block.end"), Some(&1), "{names:?}");
+}
+
+// The 20 × 20 × 10 block open at its top, shelled 10: the walls meet in the planes x = 0 and
+// y = 0 and the floor reaches the top, so nothing is hollowed. Shelled 11 the walls pass through
+// each other, and a 40 × 40 × 10 block shelled 11 has its floor pass the top: both are refused.
+#[test]
+fn a_shell_as_thick_as_the_part_is_refused() {
+    let top = |b: &Brep| picked(b, &["block.end"]).into_iter().collect::<Vec<_>>();
+    let b = block();
+    let met = edit::shell(&b, &top(&b), 10.0, Wall::Inward, "hollow").unwrap();
+    assert!((measure::volume(&met) - 4000.0).abs() < 1e-9);
+    let through = edit::shell(&b, &top(&b), 11.0, Wall::Inward, "hollow");
+    assert!(
+        matches!(through, Err(Error::InvalidInput(_))),
+        "{through:?}"
+    );
+    let wide = extrude(
+        &Profile::rect(Vec2::ZERO, 40.0, 40.0),
+        &up(0.0),
+        10.0,
+        "block",
+    )
+    .unwrap();
+    let floor = edit::shell(&wide, &top(&wide), 11.0, Wall::Inward, "hollow");
+    assert!(matches!(floor, Err(Error::InvalidInput(_))), "{floor:?}");
+}
+
+// A frustum of radius 6 at z = 0 and 3 at z = 4, open at its top, shelled 3.5: its side moved in
+// closes onto its apex below the moved base, with no two faces moved through each other, and
+// nothing is hollowed. Left is the frustum, πH(R² + Rr + r²)/3 = 84π.
+#[test]
+fn a_frustum_shelled_past_its_apex_is_left_whole() {
+    let f = springrep::primitive::cone(&up(0.0), 6.0, 3.0, 4.0, "frustum").unwrap();
+    let open: Vec<FaceId> = picked(&f, &["frustum.top"]).into_iter().collect();
+    let out = edit::shell(&f, &open, 3.5, Wall::Inward, "hollow").unwrap();
+    assert!((measure::volume(&out) - 84.0 * PI).abs() < 1e-9 * 84.0 * PI);
 }
 
 #[test]

@@ -16,10 +16,10 @@ mod splits;
 
 use super::{move_faces_pinned, near_uv, pole_v};
 use crate::{
-    Result,
-    boolean::unify,
+    Error, Result,
+    boolean::{csi::signed_distance, unify},
     geom::{Cone, Surface},
-    math::{Frame, Vec2},
+    math::{Frame, Point3, Vec2},
     tol,
     topo::{Brep, CoedgeSpec, EdgeId, FaceId, PCurve, VertexId, radial},
 };
@@ -124,6 +124,12 @@ pub(crate) fn through(b: &Brep, paths: &HashMap<FaceId, Path>) -> Result<(Brep, 
         };
         // Every face closed: the solid has shrunk to nothing.
         if next.face_count() == 0 {
+            let path_of = |f: FaceId| from.get(&f).and_then(|g| paths.get(g));
+            if at(lo).is_ok_and(|near| passing(&near, path_of)) {
+                return Err(Error::InvalidInput(
+                    "faces moved through each other: nothing of the solid is left".into(),
+                ));
+            }
             return Ok((Brep::new(), b.face_ids().collect()));
         }
         // Faces of `near` are `cur`'s in order; each kept one maps on to its face of `next`.
@@ -137,6 +143,39 @@ pub(crate) fn through(b: &Brep, paths: &HashMap<FaceId, Path>) -> Result<(Brep, 
         s0 = lo;
         changed = true;
     }
+}
+
+/// Whether `near`, a solid closed to nothing, has a face with more than [`CLOSED`] of its move
+/// left that faces another face head on, their outward normals opposite: the two would pass
+/// through each other. A face that closes onto its own axis or apex, as a cone's side shrinking
+/// to its apex, passes no other face. `path_of` gives the path of each face that moves.
+fn passing<'a>(near: &Brep, path_of: impl Fn(FaceId) -> Option<&'a Path<'a>>) -> bool {
+    let outward = |f: FaceId, p: Point3| {
+        let face = near.face(f);
+        let uv = face.surface.project(p);
+        let n = face.surface.normal(uv.x, uv.y);
+        if face.reversed { -n } else { n }
+    };
+    let point = |f: FaceId| {
+        let dom = crate::boolean::face_domain(near, f);
+        match dom.interior_point() {
+            Some(uv) => Some(dom.surface.eval(uv.x, uv.y)),
+            None => near.face(f).loops.first().and_then(|&lp| {
+                let c = *near.lp(lp).coedges.first()?;
+                Some(near.vertex(near.edge(near.coedge(c).edge).start).point)
+            }),
+        }
+    };
+    near.face_ids().any(|f| {
+        let (Some(path), Some(p)) = (path_of(f), point(f)) else {
+            return false;
+        };
+        let left = path(1.0).map_or(0.0, |end| signed_distance(&end, p).abs());
+        left > CLOSED
+            && near
+                .face_ids()
+                .any(|g| g != f && outward(f, p).dot(outward(g, p)) < -1.0 + tol::TANGENT)
+    })
 }
 
 /// The most corners of four faces [`pulled_apart`] tries every way to pull apart together.

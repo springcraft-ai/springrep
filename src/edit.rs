@@ -86,7 +86,11 @@ pub fn shell(s: &Brep, open: &[FaceId], thickness: f64, wall: Wall, feature: &st
                 }
                 boolean::difference(s, &cavity)
             };
-            sharp().or_else(|e| hollowed(s, open, thickness, feature).map_err(|_| e))
+            // Walls moved through each other leave no cavity: the shell is as thick as the part.
+            sharp().or_else(|e| match e {
+                Error::InvalidInput(_) => Err(e),
+                _ => hollowed(s, open, thickness, feature).map_err(|_| e),
+            })
         }
         Wall::Outward => {
             let mut outer = moved(thickness, 0.0, convex_edges(s)?)?;

@@ -189,6 +189,7 @@ pub(crate) fn offset_faces_closing(
     b: &Brep,
     by: &HashMap<FaceId, f64>,
 ) -> Result<(Brep, Vec<FaceId>)> {
+    clear_of_contacts(b, by.keys())?;
     // Where a face closes on the way, a round offset past its radius or a riser between two faces
     // brought level, the offset is followed there.
     offset_kept(b, by)
@@ -207,9 +208,16 @@ pub(crate) fn offset_faces_closing(
                     }),
                 );
             }
-            through::through(b, &paths)
-                .or_else(|_| slabbed(b, by).map(|out| (out, Vec::new())))
-                .map_err(|_| e)
+            // A face moved through another or past the face it meets is refused as it is: the
+            // other ways of building the move would give a solid the move does not describe.
+            let refused = |r: Error| match r {
+                Error::InvalidInput(_) => r,
+                _ => e.clone(),
+            };
+            through::through(b, &paths).or_else(|r| match r {
+                Error::InvalidInput(_) => Err(r),
+                _ => slabbed(b, by).map(|out| (out, Vec::new())).map_err(refused),
+            })
         })
 }
 
@@ -259,6 +267,24 @@ fn slabbed(b: &Brep, by: &HashMap<FaceId, f64>) -> Result<Brep> {
         };
         if !kept {
             return refuse();
+        }
+        // The slab's side lies on the face that stays only as far as that face reaches: a face
+        // moved further has passed the face it meets.
+        if df == 0.0 || dg == 0.0 {
+            let (moved, d, stays) = if df != 0.0 { (f, df, g) } else { (g, dg, f) };
+            let dom = crate::boolean::face_domain(b, stays);
+            let past = (0..=4).any(|k| {
+                let p = c.eval(x.range.0 + (x.range.1 - x.range.0) * k as f64 / 4.0);
+                matches!(
+                    dom.locate(p + outward(moved, p) * d),
+                    crate::boolean::domain::Where::Outside
+                )
+            });
+            if past {
+                return Err(Error::InvalidInput(
+                    "a face moved past the face it meets".into(),
+                ));
+            }
         }
     }
     let feature = "moved";

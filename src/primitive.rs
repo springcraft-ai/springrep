@@ -114,46 +114,60 @@ pub fn ellipsoid(frame: &Frame, radii: Vec3, feature: &str) -> Result<Brep> {
     affine(&ball, &stretch)
 }
 
-/// The solid torus about the frame's z axis, its tube's centre circle `major` from the axis and the
-/// tube of radius `minor`: every point within `minor` of that circle. Its one face is `tube`. A
-/// tube as wide as its circle (a horn torus) touches the axis at the frame's origin, where the face
-/// pinches to a point; a wider one (a spindle torus) crosses the axis, and the solid is bounded by
-/// the tube's outer arc alone, turned, which meets the axis in a dimple above and below.
+/// The solid ring torus about the frame's z axis, its tube's centre circle `major` from the axis
+/// and the tube of radius `minor`, which must be less: every point within `minor` of that circle.
+/// Its one face is `tube`. A tube that reaches the axis is [`horn_torus`] or [`spindle_torus`].
 pub fn torus(frame: &Frame, major: f64, minor: f64, feature: &str) -> Result<Brep> {
-    if minor <= 0.0 || major <= 0.0 {
-        return invalid("a torus's centre circle and tube must be positive");
+    if minor <= 0.0 || major <= minor {
+        return invalid("a torus's tube must be positive and clear of its axis");
     }
-    let centre = Vec2::new(major, 0.0);
-    let tube = if minor < major + tol::LINEAR {
-        let minor = if minor > major - tol::LINEAR {
-            major
-        } else {
-            minor
-        };
-        one(vec![named(
-            Segment::Circle {
-                center: centre,
-                radius: minor,
-                ccw: true,
-            },
-            "tube",
-        )])
-    } else {
-        // The outer arc meets the axis at ±(π − acos(major / minor)) about the tube's centre.
-        let reach = PI - (major / minor).acos();
-        let top = Vec2::new(0.0, (minor * minor - major * major).sqrt());
-        let arc = Segment::Arc {
-            center: centre,
-            radius: minor,
-            start: -reach,
-            sweep: 2.0 * reach,
-        };
-        one(vec![
-            named(arc, "tube"),
-            named(Segment::Line { a: top, b: -top }, "axis"),
-        ])
+    turned(&tube(major, minor), frame, feature)
+}
+
+/// The solid horn torus about the frame's z axis: the tube of radius `radius` about a centre circle
+/// of that radius, every point within `radius` of the circle. The tube touches the axis at the
+/// frame's origin, where its one face `tube` pinches to a point.
+pub fn horn_torus(frame: &Frame, radius: f64, feature: &str) -> Result<Brep> {
+    if radius <= 0.0 {
+        return invalid("a horn torus's radius must be positive");
+    }
+    turned(&tube(radius, radius), frame, feature)
+}
+
+/// The solid spindle torus about the frame's z axis, its tube's centre circle `major` from the axis
+/// and the tube of radius `minor`, which must be greater: every point within `minor` of that
+/// circle, so the tube crosses the axis. The solid is bounded by the tube's outer arc alone,
+/// turned, which meets the axis in a dimple above and below; its one face is `tube`.
+pub fn spindle_torus(frame: &Frame, major: f64, minor: f64, feature: &str) -> Result<Brep> {
+    if major <= 0.0 || minor < major + tol::LINEAR {
+        return invalid("a spindle torus's tube must be wider than its centre circle");
+    }
+    // The outer arc meets the axis at ±(π − acos(major / minor)) about the tube's centre.
+    let reach = PI - (major / minor).acos();
+    let top = Vec2::new(0.0, (minor * minor - major * major).sqrt());
+    let arc = Segment::Arc {
+        center: Vec2::new(major, 0.0),
+        radius: minor,
+        start: -reach,
+        sweep: 2.0 * reach,
     };
-    turned(&tube, frame, feature)
+    let outline = one(vec![
+        named(arc, "tube"),
+        named(Segment::Line { a: top, b: -top }, "axis"),
+    ]);
+    turned(&outline, frame, feature)
+}
+
+/// The meridian disk of a torus: the circle of radius `minor` about (`major`, 0).
+fn tube(major: f64, minor: f64) -> Profile {
+    one(vec![named(
+        Segment::Circle {
+            center: Vec2::new(major, 0.0),
+            radius: minor,
+            ccw: true,
+        },
+        "tube",
+    )])
 }
 
 /// The frustum about the frame's z axis from its origin up by `height`, of radius `bottom` at the

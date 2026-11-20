@@ -629,6 +629,21 @@ fn checked(
 /// the faces lie inside the solid, as a union that kept both of two coincident faces leaves them.
 /// Faces that touch along the edge part away from it; partners lying on each other bound a sliver.
 fn lying_on_each_other(b: &Brep, domains: &Domains, uses: &[CoedgeId]) -> Option<(FaceId, FaceId)> {
+    // Faces lying on each other leave the edge the same way, and two analytic surfaces other than
+    // planes do only where they are one surface: both are decided without the faces' domains.
+    let apart = |c: CoedgeId, n: CoedgeId| {
+        let (s, t) = (
+            &b.face(b.coedge_face(c)).surface,
+            &b.face(b.coedge_face(n)).surface,
+        );
+        let planes = matches!((s, t), (Surface::Plane(_), Surface::Plane(_)));
+        let other =
+            analytic(s) && analytic(t) && !planes && !crate::boolean::ssi::same_domain(s, t);
+        other
+            || into_face(b, c)
+                .zip(into_face(b, n))
+                .is_some_and(|(x, y)| x.dot(y) <= 0.0)
+    };
     let on = |f: FaceId, g: FaceId| {
         let (d, o) = (domains.of(f), domains.of(g));
         let pts = d.interior_points();
@@ -642,8 +657,31 @@ fn lying_on_each_other(b: &Brep, domains: &Domains, uses: &[CoedgeId]) -> Option
     uses.iter().find_map(|&c| {
         let n = b.beside(c)?;
         let (f, g) = (b.coedge_face(c), b.coedge_face(n));
-        (c < n && f != g && (on(f, g) || on(g, f))).then_some((f, g))
+        (c < n && f != g && !apart(c, n) && (on(f, g) || on(g, f))).then_some((f, g))
     })
+}
+
+/// The unit direction in which coedge `c`'s face leaves the middle of its edge, tangent to the
+/// surface: left of the coedge in the parameter plane, or right on a reversed face.
+fn into_face(b: &Brep, c: CoedgeId) -> Option<Vec3> {
+    let co = b.coedge(c);
+    let (t0, t1) = b.edge(co.edge).range;
+    let (m, h) = (0.5 * (t0 + t1), 1e-4 * (t1 - t0));
+    let ts = if co.reversed {
+        [m + h, m, m - h]
+    } else {
+        [m - h, m, m + h]
+    };
+    let uvs = b.coedge_uvs(c, &ts);
+    let face = b.face(b.coedge_face(c));
+    let d = uvs[2] - uvs[0];
+    let left = if face.reversed {
+        Vec2::new(d.y, -d.x)
+    } else {
+        Vec2::new(-d.y, d.x)
+    };
+    let (_, su, sv) = face.surface.d1(uvs[1].x, uvs[1].y);
+    (su * left.x + sv * left.y).unit()
 }
 
 /// The first inner loop of face `f` that the region bounded by its other loops does not hold,
@@ -1544,5 +1582,47 @@ mod tests {
             }
         }
         assert!(pairs > 50, "{pairs}");
+    }
+
+    #[test]
+    fn faces_round_the_line_where_two_holes_touch_leave_it_into_themselves_and_lie_apart() {
+        // A plate less two holes of radius 1 whose axes are 2 apart: they touch along a line,
+        // which four coedges use. A face that uses the line once leaves its middle toward any
+        // point inside the face, a chord at most once round a cylinder from the edge.
+        let (z, x) = (Vec3::Z, Vec3::X);
+        let plate = crate::primitive::block(
+            &Frame::new(Vec3::ZERO, z, x).unwrap(),
+            Vec3::new(5.0, 3.0, 1.0),
+            "p",
+        )
+        .unwrap();
+        let hole = |cx: f64| {
+            let f = Frame::new(Vec3::new(cx, 1.5, -1.0), z, x).unwrap();
+            crate::primitive::cylinder(&f, 1.0, 3.0, "h").unwrap()
+        };
+        let one = crate::boolean::difference(&plate, &hole(1.5)).unwrap();
+        let b = crate::boolean::difference(&one, &hole(3.5)).unwrap();
+        assert!(check(&b).is_empty());
+        let shared: Vec<EdgeId> = b
+            .edge_ids()
+            .filter(|&e| b.edge_uses(e).len() == 4)
+            .collect();
+        assert!(!shared.is_empty());
+        for e in shared {
+            let uses = b.edge_uses(e);
+            let once = |c: &&CoedgeId| {
+                let f = b.coedge_face(**c);
+                uses.iter().filter(|&&o| b.coedge_face(o) == f).count() == 1
+            };
+            for &c in uses.iter().filter(once) {
+                let (t0, t1) = b.edge(e).range;
+                let mid = b.edge(e).curve.as_ref().unwrap().eval(0.5 * (t0 + t1));
+                let d = face_domain(&b, b.coedge_face(c));
+                let uv = d.interior_point().unwrap();
+                let inside = d.surface.eval(uv.x, uv.y);
+                assert!(into_face(&b, c).unwrap().dot(inside - mid) > 0.0);
+            }
+            assert_eq!(lying_on_each_other(&b, &Domains::new(&b), uses), None);
+        }
     }
 }

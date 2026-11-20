@@ -1,4 +1,4 @@
-//! The five primitive solids against closed-form volume and area, each checked valid, on a frame
+//! The primitive solids against closed-form volume and area, each checked valid, on a frame
 //! away from the origin and tilted off every axis.
 
 use std::f64::consts::PI;
@@ -7,7 +7,7 @@ use springrep::{
     Error, check,
     math::{Frame, Vec3},
     measure,
-    primitive::{block, cone, cylinder, ellipsoid, sphere, torus},
+    primitive::{block, cone, cylinder, ellipsoid, horn_torus, sphere, spindle_torus, torus},
     topo::Brep,
 };
 
@@ -111,7 +111,7 @@ fn an_ellipsoid_stretches_the_ball_along_its_frames_axes() {
 #[test]
 fn a_horn_torus_pinches_to_a_point_at_its_frames_origin() {
     let f = tilted();
-    let b = torus(&f, 1.5, 1.5, "tor").unwrap();
+    let b = horn_torus(&f, 1.5, "tor").unwrap();
     // Pappus: the disk's area and perimeter times the path of its centre, 2π·1.5
     assert_solid(&b, PI * 2.25 * 3.0 * PI, 3.0 * PI * 3.0 * PI);
     assert_at(local_centroid(&b, &f), [0.0; 3]);
@@ -122,7 +122,7 @@ fn a_horn_torus_pinches_to_a_point_at_its_frames_origin() {
 fn a_spindle_torus_is_its_tubes_outer_arc_turned() {
     let f = tilted();
     let (big, small) = (1.5, 2.5);
-    let b = torus(&f, big, small, "tor").unwrap();
+    let b = spindle_torus(&f, big, small, "tor").unwrap();
     // The axis cuts a segment off the disk, its chord subtending 2θ at the tube's centre,
     // cos θ = R/r. The volume is 2π times the first moment about the axis of the rest of the disk,
     // and the area is the outer arc turned, 4πr(Rφ + r sin φ), φ = π − θ.
@@ -169,4 +169,17 @@ fn a_size_at_or_below_zero_is_invalid_input() {
     assert!(refused(cone(&f, 1.0, -0.5, 3.0, "con")));
     assert!(refused(torus(&f, 0.0, 1.0, "tor")));
     assert!(refused(torus(&f, 1.0, 0.0, "tor")));
+    assert!(refused(horn_torus(&f, 0.0, "tor")));
+    assert!(refused(spindle_torus(&f, 0.0, 1.0, "tor")));
+}
+
+// A torus's tube that reaches its axis makes a horn or spindle torus, each its own call.
+#[test]
+fn a_torus_whose_tube_reaches_its_axis_is_invalid_input() {
+    let f = tilted();
+    let refused = |r: Result<Brep, Error>| matches!(r, Err(Error::InvalidInput(_)));
+    assert!(refused(torus(&f, 1.5, 1.5, "tor")));
+    assert!(refused(torus(&f, 1.5, 2.5, "tor")));
+    assert!(refused(spindle_torus(&f, 1.5, 1.5, "tor")));
+    assert!(refused(spindle_torus(&f, 2.5, 1.5, "tor")));
 }

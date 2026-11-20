@@ -358,6 +358,18 @@ fn a_step_raised_level_with_the_top_closes_the_riser() {
     assert!(check::check(&out).is_empty());
     assert!((measure::volume(&out) - 180.0).abs() < 1e-9);
     assert_eq!(out.face_count(), 6);
+    // Raised 5.5, the step would pass the riser it meets, which ends at the top.
+    let past = offset_faces(&b, &HashMap::from([(face(&b, "e2"), 5.5)]));
+    assert!(matches!(past, Err(Error::InvalidInput(_))), "{past:?}");
+}
+
+// The 10 mm cube's top moved in by 11 passes its bottom: the two meet face to face with 1 of the
+// move left, and nothing of the cube is left.
+#[test]
+fn a_top_pushed_through_the_part_is_refused() {
+    let b = cube();
+    let out = offset_faces(&b, &HashMap::from([(face(&b, "end"), -11.0)]));
+    assert!(matches!(out, Err(Error::InvalidInput(_))), "{out:?}");
 }
 
 // A 10 × 8 block 6 tall with its vertical edges rounded to 1, every face moved in by 1.5: the

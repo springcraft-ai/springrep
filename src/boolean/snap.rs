@@ -24,7 +24,8 @@ use super::{
 };
 
 /// How far [`snapped`] moves shapes onto each other: [`Reach::Grazing`] also moves cylinders of one
-/// radius within [`SNAP_GRAZING`] of one axis onto it, for a boolean that failed without.
+/// radius within [`SNAP_GRAZING`] of one axis onto it, and planes that cross at a grazing angle
+/// within it onto each other, for a boolean that failed without.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Reach {
     Exact,
@@ -161,7 +162,7 @@ fn pins(
 /// How far a face of `sb` through `pts` lies from `sa` at most, where it is to be moved onto it:
 /// within [`SNAP`] all over, or within [`SNAP_GRAZING`] where it crosses `sa` (lies on both sides)
 /// with the two surfaces' normals within [`tol::TANGENT`] of each other everywhere.
-fn snaps(sa: &Surface, sb: &Surface, pts: &[Point3]) -> Option<f64> {
+fn snaps(sa: &Surface, sb: &Surface, pts: &[Point3], how: Reach) -> Option<f64> {
     // Most faces tried lie far off at their first point: stop there, and follow the boundary
     // with each projection from the last rather than afresh.
     let mut track = Tracker::new(sa);
@@ -178,8 +179,10 @@ fn snaps(sa: &Surface, sb: &Surface, pts: &[Point3]) -> Option<f64> {
         return Some(worst);
     }
     // Two planes cross along a line found in closed form however small the angle, and a wedge
-    // between them may be all the material there is: only a curved pair is moved this far.
-    if worst > SNAP_GRAZING || matches!((sa, sb), (Surface::Plane(_), Surface::Plane(_))) {
+    // between them may be all the material there is: only a curved pair is moved this far, until
+    // the boolean has failed without.
+    let planes = matches!((sa, sb), (Surface::Plane(_), Surface::Plane(_)));
+    if worst > SNAP_GRAZING || planes && how == Reach::Exact {
         return None;
     }
     let crosses = d.iter().any(|&x| x > 0.5 * worst) && d.iter().any(|&x| x < -0.5 * worst);
@@ -379,7 +382,7 @@ pub(crate) fn snapped(a: &Brep, b: &Brep, how: Reach) -> Option<Brep> {
                 continue;
             }
             let pts = points.get_or_insert_with(|| boundary_points(b, fb));
-            if let Some(worst) = snaps(sa, sb, pts) {
+            if let Some(worst) = snaps(sa, sb, pts, how) {
                 // A spline face has no closed form to call it the same surface by; one within the
                 // tolerance all over already is (a symmetric part turned onto itself), and moves
                 // only with others, as a plane within it does.

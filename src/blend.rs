@@ -1472,10 +1472,11 @@ fn pick(body: &Brep, pairs: &[EdgeName], skip: &[Point3], strict: bool) -> Resul
                     continue;
                 }
                 // The face it shares keeps its place; the other must meet the picked edge's other
-                // face tangentially, so the two sections are one.
+                // face tangentially, so the two sections are one. An edge between the same two
+                // faces that `skip` kept from the names' pick runs on here all the same.
                 let Some((s, o)) = (0..2)
                     .flat_map(|s| (0..2).map(move |o| (s, o)))
-                    .find(|&(s, o)| fs[o] == pk.faces[s] && fs[1 - o] != pk.faces[1 - s])
+                    .find(|&(s, o)| fs[o] == pk.faces[s])
                 else {
                     continue;
                 };
