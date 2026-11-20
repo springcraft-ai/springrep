@@ -1511,16 +1511,32 @@ impl<'a> Work<'a> {
         }
         for h in hits {
             let (mut p, mut t, mut on) = (h.p, h.t, None);
-            // The steepest crossing, then the nearest.
-            let mut best = (0.0, f64::INFINITY);
+            // The steepest crossing, then one on an exact curve, then the nearest. Crossings as
+            // steep as each other but for rounding are one choice: a curve fitted to two surfaces
+            // places the crossing only to its fit error, which can be near the tolerance, where an
+            // exact curve of the edge's other face places it exactly.
+            let mut best: Option<(f64, bool, f64)> = None;
             let own = edge_faces.get(&h.base).map_or(&[][..], Vec::as_slice);
             for &f in own {
                 let key = (f.min(h.face), f.max(h.face));
                 for &ci in cuts.get(&key).map_or(&[][..], Vec::as_slice) {
                     if let Some((q, tq, sine)) = self.crossing(ci, h, own) {
                         let d = q.dist(h.p);
-                        if sine > best.0 || (sine == best.0 && d < best.1) {
-                            (p, t, on, best) = (q, tq, Some(ci), (sine, d));
+                        let exact = !matches!(
+                            self.bases[ci].curve.as_deref(),
+                            Some(Curve::Intersection(_))
+                        );
+                        let better = best.is_none_or(|(s, x, bd)| {
+                            if (sine - s).abs() > tol::ANGULAR {
+                                sine > s
+                            } else if exact != x {
+                                exact
+                            } else {
+                                d < bd
+                            }
+                        });
+                        if better {
+                            (p, t, on, best) = (q, tq, Some(ci), Some((sine, exact, d)));
                         }
                     }
                 }

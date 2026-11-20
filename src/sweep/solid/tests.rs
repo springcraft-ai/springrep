@@ -711,6 +711,26 @@ fn a_drum_screwed_across_a_ring_sector_cuts_a_groove() {
     let got = measure::volume(&cut);
     let want = PI / 3.0 * (60.0 - c * PI);
     assert!(rel(got, want) < 1e-9, "{got} {want}");
+    // The groove's corners on the sector's two ends, where the drum's edges at radii 9 and 11
+    // cross them, its bottom and top at z = ∓0.5 risen by c per radian. Each lies on an exact
+    // line of the drum's side and the end's plane, so it is placed far closer than the tolerance;
+    // placed from the curve fitted to the drum's swept end and the plane, it can be off by nearly
+    // the tolerance, and which of the two is taken then turns on rounding.
+    for phi in [0.0, PI / 3.0] {
+        for r in [9.0, 11.0] {
+            for z in [-0.5, 0.5] {
+                let corner = Vec3::new(r * phi.cos(), r * phi.sin(), z + c * phi);
+                let near = cut
+                    .vertex_ids()
+                    .map(|v| cut.vertex(v).point.dist(corner))
+                    .fold(f64::INFINITY, f64::min);
+                assert!(
+                    near < 1e-9,
+                    "{corner:?} is {near:e} from the nearest vertex"
+                );
+            }
+        }
+    }
 }
 
 // A line through the turn's axis sweeps a cone with its apex on the axis, a nappe each side. The
