@@ -1241,27 +1241,46 @@ impl Builder {
     fn track_loop(&self, s: &Surface, uses: &[Use], sign: Option<f64>) -> Option<Vec<Track>> {
         let samples: Vec<(Vec<f64>, Vec<Point3>)> = uses.iter().map(|&u| self.samples(u)).collect();
         let start = s.project(samples[0].1[0]);
-        let mut acc = Vec::with_capacity(uses.len());
-        self.track_from(s, uses, &samples, 0, start, sign, &mut acc)
-            .then_some(acc)
+        // A search over each use's choices in turn, backing up where a later use finds none, kept
+        // on a stack of its own: a loop of hundreds of edges, as a gear's outline is, would
+        // otherwise nest a call per edge, past the 1 MiB a WebAssembly program's stack holds.
+        let mut acc: Vec<Track> = Vec::with_capacity(uses.len());
+        let mut choices = vec![self.choices(s, uses, &samples, &acc, start).into_iter()];
+        while let Some(next) = choices.last_mut() {
+            let Some(track) = next.next() else {
+                // Every choice for this use failed: back up to the one before.
+                choices.pop();
+                acc.pop();
+                continue;
+            };
+            let end = track.uvs[track.uvs.len() - 1];
+            acc.push(track);
+            let k = acc.len();
+            if k < uses.len() {
+                choices.push(self.choices(s, uses, &samples, &acc, end).into_iter());
+                continue;
+            }
+            let (last, first) = (acc[k - 1].uvs[acc[k - 1].uvs.len() - 1], acc[0].uvs[0]);
+            let closed = closes(s, last, first) || gap_is_pole(s, last, first);
+            if closed && sign.is_none_or(|w| area2(&acc) * w > 0.0) {
+                return Some(acc);
+            }
+            acc.pop();
+        }
+        None
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn track_from(
+    /// The samples use `acc.len()` may take, starting near `hint` where the uses before it end, in
+    /// the order they are tried: those that are not a slit, then those that are.
+    fn choices(
         &self,
         s: &Surface,
         uses: &[Use],
         samples: &[(Vec<f64>, Vec<Point3>)],
-        k: usize,
+        acc: &[Track],
         hint: Vec2,
-        sign: Option<f64>,
-        acc: &mut Vec<Track>,
-    ) -> bool {
-        if k == uses.len() {
-            let (end, first) = (acc[k - 1].uvs[acc[k - 1].uvs.len() - 1], acc[0].uvs[0]);
-            let closed = closes(s, end, first) || gap_is_pole(s, end, first);
-            return closed && sign.is_none_or(|w| area2(acc) * w > 0.0);
-        }
+    ) -> Vec<Track> {
+        let k = acc.len();
         let (ts, pts) = &samples[k];
         let first = s.project_near(pts[0], hint);
         let free = pole_free(s, first);
@@ -1289,13 +1308,9 @@ impl Builder {
             }
             starts.sort_by(|a, b| a.dist(hint).total_cmp(&b.dist(hint)));
         }
-        // A use running back over an earlier use of its edge is a slit, which a face may hold
-        // where something touched it; a seam's second use runs a period away, so that is tried
-        // first.
-        for (slit, &st) in [false, true]
-            .into_iter()
-            .flat_map(|w| starts.iter().map(move |s| (w, s)))
-        {
+        let curve = self.b.edge(self.edges[uses[k].edge]).curve.as_ref();
+        let (mut plain, mut slits) = (Vec::new(), Vec::new());
+        for st in starts {
             let mut uvs = Vec::with_capacity(pts.len());
             uvs.push(st);
             for p in &pts[1..] {
@@ -1305,7 +1320,6 @@ impl Builder {
             let n = uvs.len();
             // At a pole the free parameter is the one the edge leaves it by, found as the
             // checker and every later reader of the pcurve finds it.
-            let curve = self.b.edge(self.edges[uses[k].edge]).curve.as_ref();
             if let Some(c) = curve.filter(|_| n > 1) {
                 if pole_free(s, uvs[0]) != (false, false) {
                     uvs[0] = project_on(s, c, ts[0], ts[1], st);
@@ -1314,20 +1328,22 @@ impl Builder {
                     uvs[n - 1] = project_on(s, c, ts[n - 1], ts[n - 2], uvs[n - 2]);
                 }
             }
-            if coincides_with_twin(uses, acc, k, &uvs) != slit {
-                continue;
-            }
-            let end = uvs[n - 1];
-            acc.push(Track {
+            // A use running back over an earlier use of its edge is a slit, which a face may hold
+            // where something touched it; a seam's second use runs a period away, so that is tried
+            // first.
+            let slit = coincides_with_twin(uses, acc, k, &uvs);
+            let track = Track {
                 ts: ts.clone(),
                 uvs,
-            });
-            if self.track_from(s, uses, samples, k + 1, end, sign, acc) {
-                return true;
+            };
+            if slit {
+                slits.push(track);
+            } else {
+                plain.push(track);
             }
-            acc.pop();
         }
-        false
+        plain.extend(slits);
+        plain
     }
 }
 
