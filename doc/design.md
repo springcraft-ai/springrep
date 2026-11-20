@@ -1833,9 +1833,15 @@ hair apart.
 [`display`](../src/mesh/display.rs) makes what a viewer draws from that mesh: each face's triangles
 with nodes of its own, so shading creases where faces meet, each node's normal the exact surface's
 there, faces in the order the STEP writer writes them, each with the id of the face it draws; and
-the drawn edges as polylines, leaving out seams, poles and edges between faces on one surface, each
-with the faces it joins. It packs the faces as one binary glTF mesh (`POSITION`, `NORMAL`, a `_FACE`
-index per node, optionally `COLOR_0`), so a viewer draws a part without meshing it again.
+the edges between faces as polylines, each with the faces it joins, the least and greatest angle
+between their outward normals along it (positive where the edge is convex, 0 where the faces meet
+smoothly), and whether the two lie on one surface, as where a face was cut in two. It reports what
+it measured and leaves to the viewer which edges count as creases. Seams, where a face meets itself,
+are listed apart, and poles are left out. It packs the faces as one binary glTF mesh (`POSITION`,
+`NORMAL`, a `_FACE` index per node, optionally `COLOR_0`), so a viewer draws a part without meshing
+it again; `glb_with_edges` adds the edges as lines, each node with its edge's index as `_EDGE` into
+a table of faces, turns and splits in the mesh's `extras`, and the seams and split edges as lines of
+their own.
 `display_within` takes the mesh's fineness, coarser for a part that is only context.
 
 Each face is a constrained Delaunay triangulation of its boundary samples in its parameter plane
