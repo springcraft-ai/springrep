@@ -7,7 +7,7 @@ use springrep::{
     edit,
     geom::{Curve, Surface},
     math::{Frame, Point3, Vec2, Vec3},
-    primitive,
+    measure, primitive,
     profile::{NamedSegment, PointsInterp, Profile, ProfileLoop, Segment},
     rays::{Hit, Rays},
     sweep::{extrude, revolve},
@@ -343,5 +343,32 @@ fn rays_parallel_to_a_45_degree_cones_generators_cross_it_where_they_meet_it() {
             let hits = cast(&frustum, p + n, -n, FAR);
             assert_ts(&hits, &[1.0, 1.0 + z * SQRT_2]);
         }
+    }
+}
+
+#[test]
+fn a_cone_offset_about_its_apex_grows_the_same_wherever_it_is_placed() {
+    // A cone of base radius 2.84 and height 5.56, offset 0.716: the offset unites it with a ball
+    // about its apex, and a ray through the apex meets the cone in a double root there. Placed
+    // turned and moved, rounding splits that root by a few tenths of a micrometre, more than the
+    // band apart, though the line between the two is on the surface: still one touching point.
+    let (r, h, by) = (2.839607335536662, 5.5592298913882034, 0.7155702943223738);
+    let at_home = primitive::cone(&Frame::WORLD, r, 0.0, h, "c").unwrap();
+    let want = measure::volume(&edit::offset(&at_home, by, "o").unwrap());
+    for (a, b) in [(0.37, 3.3), (0.9, 0.98), (1.43, 1.56)] {
+        let z = Vec3::new(
+            f64::sin(a) * f64::cos(b),
+            f64::sin(a) * f64::sin(b),
+            f64::cos(a),
+        );
+        let origin = Vec3::new(1.7 * f64::cos(a), -2.3 * f64::sin(b), 0.9 * f64::cos(a + b));
+        let frame = Frame::new(origin, z, Vec3::new(f64::cos(b), -0.3, f64::sin(b))).unwrap();
+        let placed = primitive::cone(&frame, r, 0.0, h, "c").unwrap();
+        let grown = edit::offset(&placed, by, "o").unwrap();
+        let got = measure::volume(&grown);
+        assert!(
+            (got - want).abs() <= 1e-9 * want,
+            "{got} vs {want} placed at ({a}, {b})"
+        );
     }
 }

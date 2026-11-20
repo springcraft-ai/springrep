@@ -159,7 +159,7 @@ fn line_cylinder(o: Point3, d: Vec3, cyl: &Cylinder) -> Hits {
 }
 
 /// The crossings of a line with a quadric whose implicit form along the line is `qa·t² + qb·t +
-/// qc`; a pair closer than the tolerance band is one touching point.
+/// qc`; a pair the line runs between within the tolerance band is one touching point.
 fn line_quadric(o: Point3, d: Vec3, s: &Surface, qa: f64, qb: f64, qc: f64) -> Hits {
     let at = |t: f64| signed_distance(s, o + d * t).abs();
     if qa.abs() < 1e-300 {
@@ -188,10 +188,12 @@ fn line_quadric(o: Point3, d: Vec3, s: &Surface, qa: f64, qb: f64, qc: f64) -> H
         if t1 > t2 {
             std::mem::swap(&mut t1, &mut t2);
         }
-        // One touching point only where the two roots lie within the band of each other: a line
-        // nearly parallel to a cone's generator has a far root, and the surface's distance read
-        // that far out says nothing.
-        if (t2 - t1) * d.norm() <= 2.0 * tol::LINEAR && at(t_near) <= tol::LINEAR {
+        // One touching point where the line is within the band midway between the roots, which
+        // is where it strays furthest. A pair split only by rounding, as a double root at a cone's
+        // apex is, can lie more than the band apart. A pair further apart than a model has one
+        // root out where a line nearly parallel to a cone's generator meets it, and the surface's
+        // distance read that far out says nothing.
+        if (t2 - t1) * d.norm() <= tol::MODEL_SIZE && at(t_near) <= tol::LINEAR {
             vec![t_near]
         } else {
             vec![t1, t2]
