@@ -1,4 +1,6 @@
-# Formatting, lints and every test, on each pull request and each push to main.
+# Formatting, lints and every test, on each pull request and each push to main. The tests also run
+# on aarch64 Linux, macOS, Windows and wasm32-wasip1: each has its own maths library, and a result
+# that turns on the last bit of a sine can pass on one and fail on another.
 name: ci
 
 on:
@@ -14,6 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The check the main branch requires by this name.
   test:
     runs-on: ubuntu-24.04
     steps:
@@ -23,3 +26,42 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --release --locked
+
+  test-platforms:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+          - name: macos
+            runner: macos-latest
+          - name: windows
+            runner: windows-latest
+    name: test-${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The sources as they are on every other platform, without line endings changed on checkout.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: cargo test --release --locked
+
+  # Where threads cannot be spawned and a panic aborts the whole test binary.
+  test-wasm:
+    runs-on: ubuntu-24.04
+    env:
+      WASMTIME: "50.0.3"
+      CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: rustup target add wasm32-wasip1
+      - name: Install wasmtime
+        run: |
+          curl -sSfL "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME}/wasmtime-v${WASMTIME}-x86_64-linux.tar.xz" | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/wasmtime-v${WASMTIME}-x86_64-linux" >> "$GITHUB_PATH"
+      - run: cargo test --release --locked --target wasm32-wasip1
