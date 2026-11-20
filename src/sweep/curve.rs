@@ -13,7 +13,7 @@ use crate::{
     Error, Result,
     error::invalid,
     geom::Curve,
-    loft::rail::{Rail, hom, interpolation, point},
+    loft::rail::{Rail, hom, interpolation_pieces, point},
     math::{Frame, Point3, Vec3},
     profile::Profile,
     sweep::extrude,
@@ -219,17 +219,27 @@ pub fn along_curve(
         .flatten()
         .flat_map(|s| s.rail.pw.iter().map(|&h| local(point(h))))
         .collect();
-    // Stations double until every control point's column follows its track between them.
-    let spans = path.breakpoints(u0, u1).len() + 1;
-    let mut n = 8 * spans;
+    // Stations double until every control point's column follows its track between them. Each
+    // path span has its own run of them: the frame's second derivative jumps where the path's
+    // third does, which one cubic across a breakpoint follows only at second order.
+    let mut breaks = vec![u0];
+    breaks.extend(path.breakpoints(u0, u1));
+    breaks.push(u1);
+    let spans = breaks.len() - 1;
+    let mut per = 8;
     let (us, frames, across) = loop {
-        let fine: Vec<f64> = (0..=2 * n)
-            .map(|k| u0 + (u1 - u0) * k as f64 / (2 * n) as f64)
+        let n = per * spans;
+        let mut fine: Vec<f64> = breaks
+            .windows(2)
+            .flat_map(|b| {
+                (0..2 * per).map(move |k| b[0] + (b[1] - b[0]) * k as f64 / (2 * per) as f64)
+            })
             .collect();
+        fine.push(u1);
         let all = stations(path, &fine, sketch.x, twist, length);
         let us: Vec<f64> = fine.iter().step_by(2).copied().collect();
         let frames: Vec<Station> = all.iter().step_by(2).copied().collect();
-        let across = interpolation(&us)?;
+        let across = interpolation_pieces(&us, per)?;
         let worst = controls
             .iter()
             .map(|&xy| {
@@ -246,7 +256,7 @@ pub fn along_curve(
         if worst <= FIT || n >= 512 {
             break (us, frames, across);
         }
-        n *= 2;
+        per *= 2;
     };
     let _ = us;
     let last = *frames.last().expect("a sweep has stations");
@@ -328,5 +338,51 @@ mod tests {
         let want = PI * 0.09 * arc_length(&p, 0.0, 1.0);
         let got = measure::volume(&b);
         assert!((got - want).abs() < 1e-6 * want, "{got} against {want}");
+    }
+
+    #[test]
+    fn a_sweep_along_a_spline_stays_smooth_across_the_paths_breakpoints() {
+        // The swept surface is C¹ where the path's third derivative jumps; its pieces join there
+        // with no crease.
+        let p = path(&[
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 2.7],
+            [1.0, 0.7, 4.5],
+            [-0.4, 1.1, 7.5],
+            [-0.8, 0.3, 9.9],
+            [-1.9, 1.4, 12.8],
+        ]);
+        let disc = Profile::circle(Vec2::new(0.3, 0.0), 0.6);
+        let b = along_curve(&disc, &Frame::WORLD, &p, (0.0, 1.0), 0.0, "sw").unwrap();
+        let mut joins = 0;
+        for f in b.face_ids() {
+            let crate::geom::Surface::Nurbs(s) = &b.face(f).surface else {
+                continue;
+            };
+            let (ku, kv) = s.knots();
+            let (u0, u1, v0, v1) = (ku[0], ku[ku.len() - 1], kv[0], kv[kv.len() - 1]);
+            let mut at: Vec<f64> = ku
+                .windows(3)
+                .filter(|w| w[0] == w[2] && w[0] > u0 && w[0] < u1)
+                .map(|w| w[0])
+                .collect();
+            at.dedup();
+            for u in at {
+                joins += 1;
+                for k in 0..=8 {
+                    let v = v0 + (v1 - v0) * k as f64 / 8.0;
+                    let normal = |u: f64| {
+                        let (_, du, dv) = s.d1(u, v);
+                        du.cross(dv).unit().unwrap()
+                    };
+                    let turn = normal(u - 1e-12).cross(normal(u + 1e-12)).norm();
+                    assert!(turn <= tol::ANGULAR, "a crease of {turn} rad at u = {u}");
+                }
+            }
+        }
+        assert!(
+            joins > 0,
+            "the path's breakpoints join pieces of the surface"
+        );
     }
 }

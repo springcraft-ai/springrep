@@ -666,3 +666,43 @@ fn a_loft_along_guides_carries_a_hole_on_its_own_guides() {
     assert_eq!(b.face_count(), 10);
     assert!(rel(volume(&b), 1560.0 * PI) < 1e-9, "{}", volume(&b));
 }
+
+// Data whose second derivative jumps at the middle, as a frame carried past a cubic path's
+// breakpoint does: cubics joined there follow it at fourth order, halving the spacing dividing the
+// error by about 16, and stay C¹ across the join.
+#[test]
+fn pieces_joined_where_the_data_bends_converge_at_fourth_order() {
+    use super::rail::{Across, interpolation_pieces};
+    let g = |u: f64| (u - 0.5) * (u - 0.5).abs();
+    let f = |u: f64| [g(u), (2.0 * u).sin(), 0.0, 1.0];
+    let fit = |per: usize| {
+        let n = 2 * per;
+        let us: Vec<f64> = (0..=n).map(|k| k as f64 / n as f64).collect();
+        let data: Vec<_> = us.iter().map(|&u| f(u)).collect();
+        let a: Across = interpolation_pieces(&us, per).unwrap();
+        let c = a.apply(&data);
+        let err = (0..n)
+            .map(|k| {
+                let u = (k as f64 + 0.5) / n as f64;
+                let p = a.eval(&c, u);
+                (0..2).map(|i| (p[i] - f(u)[i]).abs()).fold(0.0, f64::max)
+            })
+            .fold(0.0, f64::max);
+        // The slopes either side of the join, from the control points beside it.
+        let j = per;
+        let slope = |i: usize, h: f64| (c[i + 1][0] - c[i][0]) / h;
+        let (left, right) = (a.knots[j + 1] - a.knots[j], a.knots[j + 4] - a.knots[j + 1]);
+        (err, slope(j - 1, left), slope(j, right))
+    };
+    let errs: Vec<f64> = [8, 16, 32]
+        .into_iter()
+        .map(|per| {
+            let (err, l, r) = fit(per);
+            assert!((l - r).abs() < 1e-12, "slopes {l} and {r} at the join");
+            err
+        })
+        .collect();
+    for w in errs.windows(2) {
+        assert!(w[0] / w[1] > 12.0, "errors {errs:?}");
+    }
+}

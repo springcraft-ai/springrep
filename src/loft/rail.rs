@@ -415,8 +415,16 @@ pub(crate) struct Across {
 
 #[derive(Clone, Debug)]
 enum Map {
-    Dense { coef: Vec<f64>, n: usize },
+    Dense {
+        coef: Vec<f64>,
+        n: usize,
+    },
     Band(BandLu),
+    /// Consecutive pieces of `per + 1` data points each, sharing their end points.
+    Pieces {
+        per: usize,
+        pieces: Vec<Across>,
+    },
 }
 
 impl Across {
@@ -442,6 +450,35 @@ impl Across {
                 let mut x = data.to_vec();
                 lu.solve(&mut x);
                 x
+            }
+            Map::Pieces { per, pieces } => {
+                let mut out = Vec::with_capacity(self.controls());
+                let mut joins = Vec::new();
+                for (i, piece) in pieces.iter().enumerate() {
+                    let ctrl = piece.apply(&data[i * per..=(i + 1) * per]);
+                    if i > 0 {
+                        joins.push(out.len() - 1);
+                    }
+                    out.extend_from_slice(&ctrl[usize::from(i > 0)..]);
+                }
+                // The pieces meet with their own end tangents, which differ by their fitting
+                // error: a crease the data has not. Both take the mean, so the curve is C¹ there.
+                for j in joins {
+                    let at = self.knots[j + 1];
+                    let left = at - self.knots[j];
+                    let right = self.knots[j + self.degree + 1] - at;
+                    let mut d = [0.0; 4];
+                    for k in 0..4 {
+                        let dl = (out[j][k] - out[j - 1][k]) / left;
+                        let dr = (out[j + 1][k] - out[j][k]) / right;
+                        d[k] = 0.5 * (dl + dr);
+                    }
+                    for k in 0..4 {
+                        out[j - 1][k] = out[j][k] - d[k] * left;
+                        out[j + 1][k] = out[j][k] + d[k] * right;
+                    }
+                }
+                out
             }
         }
     }
@@ -536,6 +573,34 @@ pub(crate) fn bezier_fit(params: &[f64], degree: usize) -> Result<Across> {
         degree: p,
         knots,
         map: Map::Dense { coef, n },
+    })
+}
+
+/// Cubics through consecutive runs of `per + 1` of `params` (each run starting where the last
+/// ended), joined only by position: data whose second derivative jumps at the joins, as a frame
+/// carried along a cubic spline's breakpoints does, converges at fourth order this way and only at
+/// second order through one cubic.
+pub(crate) fn interpolation_pieces(params: &[f64], per: usize) -> Result<Across> {
+    if per < 3 || !(params.len() - 1).is_multiple_of(per) {
+        return Err(Error::Numerical(
+            "pieces of at least four points each".into(),
+        ));
+    }
+    let pieces = params
+        .windows(per + 1)
+        .step_by(per)
+        .map(interpolation)
+        .collect::<Result<Vec<_>>>()?;
+    let degree = 3;
+    let mut knots = pieces[0].knots.clone();
+    for piece in &pieces[1..] {
+        knots.pop();
+        knots.extend_from_slice(&piece.knots[degree + 1..]);
+    }
+    Ok(Across {
+        degree,
+        knots,
+        map: Map::Pieces { per, pieces },
     })
 }
 
