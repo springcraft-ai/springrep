@@ -3,7 +3,7 @@
 //! Two crossings closer than the linear tolerance are one touching point: a curve whose excursion
 //! past a surface is within [`tol::LINEAR`] touches it once, at the excursion's extreme.
 
-use std::f64::consts::TAU;
+use std::{collections::HashMap, f64::consts::TAU};
 
 use super::hulls;
 use crate::{
@@ -315,7 +315,24 @@ fn sampled_roots(f: &mut impl FnMut(f64) -> f64, cuts: &[f64], n: usize) -> (Vec
     (ts, false)
 }
 
-fn numeric_hits(c: &Curve, range: (f64, f64), s: &Surface) -> Hits {
+/// A curve's boxes over stretches of its parameter, kept while it is tested against many surfaces:
+/// a spline's box costs a pass over its pieces. One holds the boxes of one curve only.
+#[derive(Default)]
+pub(crate) struct CurveBoxes(HashMap<(u64, u64), Aabb>);
+
+impl CurveBoxes {
+    pub(crate) fn bbox(&mut self, c: &Curve, t0: f64, t1: f64) -> Aabb {
+        if matches!(c, Curve::Line(_) | Curve::Circle(_) | Curve::Ellipse(_)) {
+            return c.bbox(t0, t1);
+        }
+        *self
+            .0
+            .entry((t0.to_bits(), t1.to_bits()))
+            .or_insert_with(|| c.bbox(t0, t1))
+    }
+}
+
+fn numeric_hits(c: &Curve, range: (f64, f64), s: &Surface, boxes: &mut CurveBoxes) -> Hits {
     let mut cuts = vec![range.0];
     cuts.extend(c.breakpoints(range.0, range.1));
     cuts.push(range.1);
@@ -333,16 +350,15 @@ fn numeric_hits(c: &Curve, range: (f64, f64), s: &Surface) -> Hits {
         .flat_map(|w| (0..n).map(move |i| w[0] + (w[1] - w[0]) * i as f64 / n as f64))
         .chain(std::iter::once(range.1))
         .collect();
-    let mut hull = Aabb::EMPTY;
-    for q in ns.patches() {
-        hull.union(&q.bbox);
-    }
+    // A box that holds a patch's box meets the stretch's wherever the patch's does, so the tree
+    // finds a patch exactly where a scan of them all would.
+    let tree = ns.patch_tree();
     let meets = |a: &Aabb, b: &Aabb| {
         (0..3).all(|k| a.min[k] <= b.max[k] + tol::LINEAR && b.min[k] <= a.max[k] + tol::LINEAR)
     };
-    let near = |t0: f64, t1: f64| {
-        let bb = c.bbox(t0, t1);
-        meets(&bb, &hull) && ns.patches().iter().any(|q| meets(&bb, &q.bbox))
+    let mut near = |t0: f64, t1: f64| {
+        let bb = boxes.bbox(c, t0, t1);
+        tree.any(|q| meets(&bb, q))
     };
     let (mut ts, mut on) = (Vec::new(), true);
     let mut run: Vec<f64> = Vec::new();
@@ -379,6 +395,16 @@ fn numeric_hits(c: &Curve, range: (f64, f64), s: &Surface) -> Hits {
 
 /// Where the curve, over `range`, meets the surface.
 pub(crate) fn curve_surface(c: &Curve, range: (f64, f64), s: &Surface) -> Hits {
+    curve_surface_in(c, range, s, &mut CurveBoxes::default())
+}
+
+/// [`curve_surface`], with the curve's boxes kept in `boxes` for its tests against other surfaces.
+pub(crate) fn curve_surface_in(
+    c: &Curve,
+    range: (f64, f64),
+    s: &Surface,
+    boxes: &mut CurveBoxes,
+) -> Hits {
     let raw = match (c, s) {
         (Curve::Line(l), Surface::Plane(p)) => {
             let dn = l.dir.dot(p.frame.z);
@@ -408,15 +434,15 @@ pub(crate) fn curve_surface(c: &Curve, range: (f64, f64), s: &Surface) -> Hits {
         (Curve::Line(l), Surface::Extrusion(e)) => line_extrusion(l.origin, l.dir, e),
         (Curve::Line(l), Surface::Revolution(r)) => match line_revolution(l.origin, l.dir, r) {
             Some(hits) => hits,
-            None => return numeric_hits(c, range, s),
+            None => return numeric_hits(c, range, s, boxes),
         },
         (Curve::Line(l), Surface::Ruled(r)) => match line_ruled(l.origin, l.dir, r) {
             Some(hits) => hits,
-            None => return numeric_hits(c, range, s),
+            None => return numeric_hits(c, range, s, boxes),
         },
         (Curve::Line(l), Surface::Nurbs(ns)) => match line_spline(l.origin, l.dir, ns, range) {
             Some(hits) => hits,
-            None => return numeric_hits(c, range, s),
+            None => return numeric_hits(c, range, s, boxes),
         },
         (Curve::Line(l), Surface::Sphere(sp)) => {
             let oc = l.origin - sp.frame.origin;
@@ -459,7 +485,7 @@ pub(crate) fn curve_surface(c: &Curve, range: (f64, f64), s: &Surface) -> Hits {
         {
             return circle_parallel_cylinder(ci, cyl, range);
         }
-        _ => return numeric_hits(c, range, s),
+        _ => return numeric_hits(c, range, s, boxes),
     };
     if raw.on_surface {
         return raw;
@@ -2191,6 +2217,70 @@ mod tests {
             }
         }
         crate::geom::NurbsSurface::new((3, 3), (knots.clone(), knots), (n, n), ctrl, None).unwrap()
+    }
+
+    #[test]
+    fn the_patch_tree_finds_a_patch_near_each_stretch_where_a_scan_does() {
+        let sheet = rippled_sheet();
+        let tilted = sheet.transformed(&crate::math::Transform::rotation(
+            Vec3::new(0.12, 0.12, 0.0),
+            Vec3::new(1.0, 1.0, 0.0).unit().unwrap(),
+            0.3,
+        ));
+        let wave = |z: f64, lift: f64| {
+            let pts: Vec<Vec3> = (0..=40)
+                .map(|i| {
+                    let x = -0.05 + 0.34 * i as f64 / 40.0;
+                    Vec3::new(
+                        x,
+                        0.12 + 0.08 * (20.0 * x).sin(),
+                        z * (31.0 * x).cos() + lift,
+                    )
+                })
+                .collect();
+            Curve::BSpline(crate::geom::BSpline::interpolate(&pts).unwrap())
+        };
+        // Through the sheet many times, past it just outside the tolerance, and well clear.
+        let curves = [wave(0.01, 0.0), wave(0.002, 0.008), wave(0.01, 0.05)];
+        let meets = |a: &Aabb, b: &Aabb| {
+            (0..3).all(|k| a.min[k] <= b.max[k] + tol::LINEAR && b.min[k] <= a.max[k] + tol::LINEAR)
+        };
+        let (mut near, mut far) = (0, 0);
+        for ns in [&sheet, &tilted] {
+            for c in &curves {
+                let range = c.domain();
+                let mut cuts = vec![range.0];
+                cuts.extend(c.breakpoints(range.0, range.1));
+                cuts.push(range.1);
+                let n = if cuts.len() > 2 { 12 } else { 96 };
+                let samples: Vec<f64> = cuts
+                    .windows(2)
+                    .flat_map(|w| (0..n).map(move |i| w[0] + (w[1] - w[0]) * i as f64 / n as f64))
+                    .chain(std::iter::once(range.1))
+                    .collect();
+                for w in samples.windows(2) {
+                    let bb = c.bbox(w[0], w[1]);
+                    let scan = ns.patches().iter().any(|q| meets(&bb, &q.bbox));
+                    assert_eq!(ns.patch_tree().any(|q| meets(&bb, q)), scan, "{w:?}");
+                    if scan { near += 1 } else { far += 1 }
+                }
+            }
+        }
+        assert!(near > 100 && far > 100, "{near} {far}");
+        // Boxes kept from one surface's test serve the next, and the same one again.
+        let surfaces = [
+            Surface::Nurbs(Box::new(sheet)),
+            Surface::Nurbs(Box::new(tilted)),
+        ];
+        for c in &curves {
+            let mut boxes = CurveBoxes::default();
+            for _ in 0..2 {
+                for s in &surfaces {
+                    let got = curve_surface_in(c, c.domain(), s, &mut boxes);
+                    assert_eq!(got, curve_surface(c, c.domain(), s));
+                }
+            }
+        }
     }
 
     #[test]

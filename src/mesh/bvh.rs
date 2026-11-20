@@ -33,6 +33,7 @@ impl Ord for Gap {
 }
 
 /// A bounding volume hierarchy over boxes: a mesh's triangles, or any primitives' boxes.
+#[derive(Clone, Debug)]
 pub(crate) struct Bvh {
     boxes: Vec<Aabb>,
     /// Node: its box, and either two children or a run of `order`.
@@ -40,6 +41,7 @@ pub(crate) struct Bvh {
     order: Vec<usize>,
 }
 
+#[derive(Clone, Debug)]
 enum Node {
     Inner(usize, usize),
     Leaf(usize, usize),
@@ -323,6 +325,33 @@ impl Bvh {
             }
         }
         best
+    }
+
+    /// Whether `meets` holds for some box. A node's box holds its boxes, so `meets` must hold for
+    /// a box that holds one it holds for: then a node it fails for holds no box it would pass.
+    pub(crate) fn any(&self, meets: impl Fn(&Aabb) -> bool) -> bool {
+        if self.nodes.is_empty() {
+            return false;
+        }
+        let mut stack = vec![0];
+        while let Some(n) = stack.pop() {
+            let (bb, node) = &self.nodes[n];
+            if !meets(bb) {
+                continue;
+            }
+            match *node {
+                Node::Inner(l, r) => {
+                    stack.push(r);
+                    stack.push(l);
+                }
+                Node::Leaf(lo, hi) => {
+                    if self.order[lo..hi].iter().any(|&i| meets(&self.boxes[i])) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Every box that meets `q`.

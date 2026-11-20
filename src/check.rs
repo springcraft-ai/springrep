@@ -7,7 +7,7 @@ use std::fmt;
 use crate::{
     boolean::{
         classify,
-        csi::{curve_surface, signed_distance},
+        csi::{CurveBoxes, curve_surface_in, signed_distance},
         domain::{Domain, Where},
         face_domain,
     },
@@ -820,11 +820,13 @@ fn in_box(p: Point3, bb: &Aabb) -> bool {
 }
 
 /// What the pair tests of one check share: each face's domain, built when a point is first
-/// located in it, each edge's box, and each edge's meeting with each face.
+/// located in it, each edge's box and its boxes over stretches, and each edge's meeting with each
+/// face.
 #[derive(Default)]
 struct PairCache {
     domains: HashMap<FaceId, Domain>,
     edge_boxes: HashMap<EdgeId, Aabb>,
+    curve_boxes: HashMap<EdgeId, CurveBoxes>,
     meetings: HashMap<(EdgeId, FaceId), Option<Point3>>,
 }
 
@@ -1042,8 +1044,9 @@ fn near_ranges(
     whole: Aabb,
     s: &Surface,
     bound: &Aabb,
+    boxes: &mut CurveBoxes,
 ) -> Vec<(f64, f64)> {
-    near_ranges_by(curve, range, whole, s, bound, true)
+    near_ranges_by(curve, range, whole, s, bound, true, boxes)
 }
 
 /// [`near_ranges`], with the test [`apart_along`] left out unless `along`.
@@ -1054,6 +1057,7 @@ fn near_ranges_by(
     s: &Surface,
     bound: &Aabb,
     along: bool,
+    boxes: &mut CurveBoxes,
 ) -> Vec<(f64, f64)> {
     #[allow(clippy::too_many_arguments)]
     fn halve(
@@ -1065,6 +1069,7 @@ fn near_ranges_by(
         bound: &Aabb,
         along: bool,
         away: Option<Vec3>,
+        boxes: &mut CurveBoxes,
         out: &mut Vec<(f64, f64)>,
     ) {
         if !boxes_meet(&bb, bound) || (analytic(s) && clear_of(&bb, s)) {
@@ -1111,12 +1116,14 @@ fn near_ranges_by(
             return;
         }
         for r in [(t0, m), (m, t1)] {
-            let bb = padded_box(c.bbox(r.0, r.1));
-            halve(c, r, bb, depth - 1, s, bound, along, away, out);
+            let bb = padded_box(boxes.bbox(c, r.0, r.1));
+            halve(c, r, bb, depth - 1, s, bound, along, away, boxes, out);
         }
     }
     let mut out = Vec::new();
-    halve(curve, range, whole, 8, s, bound, along, None, &mut out);
+    halve(
+        curve, range, whole, 8, s, bound, along, None, boxes, &mut out,
+    );
     out
 }
 
@@ -1181,8 +1188,9 @@ fn edge_meets_face(
     };
     let near_end = |p: Point3| ends.iter().any(|&(_, q, within)| q.dist(p) <= within);
     let mut found: Vec<Point3> = Vec::new();
-    for range in near_ranges(curve, edge.range, whole, s, bound) {
-        let hits = curve_surface(curve, range, s);
+    let boxes = cache.curve_boxes.entry(e).or_default();
+    for range in near_ranges(curve, edge.range, whole, s, bound, boxes) {
+        let hits = curve_surface_in(curve, range, s, boxes);
         if !hits.on_surface {
             found.extend(
                 hits.ts
@@ -1527,7 +1535,10 @@ mod tests {
                 if !matches!(s, Surface::Nurbs(_)) || !boxes_meet(&whole, &bound) {
                     continue;
                 }
-                let at = |along| near_ranges_by(curve, edge.range, whole, s, &bound, along);
+                let at = |along| {
+                    let mut boxes = CurveBoxes::default();
+                    near_ranges_by(curve, edge.range, whole, s, &bound, along, &mut boxes)
+                };
                 assert_eq!(at(true), at(false));
                 pairs += 1;
             }

@@ -8,6 +8,7 @@ use crate::{
     Result,
     error::invalid,
     math::{Aabb, Point3, Transform, Vec2, Vec3},
+    mesh::bvh::Bvh,
     numeric::solve2,
     tol,
 };
@@ -844,6 +845,8 @@ pub struct NurbsSurface {
     seeds: OnceLock<(Vec<(Vec2, Point3)>, f64)>,
     /// Small patches whose boxes together hold the surface, built on first use.
     patches: OnceLock<Vec<Patch>>,
+    /// A hierarchy over the patches' boxes, built on first use.
+    patch_tree: OnceLock<Bvh>,
     /// Each patch as a Bézier patch, built on first use.
     beziers: OnceLock<Vec<Bezier>>,
     /// The surface over each pair of spans as a polynomial, built on first use.
@@ -895,6 +898,7 @@ impl NurbsSurface {
             v_period: None,
             seeds: OnceLock::new(),
             patches: OnceLock::new(),
+            patch_tree: OnceLock::new(),
             beziers: OnceLock::new(),
             polys: OnceLock::new(),
         };
@@ -935,6 +939,7 @@ impl NurbsSurface {
             v_period: periods.1,
             seeds: OnceLock::new(),
             patches: OnceLock::new(),
+            patch_tree: OnceLock::new(),
             beziers: OnceLock::new(),
             polys: OnceLock::new(),
         })
@@ -1227,6 +1232,7 @@ impl NurbsSurface {
             v_period: self.v_period,
             seeds,
             patches: OnceLock::new(),
+            patch_tree: OnceLock::new(),
             beziers: OnceLock::new(),
             polys,
         }
@@ -1404,6 +1410,12 @@ impl NurbsSurface {
             }
         }
         out
+    }
+
+    /// A hierarchy over the boxes of [`NurbsSurface::patches`], whose indices its queries return.
+    pub(crate) fn patch_tree(&self) -> &Bvh {
+        self.patch_tree
+            .get_or_init(|| Bvh::of_boxes(self.patches().iter().map(|q| q.bbox).collect()))
     }
 
     /// Each of [`NurbsSurface::patches`] as a Bézier patch. A patch lies within one span of each

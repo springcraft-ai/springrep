@@ -1343,6 +1343,7 @@ impl<'a> Work<'a> {
                 let base = &self.bases[bi];
                 let Some(curve) = &base.curve else { continue };
                 let bounds_nothing = one_face.contains(&bi);
+                let mut boxes = csi::CurveBoxes::default();
                 for &fi in self.other(side) {
                     let face = &self.faces[fi];
                     if !overlap(&base.bbox, &face.bbox)
@@ -1371,7 +1372,7 @@ impl<'a> Work<'a> {
                         }
                         continue;
                     }
-                    let hits = csi::curve_surface(curve, range, &face.dom.surface);
+                    let hits = csi::curve_surface_in(curve, range, &face.dom.surface, &mut boxes);
                     if hits.on_surface {
                         if !bounds_nothing {
                             on.push((bi, fi));
