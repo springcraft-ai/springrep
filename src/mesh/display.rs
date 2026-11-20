@@ -426,15 +426,19 @@ fn pack(faces: &[Face], colors: Option<&[String]>, edges: Option<&Display>) -> V
     let table = edges.map_or(String::new(), |d| {
         let rows: Vec<String> = (0..d.edges.len())
             .map(|k| {
-                let faces: Vec<String> = d.edge_faces[k].iter().map(usize::to_string).collect();
-                let turn = match d.edge_turns[k] {
+                // A list shorter than `edges` says nothing of the edges past its end.
+                let faces: Vec<String> = d
+                    .edge_faces
+                    .get(k)
+                    .map_or(Vec::new(), |f| f.iter().map(usize::to_string).collect());
+                let turn = match d.edge_turns.get(k).copied().flatten() {
                     Some([a, b]) if a.is_finite() && b.is_finite() => format!("[{a},{b}]"),
                     _ => "null".to_string(),
                 };
                 format!(
                     r#"{{"faces":[{}],"turn":{turn},"split":{}}}"#,
                     faces.join(","),
-                    d.edge_split[k]
+                    d.edge_split.get(k).copied().unwrap_or(false)
                 )
             })
             .collect();
@@ -650,6 +654,16 @@ mod tests {
             row(&d.edge_faces[1])
         );
         assert!(json.contains(&table), "{json}");
+        // A display put together by hand, its lists short of its edges, is unknown past them.
+        let mut bare = d.clone();
+        bare.edge_faces.truncate(1);
+        bare.edge_turns.clear();
+        bare.edge_split.clear();
+        let json = json_of(&glb_with_edges(&bare, None));
+        assert!(
+            json.contains(r#"{"faces":[],"turn":null,"split":false}]}"#),
+            "{json}"
+        );
     }
 
     #[test]
