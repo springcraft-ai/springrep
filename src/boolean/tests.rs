@@ -1842,3 +1842,123 @@ fn an_empty_result_is_refused_only_where_the_solids_share_material() {
     assert!(material_lost(&inner, &a, Op::Intersection));
     assert!(!material_lost(&a, &crossing, Op::Union));
 }
+
+// A cube and a copy turned θ = 0.1 rad about its top back edge: the two tops cross along that
+// edge at angle θ. Each placed to within the tolerance, they place their crossing only to within
+// 2·tol/sin θ ≈ 2·10⁻⁶, so an intersection curve between the edge's ends that strays s = 10⁻⁶
+// from it in the middle, ten times the tolerance, is that edge. The curve is an arc in the cube's
+// top of chord 1 and sagitta s: radius (¼ + s²)/2s, half-angle asin(1/2r).
+#[test]
+fn a_cut_beside_an_edge_where_its_faces_cross_at_a_small_angle_is_that_edge() {
+    let theta: f64 = 0.1;
+    let a = block([0.0; 3], [1.0; 3]);
+    let mut b = a.clone();
+    b.transform(&Transform::rotation(
+        Vec3::new(0.0, 1.0, 1.0),
+        Vec3::X,
+        theta,
+    ));
+    let (p0, p1) = (Vec3::new(0.0, 1.0, 1.0), Vec3::new(1.0, 1.0, 1.0));
+    let s: f64 = 1e-6;
+    let mut w = Work::new([&a, &b]);
+    w.meet().unwrap();
+    let holds = |f: usize, q: Vec3| csi::signed_distance(&w.faces[f].dom.surface, q).abs() < 1e-9;
+    let top = |side: usize, far: Vec3| {
+        (0..w.faces.len())
+            .find(|&f| w.faces[f].side == side && holds(f, p0) && holds(f, far))
+            .unwrap()
+    };
+    let turned = Transform::rotation(p0, Vec3::X, theta).point(Vec3::new(0.5, 0.0, 1.0));
+    let (fa, fb) = (top(0, Vec3::new(0.5, 0.0, 1.0)), top(1, turned));
+    let r = (0.25 + s * s) / (2.0 * s);
+    let half = (0.5 / r).asin();
+    let center = Vec3::new(0.5, 1.0 - s + r, 1.0);
+    let arc = Curve::Circle(crate::geom::Circle {
+        frame: Frame::new(center, Vec3::Z, Vec3::X).unwrap(),
+        radius: r,
+    });
+    let range = (-PI / 2.0 - half, -PI / 2.0 + half);
+    let vertex = |p: Vec3| {
+        (0..w.pool.len())
+            .find(|&v| w.pool[v].dist(p) < 1e-9)
+            .unwrap()
+    };
+    let ends = (vertex(p0), vertex(p1));
+    w.bases.push(Base {
+        pole: arc.eval(range.0),
+        bbox: curve_bbox(&arc, range),
+        curve: Some(Rc::new(arc)),
+        range,
+        v0: Some(ends.0),
+        v1: Some(ends.1),
+        closed: false,
+        kind: BaseKind::Cut {
+            fa,
+            fb,
+            tangent: false,
+        },
+        tol: tol::LINEAR,
+    });
+    w.split_curves();
+    w.dedup();
+    let joins = |pi: usize| {
+        let p = &w.pieces[pi];
+        (p.v0, p.v1) == ends || (p.v1, p.v0) == ends
+    };
+    let cut = w.base_pieces[w.bases.len() - 1].clone();
+    assert!(cut.len() == 1 && joins(cut[0]), "{cut:?}");
+    let edge = (0..w.pieces.len())
+        .find(|&pi| matches!(w.bases[w.pieces[pi].base].kind, BaseKind::Edge) && joins(pi))
+        .unwrap();
+    assert_eq!(w.canon[cut[0]], w.canon[edge]);
+}
+
+// A bull-nose mill turned one way about a line and then the other way about another, the two arcs
+// meeting tangent at an S-bend. A turn about an upright line grazes the mill along the meridians
+// square to its motion, so both arcs graze it along the same ones at the bend: the first cut's
+// swept torus and the second's corner torus touch along a meridian, and a trace there is that
+// contact, however far past the two faces it runs. Each level slice taken away is a disc of the
+// mill's radius ρ there, and for each arc the annular sector the disc sweeps a distance d from the
+// arc's center through angle a: 2·a·d·ρ.
+#[test]
+fn a_mill_turned_one_way_then_the_other_cuts_an_s_bend() {
+    let (r, c, depth) = (4.0, 1.5, 10.0);
+    let p = Vec2::new;
+    let half = Profile::outline(vec![
+        NamedSegment::line(p(0.0, 0.0), p(r - c, 0.0), "mill"),
+        NamedSegment::arc(p(r - c, c), c, -PI / 2.0, PI / 2.0, "mill"),
+        NamedSegment::line(p(r, c), p(r, 25.0), "mill"),
+        NamedSegment::line(p(r, 25.0), p(0.0, 25.0), "mill"),
+        NamedSegment::line(p(0.0, 25.0), p(0.0, 0.0), "mill"),
+    ]);
+    let mill = |tip: Vec3| {
+        let plane = Frame::new(tip, -Vec3::Y, Vec3::X).unwrap();
+        revolve(&half, &plane, tip, Vec3::Z, TAU, "mill").unwrap()
+    };
+    // The first arc runs clockwise about (20, 0) to the bend at (12, 0), the second anticlockwise
+    // about the origin; each end disc stands clear of the other arc's sector.
+    let (d1, a1, d2, a2) = (8.0, 1.0, 12.0, 0.8);
+    let bend = Vec3::new(d2, 0.0, -depth);
+    let (c1, c2) = (Vec3::new(d1 + d2, 0.0, -depth), Vec3::new(0.0, 0.0, -depth));
+    let start = Transform::rotation(c1, Vec3::Z, a1).point(bend);
+    let turn = |origin, axis, to| crate::sweep::Motion::Turn {
+        origin,
+        axis,
+        from: 0.0,
+        to,
+    };
+    let first = crate::sweep::solid(&mill(start), &turn(c1, -Vec3::Z, a1), "cut").unwrap();
+    let second = crate::sweep::solid(&mill(bend), &turn(c2, Vec3::Z, a2), "cut").unwrap();
+    let stock = block([-30.0, -30.0, -16.0], [40.0, 30.0, 0.0]);
+    let out = difference(&difference(&stock, &first).unwrap(), &second).unwrap();
+    let issues = crate::check::check(&out);
+    assert!(issues.is_empty(), "{issues:?}");
+    // ∫ρ and ∫ρ² over the depth, the corner a quarter circle of radius c
+    let flat = r - c;
+    let i1 = flat * c + PI * c * c / 4.0 + r * (depth - c);
+    let i2 =
+        flat * flat * c + flat * PI * c * c / 2.0 + 2.0 * c.powi(3) / 3.0 + r * r * (depth - c);
+    let removed = 2.0 * (a1 * d1 + a2 * d2) * i1 + PI * i2;
+    let v = measure::volume(&stock) - measure::volume(&out);
+    assert!((v - removed).abs() < 1e-9 * removed, "{v} vs {removed}");
+}

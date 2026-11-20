@@ -600,6 +600,15 @@ moves to where a later hit is placed on its curve, every curve of the two faces 
 split at that vertex within the graze's reach (`LINEAR` over the sine, at most a hundred times
 `LINEAR`), and the vertex's tolerance grows to hold where each such curve passes it.
 
+Two pieces with the same ends are one where they run within the sum of their tolerances, or, where
+one is an intersection curve, within the reach to which its two surfaces fix their crossing:
+`LINEAR` plus the other's tolerance over the sine between them, or the tangent band where they are
+tangent. Near a point where the two faces of a curve become tangent, the trace and an edge of the
+inputs along the same crossing part by more than `LINEAR` (a V-wheel turned a whole turn, built as
+the union of two half turns, gave 1e-7 to 4e-6 mm). Left as two pieces between one pair of vertices
+they bound a region no wider than that, whose sides the face split orders by rounding, so the result
+depended on the platform's floating point.
+
 So the order differs from Jackson's in four places: edge–face meetings are found before edge–edge
 ones but placed after face–face (a grazing meeting is placed where the face pair's curve crosses the
 edge, which is better conditioned); vertex–edge incidence is read by distance when curves are split,
@@ -620,8 +629,14 @@ are merged last, as pieces. What face–face takes from the steps below it:
   cylinders from it left a curve 3.3e-5 mm long through it, an edge four faces used.
 - **An edge lying on a face is that contact.** Where an edge of one input lies in the surface of a
   face of the other, the contact between the edge's faces and that face along it is the edge. A
-  curve of the face pair that runs along it all the way is dropped, and the edge itself cuts the
-  face wherever it lies inside it and one of its own faces crosses the face there
+  curve of the face pair that runs along it all the way is dropped. Along is within the edge's
+  tolerance, within `LINEAR` plus that tolerance over the sine where the two surfaces cross at a
+  shallow angle, or within the tangent band where they are tangent. Where the faces are tangent
+  along the edge, a trace that runs on past both faces along the edge's curve beyond its ends is
+  dropped too: the region it is traced in reaches past the faces, and two tori tangent along a
+  meridian (a bull-nose mill's sweeps meeting at an S-bend) stay tangent round the whole circle.
+  Kept, such a trace lay a few 1e-8 mm beside the edge and cut off a sliver no point of which could
+  be classified. The edge itself cuts the face wherever it lies inside it and one of its own faces crosses the face there
   (`imprint_on_faces`); where its faces only touch the face it is a tangent contact, not a cut, as
   before. Seeds on the edge still start traces: where the two faces nearly coincide (a loft and its
   copy moved 1e-5 mm), an edge of one lies on the other's surface while their intersection crosses

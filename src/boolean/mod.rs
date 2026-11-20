@@ -337,6 +337,20 @@ fn follow(facts: &Facts, a: Option<&Copied>, b: Option<&Copied>) -> Facts {
     Facts { on_face }
 }
 
+/// How far from `q`, a point where surfaces `a` and `b` meet along `dir`, a curve lying within `t`
+/// of one and [`tol::LINEAR`] of the other may stray and still be their meeting: where they cross
+/// at an angle whose sine is s, either one moved by its tolerance moves the crossing by that over
+/// s; where they are tangent, the band either side where they stay within the tolerance.
+fn crossing_spread(a: &Surface, b: &Surface, q: Point3, dir: Vec3, t: f64) -> f64 {
+    let (ua, ub) = (a.project(q), b.project(q));
+    let sine = a.normal(ua.x, ua.y).cross(b.normal(ub.x, ub.y)).norm();
+    if sine > tol::TANGENT {
+        (t + tol::LINEAR) / sine
+    } else {
+        contact::band(a, b, q, dir)
+    }
+}
+
 /// Whether `c` stays within `t` of surface `s` over `range`, at 33 points: a tolerant edge lying
 /// on a face of the other solid within its own tolerance.
 fn lies_within(c: &Curve, range: (f64, f64), s: &Surface, t: f64) -> bool {
@@ -1830,13 +1844,18 @@ impl<'a> Work<'a> {
                 .collect();
             // On the edge, or where the faces are tangent along it, within the band either side
             // of it where they stay within the tolerance of each other: a trace there is noise.
-            let along = |bi: usize, p: Point3| {
+            // `past` widens the edge's range by that many times its length at either end.
+            let along_past = |bi: usize, p: Point3, past: f64| {
                 let base = &self.bases[bi];
+                let (t0, t1) = base.range;
+                let range = (t0 - past * (t1 - t0), t1 + past * (t1 - t0));
                 base.curve.as_ref().is_some_and(|c| {
-                    let (d, t) = csi::curve_distance(c, base.range, p);
-                    d <= base.tol || d <= contact::band(sa, sb, c.eval(t), c.d1(t).1)
+                    let (d, t) = csi::curve_distance(c, range, p);
+                    let (q, dir) = c.d1(t);
+                    d <= base.tol || d <= crossing_spread(sa, sb, q, dir, base.tol)
                 })
             };
+            let along = |bi: usize, p: Point3| along_past(bi, p, 0.0);
             // A tolerant edge lying on the other face is where the two faces meet; within its tube
             // they lie within its tolerance of each other, so a trace there finds only noise.
             // So is an edge lying on the other face where the two are tangent along it, within the
@@ -1912,14 +1931,22 @@ impl<'a> Work<'a> {
                     })
                 })
             });
+            // So is a trace along an edge the faces are tangent along that runs on past both faces,
+            // where the surfaces stay tangent along the edge's curve beyond its ends: the region it
+            // traces in reaches beyond the faces.
+            let off = |p: Point3| {
+                self.faces[fa].dom.locate(p) == Where::Outside
+                    && self.faces[fb].dom.locate(p) == Where::Outside
+            };
             curves.retain(|c| {
+                let at = |k: usize| {
+                    c.curve
+                        .eval(c.range.0 + (c.range.1 - c.range.0) * k as f64 / 8.0)
+                };
                 !on_edges.iter().any(|&bi| {
+                    let tangent = tangent_band(&self.bases[bi]).is_some();
                     (0..=8).all(|k| {
-                        along(
-                            bi,
-                            c.curve
-                                .eval(c.range.0 + (c.range.1 - c.range.0) * k as f64 / 8.0),
-                        )
+                        along(bi, at(k)) || tangent && off(at(k)) && along_past(bi, at(k), 1.0)
                     })
                 })
             });
@@ -2240,6 +2267,18 @@ impl<'a> Work<'a> {
         }
     }
 
+    /// How far from `q` on intersection base `bi`, running along `dir`, another curve within `t`
+    /// of both its faces may lie and still be that intersection; zero for an edge base.
+    fn crossing_spread(&self, bi: usize, q: Point3, dir: Vec3, t: f64) -> f64 {
+        match self.bases[bi].kind {
+            BaseKind::Cut { fa, fb, .. } => {
+                let (sa, sb) = (&self.faces[fa].dom.surface, &self.faces[fb].dom.surface);
+                crossing_spread(sa, sb, q, dir, t)
+            }
+            BaseKind::Edge => 0.0,
+        }
+    }
+
     /// Step 2b: pieces that run along each other become one, the lowest-ranked.
     fn dedup(&mut self) {
         let n = self.pieces.len();
@@ -2275,10 +2314,14 @@ impl<'a> Work<'a> {
                     }
                     let pj = &self.pieces[j];
                     let cj = self.bases[pj.base].curve.as_ref().expect("has a curve");
-                    let within =
-                        tol::between(self.bases[pj.base].tol, self.bases[self.pieces[i].base].tol);
+                    let (ti, tj) = (self.bases[self.pieces[i].base].tol, self.bases[pj.base].tol);
+                    let within = tol::between(tj, ti);
                     let same = [0.25, 0.5, 0.75].iter().all(|&f| {
-                        csi::curve_distance(cj, pj.range, self.piece_point(i, f)).0 <= within
+                        let (d, t) = csi::curve_distance(cj, pj.range, self.piece_point(i, f));
+                        let (q, dir) = cj.d1(t);
+                        d <= within
+                            || d <= self.crossing_spread(self.pieces[i].base, q, dir, tj)
+                            || d <= self.crossing_spread(pj.base, q, dir, ti)
                     });
                     if same {
                         let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
