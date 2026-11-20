@@ -19,6 +19,7 @@ use crate::{
 pub const STRAIGHT_TURN: f64 = 1e-7;
 
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Segment {
     Line {
         a: Vec2,
@@ -410,6 +411,7 @@ fn named(segment: Segment, name: &str) -> NamedSegment {
 
 /// How a list of points becomes a profile loop.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum PointsInterp {
     /// Straight segments point to point.
     Polyline,

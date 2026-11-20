@@ -29,6 +29,7 @@ pub const EDGE_DEFLECTION_MM: f64 = 0.005;
 
 /// One face as drawn: its nodes, their normals, and its triangles over them.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Face {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
@@ -37,6 +38,7 @@ pub struct Face {
 
 /// A solid as drawn.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Display {
     pub faces: Vec<Face>,
     /// The face of the solid each of `faces` draws.

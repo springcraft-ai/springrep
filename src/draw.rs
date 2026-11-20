@@ -21,6 +21,7 @@ use crate::{
 
 /// A drawing's polylines, in space: the stretches seen and the stretches hidden.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Drawing {
     pub visible: Vec<Vec<Point3>>,
     pub hidden: Vec<Vec<Point3>>,

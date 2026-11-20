@@ -12,10 +12,7 @@ use springrep::{
     topo::Brep,
 };
 
-const COARSE: MeshOptions = MeshOptions {
-    linear: 0.05,
-    angular: 0.3,
-};
+const COARSE: MeshOptions = MeshOptions::new(0.05, 0.3);
 
 fn assert_solid(b: &Brep, volume: f64, area: f64, lo: [f64; 3], hi: [f64; 3], rel: f64) {
     let issues = check::check(b);

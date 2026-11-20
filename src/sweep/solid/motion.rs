@@ -13,6 +13,7 @@ use crate::{
 /// How a body moves as `τ` runs from 0 to 1. The body is given where it is drawn, and the motion
 /// places it at every `τ`.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum Motion {
     /// Carried straight by the vector, from where it is drawn.
     Slide(Vec3),

@@ -895,6 +895,7 @@ pub fn area_and_volume(b: &Brep) -> (f64, f64) {
 /// `∭ (|r|²·I − r rᵀ) dV` about the centre, so its diagonal holds the moments about axes through
 /// the centre and its off-diagonal the negated products.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct MassProperties {
     pub volume: f64,
     pub centre: Point3,

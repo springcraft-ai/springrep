@@ -24,6 +24,7 @@ fn assert_mass(b: &Brep, volume: f64, centre: [f64; 3], inertia: [[f64; 3]; 3]) 
         volume: v,
         centre: c,
         inertia: i,
+        ..
     } = measure::mass_properties(b);
     assert!(
         (v - volume).abs() <= 1e-12 * volume,
@@ -219,9 +220,11 @@ fn a_lofted_cylinder_cut_on_a_slant_measures_its_closed_form_every_way() {
     let (r, h, theta) = (5.0, 7.0, 0.3);
     let sections: Vec<Section> = [0.0, 5.0, 10.0, 15.0]
         .iter()
-        .map(|&z| Section {
-            profile: Profile::circle(Vec2::ZERO, 2.0 * r),
-            frame: Frame::new(Vec3::new(0.0, 0.0, z), Vec3::Z, Vec3::X).unwrap(),
+        .map(|&z| {
+            Section::new(
+                Profile::circle(Vec2::ZERO, 2.0 * r),
+                Frame::new(Vec3::new(0.0, 0.0, z), Vec3::Z, Vec3::X).unwrap(),
+            )
         })
         .collect();
     let can = loft(&sections, false, "can").unwrap();

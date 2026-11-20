@@ -32,6 +32,7 @@ use crate::{
 /// outward normal there. `on_edge` where the point lies on the face's boundary: the ray passes
 /// through an edge there, and the face next to it has a crossing at the same point.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Hit {
     pub t: f64,
     pub point: Point3,

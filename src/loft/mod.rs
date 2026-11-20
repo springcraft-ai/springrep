@@ -38,9 +38,16 @@ const MAX_ACROSS_DEGREE: usize = 8;
 
 /// One section: a profile on a plane, its outer loop and each hole lofted.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Section {
     pub profile: Profile,
     pub frame: Frame,
+}
+
+impl Section {
+    pub fn new(profile: Profile, frame: Frame) -> Section {
+        Section { profile, frame }
+    }
 }
 
 /// A stretch of a 3-D curve, from parameter `t0` to `t1` in either order.

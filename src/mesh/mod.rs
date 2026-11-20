@@ -32,6 +32,7 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct MeshOptions {
     /// The largest distance from a triangle or segment to the exact geometry, in mm.
     pub linear: f64,
@@ -43,6 +44,10 @@ impl MeshOptions {
     /// The turn allowed across one triangle where only a distance is asked for, in radians.
     pub const ANGULAR: f64 = 0.5;
 
+    pub const fn new(linear: f64, angular: f64) -> MeshOptions {
+        MeshOptions { linear, angular }
+    }
+
     /// A mesh within `linear` of the exact geometry, at the kernel's own limit on the turn.
     pub fn within(linear: f64) -> MeshOptions {
         MeshOptions {
@@ -53,6 +58,7 @@ impl MeshOptions {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Mesh {
     pub positions: Vec<Point3>,
     pub triangles: Vec<[u32; 3]>,
@@ -848,6 +854,7 @@ fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
 
 /// How a solid's part of a mesh fails to close, if it does.
 #[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct MeshReport {
     pub triangles: usize,
     pub boundary_edges: usize,

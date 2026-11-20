@@ -123,10 +123,7 @@ fn assert_touching(b: &Brep, volume: f64, area: f64, betti: [u64; 3]) {
     }
 }
 
-const COARSE: MeshOptions = MeshOptions {
-    linear: 0.2,
-    angular: 0.5,
-};
+const COARSE: MeshOptions = MeshOptions::new(0.2, 0.5);
 
 /// The edges four faces use: where pieces meet along a curve.
 fn four_face_edges(b: &Brep) -> Vec<EdgeId> {

@@ -225,10 +225,7 @@ fn polylines(b: &Brep) -> Vec<String> {
 /// Positions, then triangles as `[a, b, c, face]`: enough to hide edges behind faces and find
 /// where a curved face turns away from the eye.
 fn coarse_mesh(b: &Brep) -> String {
-    let opt = MeshOptions {
-        linear: 0.15,
-        angular: 0.3,
-    };
+    let opt = MeshOptions::new(0.15, 0.3);
     let m = mesh::tessellate(b, &opt).unwrap();
     let pos: Vec<String> = m
         .positions

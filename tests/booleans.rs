@@ -15,10 +15,7 @@ use springrep::{
     topo::Brep,
 };
 
-const COARSE: MeshOptions = MeshOptions {
-    linear: 0.2,
-    angular: 0.5,
-};
+const COARSE: MeshOptions = MeshOptions::new(0.2, 0.5);
 
 fn block(id: &str, lo: [f64; 3], hi: [f64; 3]) -> Brep {
     let c = Vec2::new(0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1]));

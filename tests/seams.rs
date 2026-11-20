@@ -35,10 +35,7 @@ fn a_hole_in_a_face_whose_seam_jogs_meshes_wherever_round_it_is() {
     assert!(check::check(&rod).is_empty());
     // The two sides are one face: with the two ends, three.
     assert_eq!(rod.face_count(), 3);
-    let opt = MeshOptions {
-        linear: 0.01,
-        angular: 0.2,
-    };
+    let opt = MeshOptions::new(0.01, 0.2);
     // Either side of each seam: the upper length's outline lies a period on from the lower's
     // for half the way round, so a hole there is not where its own angle alone would put it.
     for angle in [0.2, -0.2, PI - 0.2, PI + 0.2] {

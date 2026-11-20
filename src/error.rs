@@ -3,6 +3,7 @@ use std::fmt;
 /// Every kernel failure. An operation that cannot produce a valid solid returns one of these rather
 /// than a solid that fails [`crate::check`].
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Error {
     /// The caller's input is meaningless: a zero-length extrusion, an open profile, an axis that
     /// crosses the profile.

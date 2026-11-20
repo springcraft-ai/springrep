@@ -16,10 +16,7 @@ use springrep::{
     topo::Brep,
 };
 
-const COARSE: MeshOptions = MeshOptions {
-    linear: 0.2,
-    angular: 0.5,
-};
+const COARSE: MeshOptions = MeshOptions::new(0.2, 0.5);
 
 fn at_z(z: f64) -> Frame {
     Frame::new(Vec3::new(0.0, 0.0, z), Vec3::Z, Vec3::X).unwrap()

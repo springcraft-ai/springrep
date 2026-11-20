@@ -23,10 +23,7 @@ fn up(z: f64) -> Frame {
 
 /// A `w` × `w` square centred on (`cx`, 0) on the plane at `z`.
 fn square_section(z: f64, cx: f64, w: f64) -> Section {
-    Section {
-        profile: Profile::rect(Vec2::new(cx, 0.0), w, w),
-        frame: up(z),
-    }
+    Section::new(Profile::rect(Vec2::new(cx, 0.0), w, w), up(z))
 }
 
 /// The 20 × 20 × 10 block on the xy plane, centred on the origin.

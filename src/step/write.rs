@@ -1024,6 +1024,7 @@ pub fn write_faces(b: &Brep, name: &str) -> Result<(String, Vec<FaceId>)> {
 
 /// One part of an assembly file: every solid of `brep`, written once however often it is placed.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct Part<'a> {
     pub name: &'a str,
     pub brep: &'a Brep,
@@ -1031,12 +1032,25 @@ pub struct Part<'a> {
     pub colour: Option<[f64; 3]>,
 }
 
+impl<'a> Part<'a> {
+    pub fn new(name: &'a str, brep: &'a Brep, colour: Option<[f64; 3]>) -> Part<'a> {
+        Part { name, brep, colour }
+    }
+}
+
 /// One use of a part in an assembly file: `parts[part]` moved by `at`.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct Instance<'a> {
     pub name: &'a str,
     pub part: usize,
     pub at: Transform,
+}
+
+impl<'a> Instance<'a> {
+    pub fn new(name: &'a str, part: usize, at: Transform) -> Instance<'a> {
+        Instance { name, part, at }
+    }
 }
 
 /// An assembly named `name` as one file, in millimetres and radians: each part a product with its

@@ -96,6 +96,7 @@ fn chords(c: &Curve, t0: f64, t1: f64, tolerance: f64, depth: u32, out: &mut Vec
 /// One piece of a section's outline: the curve it runs along, the stretch of it, and whether the
 /// outline runs it backwards.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SectionEdge {
     pub curve: Curve,
     pub range: (f64, f64),

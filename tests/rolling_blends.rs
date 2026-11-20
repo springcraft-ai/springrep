@@ -38,11 +38,12 @@ fn sloped_block() -> Brep {
         "block",
     )
     .unwrap();
-    let sections =
-        [(4.0, 14.0, 16.0), (11.0, -14.0, 16.0)].map(|(z, x0, x1): (f64, f64, f64)| Section {
-            profile: Profile::rect(Vec2::new(0.5 * (x0 + x1), 0.0), x1 - x0, 30.0),
-            frame: up(z),
-        });
+    let sections = [(4.0, 14.0, 16.0), (11.0, -14.0, 16.0)].map(|(z, x0, x1): (f64, f64, f64)| {
+        Section::new(
+            Profile::rect(Vec2::new(0.5 * (x0 + x1), 0.0), x1 - x0, 30.0),
+            up(z),
+        )
+    });
     difference(&block, &loft(&sections, true, "slope").unwrap()).unwrap()
 }
 

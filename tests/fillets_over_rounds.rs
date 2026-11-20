@@ -58,10 +58,7 @@ fn on_block(profile: &Profile, cut: bool, id: &str) -> Brep {
 }
 
 fn watertight(b: &Brep) -> bool {
-    let opt = MeshOptions {
-        linear: 0.01,
-        angular: 0.2,
-    };
+    let opt = MeshOptions::new(0.01, 0.2);
     let mesh = mesh::tessellate(b, &opt).expect("the result meshes");
     let solid = b.solid_ids().next().expect("one solid");
     mesh::report(b, &mesh, solid).watertight()

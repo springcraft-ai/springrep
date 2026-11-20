@@ -423,6 +423,7 @@ fn range_near(raw: &Raw, e: usize, old: (f64, f64)) -> (f64, f64) {
 
 /// How far healing moved a solid's geometry: the largest movement, where, and what moved.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Healed {
     pub moved: f64,
     pub at: Point3,

@@ -18,6 +18,7 @@ use crate::{
 };
 
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Issue {
     pub message: String,
 }
@@ -171,6 +172,7 @@ pub fn self_crossings(b: &Brep) -> Vec<SelfCrossing> {
 /// Two faces of one solid that share no edge but meet at `at`, and how deep one passes through
 /// the other in mm: zero where they only touch.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct SelfCrossing {
     pub a: FaceId,
     pub b: FaceId,

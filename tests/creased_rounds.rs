@@ -21,9 +21,11 @@ fn up(z: f64) -> Frame {
 
 /// A wedge ruled between two rectangles 30 deep, each from `x0` to `x1` on the plane at its `z`.
 fn wedge(id: &str, sections: [(f64, f64, f64); 2]) -> Brep {
-    let sections = sections.map(|(z, x0, x1)| Section {
-        profile: Profile::rect(Vec2::new(0.5 * (x0 + x1), 0.0), x1 - x0, 30.0),
-        frame: up(z),
+    let sections = sections.map(|(z, x0, x1)| {
+        Section::new(
+            Profile::rect(Vec2::new(0.5 * (x0 + x1), 0.0), x1 - x0, 30.0),
+            up(z),
+        )
     });
     loft(&sections, true, id).unwrap()
 }

@@ -24,6 +24,7 @@ use crate::{
 
 /// A face whose mean width is under the size asked for.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Narrow {
     pub face: FaceId,
     /// Twice the area over the perimeter, seams left out: a strip's width, a disc's radius.
@@ -37,6 +38,7 @@ pub struct Narrow {
 /// Faces that face each other closer than the size asked for: across empty space (a gap) or
 /// across material (a sliver).
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Thin {
     /// The face sampled, and the face its rays met.
     pub faces: (FaceId, FaceId),

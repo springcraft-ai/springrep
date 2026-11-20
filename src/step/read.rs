@@ -21,6 +21,7 @@ use crate::{
 /// How a STEP file is read. The default makes each solid agree with itself and keeps what it can,
 /// reporting every change in the [`Import`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ReadOptions {
     /// Keep only solids whose geometry the file already gives agreeing with itself within
     /// [`tol::LINEAR`], and that do not pass through themselves. A solid the default read would
@@ -32,9 +33,16 @@ pub struct ReadOptions {
     pub strict: bool,
 }
 
+impl ReadOptions {
+    pub const fn new(strict: bool) -> ReadOptions {
+        ReadOptions { strict }
+    }
+}
+
 /// What a read produced: every solid that became a valid kernel solid, how far healing moved
 /// each one's geometry, and why any other was rejected.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Import {
     pub brep: Brep,
     /// One entry per rejected solid placement: `#id: error`.
@@ -56,6 +64,7 @@ pub struct Import {
 
 /// A solid of an import as its file describes it.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Body {
     pub solid: SolidId,
     /// The file's id of the solid it came from; an assembly places one solid many times.
@@ -71,6 +80,7 @@ pub struct Body {
 
 /// Two faces of one placed solid that share no edge but meet.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Crossed {
     /// The solid's position among `Import::brep`'s solids.
     pub index: usize,
@@ -88,6 +98,7 @@ pub struct Crossed {
 /// without moving it further than the file says it meets, so its edges and vertices carry the
 /// tolerances it does meet within. Those are measured, and may be wider than the file states.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Tolerant {
     /// The solid's position among `Import::brep`'s solids.
     pub index: usize,
@@ -106,6 +117,7 @@ pub struct Tolerant {
 
 /// How far healing moved one placed solid's geometry to close it within the kernel tolerance.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Healing {
     /// The solid's position among `Import::brep`'s solids.
     pub index: usize,

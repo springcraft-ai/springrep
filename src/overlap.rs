@@ -332,6 +332,7 @@ pub fn between(a: &Brep, b: &Brep) -> Result<Meeting> {
 
 /// How finely [`swept_contact`] searches, and what it counts as one solid running into another.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Sweep {
     /// How deep inside both a point must lie for the move to have run in, mm, never less than the
     /// meshes' deflection: a sliver of the two thinner than twice this only touches.
@@ -342,6 +343,16 @@ pub struct Sweep {
     /// How much farther than the first contact the answer may lie, mm: the search stops once no
     /// cell left could hold a contact sooner by more than this.
     pub slack: f64,
+}
+
+impl Sweep {
+    pub fn new(inside: f64, cell: f64, slack: f64) -> Sweep {
+        Sweep {
+            inside,
+            cell,
+            slack,
+        }
+    }
 }
 
 impl Default for Sweep {

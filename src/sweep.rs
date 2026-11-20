@@ -31,6 +31,7 @@ use crate::{
 
 /// One leg of a sweep's path, from where the last ended, heading along the carried frame's z.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Leg {
     /// Straight ahead by `length`.
     Line { length: f64 },

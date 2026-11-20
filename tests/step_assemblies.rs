@@ -26,34 +26,22 @@ const RED: [f64; 3] = [0.8, 0.1, 0.1];
 fn written() -> String {
     let (block, post) = (block(), post());
     let parts = [
-        Part {
-            name: "block",
-            brep: &block,
-            colour: Some(RED),
-        },
-        Part {
-            name: "post",
-            brep: &post,
-            colour: None,
-        },
+        Part::new("block", &block, Some(RED)),
+        Part::new("post", &post, None),
     ];
     let instances = [
-        Instance {
-            name: "base",
-            part: 0,
-            at: Transform::IDENTITY,
-        },
-        Instance {
-            name: "post-a",
-            part: 1,
-            at: Transform::translation(Vec3::new(0.0, 0.0, 40.0)),
-        },
-        Instance {
-            name: "post-b",
-            part: 1,
-            at: Transform::rotation(Vec3::ZERO, Vec3::X, FRAC_PI_2)
+        Instance::new("base", 0, Transform::IDENTITY),
+        Instance::new(
+            "post-a",
+            1,
+            Transform::translation(Vec3::new(0.0, 0.0, 40.0)),
+        ),
+        Instance::new(
+            "post-b",
+            1,
+            Transform::rotation(Vec3::ZERO, Vec3::X, FRAC_PI_2)
                 .then(&Transform::translation(Vec3::new(50.0, 0.0, 0.0))),
-        },
+        ),
     ];
     step::write_assembly("stand", &parts, &instances).unwrap()
 }
@@ -139,16 +127,8 @@ fn a_file_of_one_part_names_its_body_and_gives_it_no_use() {
 #[test]
 fn an_instance_of_a_part_the_file_lacks_is_invalid() {
     let b = block();
-    let parts = [Part {
-        name: "block",
-        brep: &b,
-        colour: None,
-    }];
-    let stray = [Instance {
-        name: "stray",
-        part: 1,
-        at: Transform::IDENTITY,
-    }];
+    let parts = [Part::new("block", &b, None)];
+    let stray = [Instance::new("stray", 1, Transform::IDENTITY)];
     assert!(matches!(
         step::write_assembly("a", &parts, &stray),
         Err(Error::InvalidInput(_))
