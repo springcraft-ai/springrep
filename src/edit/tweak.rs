@@ -569,6 +569,49 @@ pub(crate) fn fit_offset_curve(
     unsupported("offsetting a face whose offset no spline holds to the tolerance")
 }
 
+/// Samples along each parameter where [`folds`] looks for the offset running backwards.
+const FOLD_SAMPLES: usize = 256;
+
+/// Whether `s` offset by `d` along its natural normal runs backwards somewhere over `(u, v)`:
+/// where `d` passes a radius of curvature, the offset's derivative along that parameter turns
+/// against the surface's own, `(1 − d·k)` times it, and the offset loops over itself (Farouki and
+/// Neff 1990). An extrusion is checked along its curve and a revolution along its meridian, the
+/// only directions in which they bend; any other surface along both parameters on a grid.
+fn folds(s: &Surface, d: f64, (u, v): ((f64, f64), (f64, f64))) -> bool {
+    let at = |a: f64, b: f64| s.eval(a, b) + s.normal(a, b) * d;
+    // Against the surface's own derivative, the offset's by central differences over a step small
+    // beside the span sampled. Where the parameters degenerate, as at a pole, the surface's own
+    // derivative vanishes and says nothing.
+    let backwards = |a: f64, b: f64, along_u: bool| {
+        let (_, su, sv) = s.d1(a, b);
+        let (own, h) = if along_u {
+            (su, 1e-6 * (u.1 - u.0))
+        } else {
+            (sv, 1e-6 * (v.1 - v.0))
+        };
+        if own.norm() <= 1e-9 * (1.0 + d.abs()) {
+            return false;
+        }
+        let moved = if along_u {
+            at(a + h, b) - at(a - h, b)
+        } else {
+            at(a, b + h) - at(a, b - h)
+        };
+        moved.dot(own) < 0.0
+    };
+    let steps =
+        |(lo, hi): (f64, f64), n: usize| (0..=n).map(move |k| lo + (hi - lo) * k as f64 / n as f64);
+    match s {
+        Surface::Extrusion(_) => steps(u, FOLD_SAMPLES).any(|a| backwards(a, v.0, true)),
+        Surface::Revolution(_) => steps(v, FOLD_SAMPLES).any(|b| backwards(u.0, b, false)),
+        _ => {
+            let n = FOLD_SAMPLES / 8;
+            steps(u, n)
+                .any(|a| steps(v, n).any(|b| backwards(a, b, true) || backwards(a, b, false)))
+        }
+    }
+}
+
 /// The offset of a surface with no exact offset of its own kind, `d` along its natural normal,
 /// over `(u, v)` (a face's parameter box, with room): an extrusion's is the extrusion of its
 /// curve's offset and a revolution's the revolution of its meridian's, so only that curve is
@@ -576,6 +619,11 @@ pub(crate) fn fit_offset_curve(
 /// the true offset `p + d·n` at the middle of each span and refined until within [`OFFSET_FIT`].
 fn offset_fitted(s: &Surface, d: f64, (u, v): ((f64, f64), (f64, f64))) -> Result<Surface> {
     let at = |a: f64, b: f64| s.eval(a, b) + s.normal(a, b) * d;
+    if folds(s, d, (u, v)) {
+        return unsupported(
+            "offsetting a face past its radius of curvature, where its offset loops over itself",
+        );
+    }
     match s {
         Surface::Extrusion(e) => {
             let breaks = e.curve.breakpoints(u.0, u.1);

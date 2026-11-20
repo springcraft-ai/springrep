@@ -723,3 +723,33 @@ fn a_ball_offset_keeps_its_seam_apart_in_any_frame() {
         );
     }
 }
+
+// An extrusion of the ellipse of semi-axes 5 and 3, whose least radius of curvature is 9/5 at the
+// ends of its long axis. Moved inward by 2.5, past that radius, its offset runs backwards there and
+// loops over itself: no surface holds it, and the offset is refused rather than fitted. Moved
+// inward by 1.5, short of it, or outward by 2.5, the offset is fitted.
+#[test]
+fn an_extrusion_moved_past_its_radius_of_curvature_is_not_fitted() {
+    let e = Surface::Extrusion(Box::new(crate::geom::Extrusion {
+        curve: Curve::Ellipse(crate::geom::Ellipse {
+            frame: Frame::WORLD,
+            major: 5.0,
+            minor: 3.0,
+        }),
+        dir: Vec3::Z,
+    }));
+    let bounds = ((0.0, TAU), (0.0, 10.0));
+    // The natural normal at the end of the long axis, (5, 0, 0): inward where it points to -x.
+    let inward = if e.normal(0.0, 0.0).x < 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+    let past = offset_fitted(&e, 2.5 * inward, bounds);
+    assert!(
+        matches!(&past, Err(Error::Unsupported(why)) if why.contains("radius of curvature")),
+        "{past:?}"
+    );
+    assert!(offset_fitted(&e, 1.5 * inward, bounds).is_ok());
+    assert!(offset_fitted(&e, -2.5 * inward, bounds).is_ok());
+}
