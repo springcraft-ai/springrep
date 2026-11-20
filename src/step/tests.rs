@@ -1,6 +1,6 @@
 use std::f64::consts::{PI, TAU};
 
-use super::{read, write};
+use super::{ReadOptions, read, read_part_with, read_with, write};
 use crate::{
     boolean, check,
     geom::{Circle, Cone, Curve, Line, Ruled, Surface},
@@ -708,11 +708,17 @@ fn faces_held_apart_are_closed_by_moving_their_surfaces() {
 #[test]
 fn geometry_healing_may_not_close_is_kept_with_the_tolerances_it_measures() {
     // The rounds grown 0.2 mm: healing would move a surface 0.15 mm, more than it may, so the
-    // file's geometry stays and the round's four edges and four vertices hold the gap, whatever
-    // the file states.
+    // file's surfaces stay and the round's four edges and four vertices hold the gap, whatever
+    // the file states. An end arc of the round takes a curve between its faces instead, out on
+    // the grown round mid-way along it: that moves it 0.2 mm, and the report says so.
     let imp = read(with_rounds_grown(&rounded_block(), 0.2).as_bytes(), "imp").unwrap();
     assert!(imp.rejected.is_empty(), "{:?}", imp.rejected);
-    assert!(imp.healed.is_empty());
+    assert_eq!(imp.healed.len(), 1, "{:?}", imp.healed);
+    let h = &imp.healed[0];
+    assert!(
+        h.what.starts_with("edge #") && (h.moved - 0.2).abs() < 0.005 && h.surfaces == 0.0,
+        "{h:?}"
+    );
     assert!(check::check(&imp.brep).is_empty());
     assert_eq!((imp.tolerant[0].vertices, imp.tolerant[0].edges), (4, 4));
     assert!(
@@ -868,14 +874,22 @@ fn an_edge_off_its_faces_past_the_files_uncertainty_takes_a_curve_between_them()
     // The bent edge's middle lies 0.1 mm off the block's edge along a unit vector across both
     // faces' normals, so off each plane by 0.1/√2, more than the file's 0.05 mm, and healing may
     // move it only 0.05 mm. Between two planes that cross, the curve midway is their line: the
-    // block comes back exact, with no local tolerance.
+    // block comes back exact, with no local tolerance. Its middle moved the 0.1 mm the bend put
+    // it off, square to the line, and the report says so whether or not the file states how
+    // closely its geometry meets.
     let b = block("b", [0.0; 3], [10.0, 6.0, 3.0]);
-    let text = with_uncertainty(&with_edge_bent(&b, 0.1), 0.05);
-    let imp = read(text.as_bytes(), "imp").unwrap();
-    assert!(imp.rejected.is_empty(), "{:?}", imp.rejected);
-    assert!(check::check(&imp.brep).is_empty());
-    assert_eq!(imp.brep.tolerant(), (vec![], vec![]));
-    assert!((measure::volume(&imp.brep) - 180.0).abs() < 1e-9);
+    let bent = with_edge_bent(&b, 0.1);
+    for text in [with_uncertainty(&bent, 0.05), bent] {
+        let imp = read(text.as_bytes(), "imp").unwrap();
+        assert!(imp.rejected.is_empty(), "{:?}", imp.rejected);
+        assert!(check::check(&imp.brep).is_empty());
+        assert_eq!(imp.brep.tolerant(), (vec![], vec![]));
+        assert!((measure::volume(&imp.brep) - 180.0).abs() < 1e-9);
+        assert_eq!(imp.healed.len(), 1, "{:?}", imp.healed);
+        let h = &imp.healed[0];
+        assert!(h.what.starts_with("edge #"), "{h:?}");
+        assert!((h.moved - 0.1).abs() < 1e-6, "{h:?}");
+    }
 }
 
 #[test]
@@ -1588,11 +1602,10 @@ fn fitted_pcurves_stay_within_half_the_tolerance_between_their_checks() {
     }
 }
 
-#[test]
-fn a_solid_passing_through_itself_is_kept_with_where_and_how_deep() {
-    // Two 2 mm blocks overlapping by 1 mm each way, written as two solids, then made one solid whose
-    // one shell holds both blocks' faces: it passes through itself where their faces cross, the
-    // faces reaching 1 mm either side of each other.
+/// Two 2 mm blocks overlapping by 1 mm each way, written as two solids, then made one solid whose
+/// one shell holds both blocks' faces: it passes through itself where their faces cross, the
+/// faces reaching 1 mm either side of each other.
+fn blocks_in_one_shell() -> String {
     let mut b = block("a", [0.0, 0.0, 0.0], [2.0, 2.0, 2.0]);
     b.append(&block("b", [1.0, 1.0, 1.0], [3.0, 3.0, 3.0]));
     let text = write(&b, "board").unwrap();
@@ -1623,7 +1636,12 @@ fn a_solid_passing_through_itself_is_kept_with_where_and_how_deep() {
             l.replace(&format!(",{}", id(second)), "") + "\n"
         })
         .collect();
-    let imp = read(one.as_bytes(), "imp").unwrap();
+    one
+}
+
+#[test]
+fn a_solid_passing_through_itself_is_kept_with_where_and_how_deep() {
+    let imp = read(blocks_in_one_shell().as_bytes(), "imp").unwrap();
     assert!(imp.rejected.is_empty(), "{:?}", imp.rejected);
     assert_eq!(imp.brep.solid_ids().count(), 1);
     assert!(check::check_structure(&imp.brep).is_empty());
@@ -1901,4 +1919,91 @@ fn a_band_of_a_spline_surface_closed_round_one_parameter_is_read() {
         let want = PI * 4.0 * 3.0;
         assert!((measure::volume(&b) - want).abs() < 1e-6 * want);
     }
+}
+
+const STRICT: ReadOptions = ReadOptions { strict: true };
+
+/// What a strict read of `text` rejects: its one solid, with the reason.
+fn strictly_rejected(text: &str) -> String {
+    let imp = read_with(text.as_bytes(), "imp", &STRICT).unwrap();
+    assert_eq!(imp.brep.solid_ids().count(), 0);
+    assert_eq!(imp.rejected.len(), 1, "{:?}", imp.rejected);
+    imp.rejected[0].clone()
+}
+
+#[test]
+fn a_strict_read_keeps_a_file_that_agrees_with_itself_as_it_is() {
+    // Another system's block, its geometry meeting exactly: read strictly, it is the plain read's
+    // solid, unmoved and with nothing to report.
+    let b = block("b", [0.0; 3], [10.0, 6.0, 3.0]);
+    let text = write(&b, "b").unwrap().replace("'springrep'", "'other'");
+    let imp = read_with(text.as_bytes(), "imp", &STRICT).unwrap();
+    assert!(imp.rejected.is_empty(), "{:?}", imp.rejected);
+    assert!(imp.healed.is_empty() && imp.tolerant.is_empty() && imp.crossed.is_empty());
+    assert!(check::check(&imp.brep).is_empty());
+    assert!((measure::volume(&imp.brep) - 180.0).abs() < 1e-9);
+    let part = read_part_with(text.as_bytes(), "imp", &STRICT).unwrap();
+    assert!((measure::volume(&part) - 180.0).abs() < 1e-9);
+}
+
+#[test]
+fn a_strict_read_rejects_what_the_plain_read_heals() {
+    // A vertex 3.7e-5 mm off its corner, and rounds grown 3e-5 mm off the sides they are tangent
+    // to: the plain read moves both back.
+    let blk = block("b", [0.0; 3], [10.0, 4.0, 3.0]);
+    let off = with_vertex_moved(&blk, Vec3::new(2e-5, -1e-5, 3e-5));
+    assert_eq!(read(off.as_bytes(), "imp").unwrap().healed.len(), 1);
+    let why = strictly_rejected(&off);
+    assert!(
+        why.contains("ends") && why.contains("from vertex #"),
+        "{why}"
+    );
+    let grown = with_rounds_grown(&rounded_block(), 3e-5);
+    assert_eq!(read(grown.as_bytes(), "imp").unwrap().healed.len(), 1);
+    let why = strictly_rejected(&grown);
+    assert!(why.contains("strict read moves nothing"), "{why}");
+}
+
+#[test]
+fn a_strict_read_rejects_what_the_plain_read_keeps_with_tolerances_or_moves_between_faces() {
+    // Rounds held 0.2 mm off their sides in a file that states 0.4 mm, which the plain read keeps
+    // with local tolerances, and the bent edge, which it straightens between its faces.
+    let held = with_uncertainty(&with_rounds_grown(&rounded_block(), 0.2), 0.4);
+    assert_eq!(read(held.as_bytes(), "imp").unwrap().tolerant.len(), 1);
+    let why = strictly_rejected(&held);
+    assert!(why.contains("off face #"), "{why}");
+    let bent = with_uncertainty(
+        &with_edge_bent(&block("b", [0.0; 3], [10.0, 6.0, 3.0]), 0.1),
+        0.05,
+    );
+    let why = strictly_rejected(&bent);
+    assert!(why.contains("off face #"), "{why}");
+}
+
+#[test]
+fn a_strict_read_rejects_what_the_plain_read_heals_loosely() {
+    // A 1 mm cube with a corner 0.35 mm off: past what healing may move, so the plain read heals
+    // it loosely or rejects it; the strict read rejects it whatever the plain one does.
+    let cube = block("b", [0.0; 3], [1.0, 1.0, 1.0]);
+    let text = with_vertex_moved(&cube, Vec3::new(0.35, 0.0, 0.0));
+    let why = strictly_rejected(&text);
+    assert!(why.contains("strict read moves nothing"), "{why}");
+}
+
+#[test]
+fn a_strict_read_rejects_a_solid_passing_through_itself_and_keeps_one_touching_itself() {
+    let why = strictly_rejected(&blocks_in_one_shell());
+    assert!(why.contains("passes through itself in"), "{why}");
+    // A block bored so the bore touches its top along a line: written as one solid touching
+    // itself, read back with the contact joined. It moves nothing, so a strict read keeps it.
+    let a = block("a", [0.0, 0.0, 0.0], [12.0, 10.0, 8.0]);
+    let frame = Frame::new(Vec3::new(-1.0, 5.0, 5.0), Vec3::X, Vec3::Y).unwrap();
+    let bore = extrude(&Profile::circle(Vec2::ZERO, 6.0), &frame, 14.0, "c").unwrap();
+    let d = boolean::difference(&a, &bore).unwrap();
+    let text = write(&d, "part").unwrap();
+    let imp = read_with(text.as_bytes(), "imp", &STRICT).unwrap();
+    assert!(imp.rejected.is_empty(), "{:?}", imp.rejected);
+    assert!(imp.crossed.iter().all(|x| x.depth <= crate::tol::LINEAR));
+    let (v0, v1) = (measure::volume(&d), measure::volume(&imp.brep));
+    assert!((v1 - v0).abs() <= 1e-9 * v0, "{v1} vs {v0}");
 }

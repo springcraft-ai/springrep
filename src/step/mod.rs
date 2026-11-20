@@ -12,7 +12,10 @@ mod topology;
 mod write;
 
 pub use heal::{Healed, MAX_HEAL};
-pub use read::{Body, Crossed, Healing, Import, Tolerant, read, read_part};
+pub use read::{
+    Body, Crossed, Healing, Import, ReadOptions, Tolerant, read, read_part, read_part_with,
+    read_with,
+};
 pub(crate) use topology::{PartFace, Parts, parts_of, rebuilt, sewn, solid_of};
 pub use write::{Instance, Part, write, write_assembly, write_faces};
 

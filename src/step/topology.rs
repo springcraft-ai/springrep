@@ -1427,10 +1427,29 @@ fn shift_into(s: &Surface, tracks: &mut [Track], lo: Vec2, hi: Vec2) {
 /// A solid read, its faces' STEP ids and names in order, and how far healing moved its geometry.
 pub(super) type ReadSolid = (Brep, Vec<(u64, String)>, Option<heal::Healed>);
 
+/// The larger of two movements.
+fn farther(a: Option<heal::Healed>, b: Option<heal::Healed>) -> Option<heal::Healed> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(if b.moved > a.moved {
+            heal::Healed {
+                surfaces: a.surfaces.max(b.surfaces),
+                ..b
+            }
+        } else {
+            heal::Healed {
+                surfaces: a.surfaces.max(b.surfaces),
+                ..a
+            }
+        }),
+        (a, b) => a.or(b),
+    }
+}
+
 /// Builds the solid of a `MANIFOLD_SOLID_BREP` or `BREP_WITH_VOIDS`, healed where its geometry
 /// disagrees with itself, and checked. Returns the solid, its faces' STEP ids and names in order,
-/// and how far healing moved its geometry.
-pub(super) fn solid(geo: &mut Geometry, id: u64) -> Result<ReadSolid> {
+/// and how far healing moved its geometry. `strict` builds it only where the file's geometry
+/// already agrees with itself, and is an error naming where it does not.
+pub(super) fn solid(geo: &mut Geometry, id: u64, strict: bool) -> Result<ReadSolid> {
     if geo
         .file
         .get(id)
@@ -1455,6 +1474,16 @@ pub(super) fn solid(geo: &mut Geometry, id: u64) -> Result<ReadSolid> {
     let file = join_contacts(without_split(rd.raw, &rd.splits));
     let mut raw = file.clone();
     let names = || file.faces.iter().map(|f| (f.id, f.name.clone())).collect();
+    if strict {
+        if let Some(why) = heal::misfit(&file) {
+            return Err(Error::InvalidInput(format!(
+                "{why}, and a strict read moves nothing to close it"
+            )));
+        }
+        // A file that agrees with itself is left exactly as it is.
+        let (ranges, _) = heal::heal(&mut raw)?;
+        return assemble(&raw, &ranges, None).map(|b| (b, names(), None));
+    }
     let exact = heal::heal(&mut raw)
         .and_then(|(ranges, healed)| assemble(&raw, &ranges, None).map(|b| (b, healed)));
     let within = uncertainty.filter(|&u| u > tol::LINEAR);
@@ -1476,11 +1505,12 @@ pub(super) fn solid(geo: &mut Geometry, id: u64) -> Result<ReadSolid> {
             .map_err(|t| format!("kept as the file has it, {t}"))
             .and_then(|t| {
                 assemble(&raw, &t.ranges, Some(&t))
+                    .map(|b| (b, t.moved))
                     .map_err(|e| format!("kept as the file has it, with local tolerances: {e}"))
             })
     };
     match (tolerant(&file), why) {
-        (Ok(b), _) => Ok((b, names(), None)),
+        (Ok((b, moved)), _) => Ok((b, names(), moved)),
         (Err(_), Ok((b, healed))) => Ok((b, names(), healed)),
         (Err(t), Err(e)) => {
             // Healed where it can be, and held by tolerances where it cannot.
@@ -1491,7 +1521,7 @@ pub(super) fn solid(geo: &mut Geometry, id: u64) -> Result<ReadSolid> {
                     "healing would move {} {:.1e} mm, more than the file's {within:.1e} mm",
                     h.what, h.moved
                 ),
-                (Ok(b), _, _) => return Ok((b, names(), healed)),
+                (Ok((b, moved)), _, _) => return Ok((b, names(), farther(healed, moved))),
                 (Err(l), _, _) => l,
             };
             Err(Error::InvalidInput(format!(

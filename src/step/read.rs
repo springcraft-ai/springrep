@@ -14,9 +14,23 @@ use super::{
 use crate::{
     Error, Result, check,
     math::Point3,
-    threads,
+    threads, tol,
     topo::{Brep, FaceId, FaceName, SolidId},
 };
+
+/// How a STEP file is read. The default makes each solid agree with itself and keeps what it can,
+/// reporting every change in the [`Import`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReadOptions {
+    /// Keep only solids whose geometry the file already gives agreeing with itself within
+    /// [`tol::LINEAR`], and that do not pass through themselves. A solid the default read would
+    /// heal, keep with local tolerances, or keep while it passes through itself is rejected
+    /// instead, with the reason: so `healed` and `tolerant` stay empty, every solid kept is the
+    /// file's own geometry, and `crossed` holds only places where a solid touches itself. Coincident
+    /// vertices and edges are still joined, a shell written inside out is still turned, and units
+    /// and placements still apply: none of those moves geometry.
+    pub strict: bool,
+}
 
 /// What a read produced: every solid that became a valid kernel solid, how far healing moved
 /// each one's geometry, and why any other was rejected.
@@ -432,7 +446,12 @@ impl<'a> Assembly<'a> {
 /// itself are written one by one and join again. A file with a solid this kernel rejects is an
 /// error, since the part would lack it.
 pub fn read_part(text: &[u8], feature: &str) -> Result<Brep> {
-    let import = read(text, feature)?;
+    read_part_with(text, feature, &ReadOptions::default())
+}
+
+/// [`read_part`], read as `options` say.
+pub fn read_part_with(text: &[u8], feature: &str, options: &ReadOptions) -> Result<Brep> {
+    let import = read_with(text, feature, options)?;
     if !import.rejected.is_empty() {
         return Err(Error::InvalidResult(import.rejected));
     }
@@ -450,6 +469,11 @@ pub fn read_part(text: &[u8], feature: &str) -> Result<Brep> {
 /// Reads a STEP file into kernel solids. Faces carry the names a file this kernel wrote
 /// gave them; otherwise each is `<feature>.face_<i>`, numbered in the order the solids are placed.
 pub fn read(text: &[u8], feature: &str) -> Result<Import> {
+    read_with(text, feature, &ReadOptions::default())
+}
+
+/// [`read`], read as `options` say.
+pub fn read_with(text: &[u8], feature: &str, options: &ReadOptions) -> Result<Import> {
     let file = part21::parse(text)?;
     let ours = file.originating_system() == Some(WRITER);
     let mut geo = Geometry::new(&file);
@@ -483,7 +507,7 @@ pub fn read(text: &[u8], feature: &str) -> Result<Import> {
     let mut keys: Vec<Key> = placements.iter().map(Placement::key).collect();
     keys.sort_unstable();
     keys.dedup();
-    let built = build_all(&file, &keys);
+    let built = build_all(&file, &keys, options.strict);
     let mut out = Brep::new();
     let mut rejected = Vec::new();
     let mut healed = Vec::new();
@@ -499,6 +523,22 @@ pub fn read(text: &[u8], feature: &str) -> Result<Import> {
         match &built[&pl.key()] {
             Err(e) => rejected.push(format!("#{}: {e}", pl.solid)),
             Ok((b, names, heal, stated)) => {
+                let found = crossings
+                    .entry(pl.key())
+                    .or_insert_with(|| check::self_crossings(b))
+                    .clone();
+                if options.strict {
+                    let through = found.iter().filter(|x| x.depth > tol::LINEAR);
+                    if let Some(deepest) = through.clone().map(|x| x.depth).reduce(f64::max) {
+                        rejected.push(format!(
+                            "#{}: the solid passes through itself in {} places, {deepest:.1e} mm at \
+                             the deepest, and a strict read keeps only solids that do not",
+                            pl.solid,
+                            through.count()
+                        ));
+                        continue;
+                    }
+                }
                 if let Some(h) = heal {
                     healed.push(Healing {
                         index,
@@ -524,10 +564,6 @@ pub fn read(text: &[u8], feature: &str) -> Result<Import> {
                     });
                 }
                 let first = out.face_count();
-                let found = crossings
-                    .entry(pl.key())
-                    .or_insert_with(|| check::self_crossings(b))
-                    .clone();
                 let solid_index = index;
                 index += 1;
                 let mut copy = b.clone();
@@ -762,7 +798,7 @@ fn guarded<C, T>(
 /// no long build starts last. Each result is filed under its own key, whatever finished first.
 /// A solid whose build panics is rejected and the rest are still built, where panics unwind
 /// ([`guarded`]).
-fn build_all(file: &File, keys: &[Key]) -> HashMap<Key, Built> {
+fn build_all(file: &File, keys: &[Key], strict: bool) -> HashMap<Key, Built> {
     let mut order: Vec<(usize, usize)> = keys
         .iter()
         .enumerate()
@@ -780,7 +816,7 @@ fn build_all(file: &File, keys: &[Key]) -> HashMap<Key, Built> {
                 || Geometry::new(file),
                 |geo| {
                     geo.use_scaled(context, f64::from_bits(scale))
-                        .and_then(|_| topology::solid(geo, solid))
+                        .and_then(|_| topology::solid(geo, solid, strict))
                         .map(|(b, names, healed)| (b, names, healed, geo.uncertainty()))
                         .map_err(|e| e.to_string())
                 },

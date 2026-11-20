@@ -843,12 +843,14 @@ pub(super) fn heal_loosely(raw: &mut Raw) -> Option<Healed> {
     movement(&file, raw, &BTreeSet::new())
 }
 
-/// What [`tolerate`] gives a solid it keeps as the file has it: each edge's range, and each
-/// vertex's and edge's tolerance (at least [`tol::LINEAR`]).
+/// What [`tolerate`] gives a solid it keeps as the file has it: each edge's range, each vertex's
+/// and edge's tolerance (at least [`tol::LINEAR`]), and how far the curves it put [`midway`]
+/// between their faces moved those edges.
 pub(super) struct Tolerated {
     pub ranges: Vec<(f64, f64)>,
     pub vertices: Vec<f64>,
     pub edges: Vec<f64>,
+    pub moved: Option<Healed>,
 }
 
 /// How much wider than the largest gap sampled along an edge its tolerance is: the gap between
@@ -982,6 +984,7 @@ pub(super) fn tolerate(
     raw: &mut Raw,
     stated: Option<f64>,
 ) -> std::result::Result<Tolerated, String> {
+    let file = raw.clone();
     let mut ranges = Vec::with_capacity(raw.edges.len());
     let mut edges = Vec::with_capacity(raw.edges.len());
     let mut vertices = vec![tol::LINEAR; raw.points.len()];
@@ -1056,5 +1059,42 @@ pub(super) fn tolerate(
         ranges,
         vertices,
         edges,
+        moved: movement(&file, raw, &BTreeSet::new()),
     })
+}
+
+/// Where `raw` first disagrees with itself by more than [`tol::LINEAR`]: an edge that does not end
+/// at its vertices or does not lie on one of its faces, sampled as [`heal`] samples it to decide
+/// whether a file needs healing at all. `None` where the file agrees with itself.
+pub(super) fn misfit(raw: &Raw) -> Option<String> {
+    for e in 0..raw.edges.len() {
+        let edge = &raw.edges[e];
+        let Some(r) = range_of(raw, e) else {
+            return Some(format!(
+                "edge #{} does not run between its vertices",
+                edge.id
+            ));
+        };
+        if edge_fits(raw, e, Some(r)) {
+            continue;
+        }
+        let c = &edge.curve;
+        let ends = [(r.0, edge.start), (r.1, edge.end)]
+            .iter()
+            .map(|&(t, v)| (c.eval(t).dist(raw.points[v]), raw.vertex_ids[v]))
+            .fold((0.0, 0), |a, b| if b.0 > a.0 { b } else { a });
+        if ends.0 > tol::LINEAR {
+            return Some(format!(
+                "edge #{} ends {:.1e} mm from vertex #{}",
+                edge.id, ends.0, ends.1
+            ));
+        }
+        let (gap, f) = edge
+            .faces
+            .iter()
+            .map(|&f| (curve_gap(c, r, &raw.faces[f].surface), raw.faces[f].id))
+            .fold((0.0, 0), |a, b| if b.0 > a.0 { b } else { a });
+        return Some(format!("edge #{} lies {gap:.1e} mm off face #{f}", edge.id));
+    }
+    None
 }
