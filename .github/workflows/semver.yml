@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: MIT
 name: Semver
 
-# springrep's version is raised when a release is cut, not in each pull request. A pull request
-# that leaves the version as published is told the least release its changes need, and never
-# fails; one that raises the version must raise it enough.
+# Checks springrep against its latest release on crates.io. The check takes the release type from
+# the version in Cargo.toml, so a breaking change fails unless that version is a major bump.
 on:
   pull_request:
     paths: [src/**, Cargo.toml, .github/workflows/semver.yml]
@@ -11,47 +10,12 @@ on:
 permissions:
   contents: read
 
-env:
-  SEMVER_CHECKS_VERSION: 0.51.0
-
 jobs:
   springrep:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      # rustup installs the channel rust-toolchain.toml names on first use.
-      - run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Install cargo-semver-checks
-        run: cargo install --locked cargo-semver-checks --version "$SEMVER_CHECKS_VERSION"
-      - name: Check against the published release
-        run: |
-          published="$(cargo search springrep --limit 1 \
-              | sed -n 's/^springrep = "\([^"]*\)".*/\1/p')"
-          current="$(cargo metadata --no-deps --format-version 1 \
-              | jq -r '.packages[] | select(.name == "springrep") | .version')"
-          if [ "$current" != "$published" ]; then
-              echo "springrep $published is published; this pull request makes it $current." \
-                  >> "$GITHUB_STEP_SUMMARY"
-              cargo semver-checks
-              exit
-          fi
-          : > previous.txt
-          for kind in patch minor major; do
-              if cargo semver-checks --release-type "$kind" > report.txt 2>&1; then
-                  {
-                      echo "springrep: these changes need a $kind release after $published."
-                      if [ -s previous.txt ]; then
-                          echo '```'
-                          grep -E '^--- failure|^  [a-z]' previous.txt | sed "s#$PWD/##" || true
-                          echo '```'
-                      fi
-                  } >> "$GITHUB_STEP_SUMMARY"
-                  exit 0
-              fi
-              mv report.txt previous.txt
-          done
-          # Every release type refused: the check itself did not run.
-          cat previous.txt
-          exit 1
+      - uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
+        with:
+          package: springrep

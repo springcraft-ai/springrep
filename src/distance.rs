@@ -56,9 +56,23 @@ impl Selection {
         }
     }
 
+    pub fn faces(faces: impl IntoIterator<Item = FaceId>) -> Selection {
+        Selection {
+            faces: faces.into_iter().collect(),
+            ..Selection::default()
+        }
+    }
+
     pub fn edge(e: EdgeId) -> Selection {
         Selection {
             edges: vec![e],
+            ..Selection::default()
+        }
+    }
+
+    pub fn edges(edges: impl IntoIterator<Item = EdgeId>) -> Selection {
+        Selection {
+            edges: edges.into_iter().collect(),
             ..Selection::default()
         }
     }

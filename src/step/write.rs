@@ -1033,7 +1033,7 @@ pub struct Part<'a> {
 }
 
 impl<'a> Part<'a> {
-    pub fn new(name: &'a str, brep: &'a Brep, colour: Option<[f64; 3]>) -> Part<'a> {
+    pub const fn new(name: &'a str, brep: &'a Brep, colour: Option<[f64; 3]>) -> Part<'a> {
         Part { name, brep, colour }
     }
 }
@@ -1048,7 +1048,7 @@ pub struct Instance<'a> {
 }
 
 impl<'a> Instance<'a> {
-    pub fn new(name: &'a str, part: usize, at: Transform) -> Instance<'a> {
+    pub const fn new(name: &'a str, part: usize, at: Transform) -> Instance<'a> {
         Instance { name, part, at }
     }
 }

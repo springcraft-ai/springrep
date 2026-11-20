@@ -346,7 +346,7 @@ pub struct Sweep {
 }
 
 impl Sweep {
-    pub fn new(inside: f64, cell: f64, slack: f64) -> Sweep {
+    pub const fn new(inside: f64, cell: f64, slack: f64) -> Sweep {
         Sweep {
             inside,
             cell,

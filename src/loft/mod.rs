@@ -45,7 +45,7 @@ pub struct Section {
 }
 
 impl Section {
-    pub fn new(profile: Profile, frame: Frame) -> Section {
+    pub const fn new(profile: Profile, frame: Frame) -> Section {
         Section { profile, frame }
     }
 }

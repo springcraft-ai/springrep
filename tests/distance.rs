@@ -222,6 +222,13 @@ fn faces_edges_and_vertices_measure_as_themselves() {
     let v = vertex_at(&other, Vec3::new(12.0, 7.0, 4.0));
     let c = distance::closest(&other, &Selection::vertex(v), &b, &Selection::face(top)).unwrap();
     assert_distance(c, (4.0f64 + 1.0 + 1.0).sqrt());
+    // Floor and roof together, or every edge of the box, are as near as that same corner.
+    let both = Selection::faces([bottom, top]);
+    let c = distance::closest(&other, &Selection::vertex(v), &b, &both).unwrap();
+    assert_distance(c, (4.0f64 + 1.0 + 1.0).sqrt());
+    let edges = Selection::edges(b.edge_ids());
+    let c = distance::closest(&other, &Selection::vertex(v), &b, &edges).unwrap();
+    assert_distance(c, (4.0f64 + 1.0 + 1.0).sqrt());
 }
 
 #[test]
