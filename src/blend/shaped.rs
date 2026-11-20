@@ -980,6 +980,32 @@ fn corner_cube(at: Point3, a: &[Vec3; 3], size: f64) -> Result<Brep> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_set_back_corner_whose_rounds_cross_shallowly_keeps_each_corner_once() {
+        // A box 14.88 × 14.51 × 12.13, its three edges at the far corner rounded 1.419 and set back
+        // 3.875. Two of the patch's rims' rounds cross at a shallow angle at (11.003, 14.097,
+        // 11.716), within the tolerance of each other along a band 3e-7 long: their meeting found
+        // from either end of it is one vertex, and the result is valid. On aarch64 Linux and
+        // wasm32-wasip1 the two ends were kept apart.
+        let size = Vec3::new(14.878279824052331, 14.512511110418185, 12.131310523342954);
+        let b = crate::primitive::block(&Frame::WORLD, size, "box").unwrap();
+        let at = |p: Point3| crate::measure::edge_at(&b, p).unwrap().0;
+        let edges = [
+            at(Point3::new(6.497951769482199, size.y, size.z)),
+            at(Point3::new(size.x, 8.360032841382534, size.z)),
+            at(Point3::new(size.x, size.y, 7.959480197539578)),
+        ];
+        let out =
+            fillet_setback(&b, &edges, 1.419369652573463, 3.875221429567226, "blend").unwrap();
+        assert!(crate::check::check(&out).is_empty());
+        let corner = Point3::new(11.003058394485105, 14.096787364189812, 11.71558677711458);
+        let near = out
+            .vertex_ids()
+            .filter(|&v| out.vertex(v).point.dist(corner) < 1e-5)
+            .count();
+        assert_eq!(near, 1);
+    }
     use crate::{rays::Rays, topo::FaceName};
 
     /// A prism on the polygon `pts`, `h` tall, its sides named `e0`, `e1`, … from the first edge.

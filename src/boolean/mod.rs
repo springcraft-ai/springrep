@@ -942,6 +942,40 @@ impl<'a> Work<'a> {
         w
     }
 
+    /// The pool vertex that is the meeting of faces `fa` and `fb` found at `p` again, if one lies
+    /// on both surfaces within [`GRAZE_REACH`] of it with both surfaces within the tolerance all
+    /// the way between: surfaces crossing at a shallow angle meet within the tolerance along a
+    /// band, and two points with no excursion past it between them are one meeting.
+    fn same_meeting(&self, p: Point3, fa: usize, fb: usize) -> Option<usize> {
+        let (sa, sb) = (&self.faces[fa].dom.surface, &self.faces[fb].dom.surface);
+        let on = |x: Point3| {
+            csi::signed_distance(sa, x).abs() <= tol::LINEAR
+                && csi::signed_distance(sb, x).abs() <= tol::LINEAR
+        };
+        let c = cell(p);
+        let mut best: Option<(f64, usize)> = None;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let Some(ids) = self.grid.get(&[c[0] + dx, c[1] + dy, c[2] + dz]) else {
+                        continue;
+                    };
+                    for &i in ids {
+                        let q = self.pool[i];
+                        let d = q.dist(p);
+                        if d > GRAZE_REACH || best.is_some_and(|b| b.0 <= d) {
+                            continue;
+                        }
+                        if (0..=8).all(|k| on(p + (q - p) * (k as f64 / 8.0))) {
+                            best = Some((d, i));
+                        }
+                    }
+                }
+            }
+        }
+        best.map(|b| b.1)
+    }
+
     fn vertex(&mut self, p: Point3) -> usize {
         self.vertex_with(p, tol::LINEAR)
     }
@@ -1954,7 +1988,9 @@ impl<'a> Work<'a> {
                 if self.faces[fa].dom.locate(p) != Where::Outside
                     && self.faces[fb].dom.locate(p) != Where::Outside
                 {
-                    let v = self.vertex(p);
+                    let v = self
+                        .same_meeting(p, fa, fb)
+                        .unwrap_or_else(|| self.vertex(p));
                     self.touch_points.push(v);
                 }
             }
