@@ -1,6 +1,7 @@
 # Formatting, lints and every test, on each pull request and each push to main. The tests also run
-# on aarch64 Linux, macOS, Windows and wasm32-wasip1: each has its own maths library, and a result
-# that turns on the last bit of a sine can pass on one and fail on another.
+# on aarch64 Linux, aarch64 macOS, x86_64 Windows and wasm32-wasip1: each has its own maths library,
+# and a result that turns on the last bit of a sine can pass on one and fail on another. Each job is
+# named for the platform it runs on.
 name: ci
 
 on:
@@ -17,7 +18,7 @@ concurrency:
 
 jobs:
   # The check the main branch requires by this name.
-  test:
+  linux-x86_64:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -27,18 +28,18 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --release --locked
 
-  test-platforms:
+  platforms:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: linux-arm64
+          - name: linux-aarch64
             runner: ubuntu-24.04-arm
-          - name: macos
+          - name: macos-aarch64
             runner: macos-latest
-          - name: windows
+          - name: windows-x86_64
             runner: windows-latest
-    name: test-${{ matrix.name }}
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -51,7 +52,7 @@ jobs:
       - run: cargo test --release --locked
 
   # Where threads cannot be spawned and a panic aborts the whole test binary.
-  test-wasm:
+  wasm32-wasip1:
     runs-on: ubuntu-24.04
     env:
       WASMTIME: "50.0.3"
