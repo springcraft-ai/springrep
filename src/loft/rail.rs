@@ -577,9 +577,10 @@ pub(crate) fn bezier_fit(params: &[f64], degree: usize) -> Result<Across> {
 }
 
 /// Cubics through consecutive runs of `per + 1` of `params` (each run starting where the last
-/// ended), joined only by position: data whose second derivative jumps at the joins, as a frame
-/// carried along a cubic spline's breakpoints does, converges at fourth order this way and only at
-/// second order through one cubic.
+/// ended), joined C¹ but not C²: [`Across::apply`] gives both sides of a join the mean of their end
+/// tangents. Data whose second derivative jumps at the joins, as a frame carried along a cubic
+/// spline's breakpoints does, converges at fourth order this way and only at second order through
+/// one cubic.
 pub(crate) fn interpolation_pieces(params: &[f64], per: usize) -> Result<Across> {
     if per < 3 || !(params.len() - 1).is_multiple_of(per) {
         return Err(Error::Numerical(
