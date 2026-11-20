@@ -1,11 +1,13 @@
 //! Rays against faces, against closed forms: where they cross, how often, and the normal there.
 
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_4, PI, SQRT_2, TAU};
 
 use springrep::{
     boolean::{intersection, union},
-    geom::Curve,
+    edit,
+    geom::{Curve, Surface},
     math::{Frame, Point3, Vec2, Vec3},
+    primitive,
     profile::{NamedSegment, PointsInterp, Profile, ProfileLoop, Segment},
     rays::{Hit, Rays},
     sweep::{extrude, revolve},
@@ -313,4 +315,33 @@ fn a_ray_just_inside_a_curved_rim_crosses_both_ends() {
     let o = Vec3::new(r * a.cos(), r * a.sin(), -5.0);
     let hits = cast(&disc, o, Vec3::Z, FAR);
     assert_ts(&hits, &[5.0, 9.0]);
+}
+
+#[test]
+fn rays_parallel_to_a_45_degree_cones_generators_cross_it_where_they_meet_it() {
+    // A cylinder of radius 20, 10 tall, its side drafted 45° about its base: a frustum narrowing
+    // to radius 10 at its top, its side a cone whose half-angle is stored as exactly π/4. At 45°
+    // a cone's normal runs parallel to the generator across the axis, so a ray from 1 mm outside
+    // along the inward normal meets the side once, at t = 1, and then leaves through the base,
+    // as far again as the point is high, times √2.
+    let cylinder = primitive::cylinder(&Frame::WORLD, 20.0, 10.0, "c").unwrap();
+    let side = cylinder
+        .face_ids()
+        .find(|&f| matches!(cylinder.face(f).surface, Surface::Cylinder(_)))
+        .unwrap();
+    let frustum = edit::draft(&cylinder, &[side], &Frame::WORLD, FRAC_PI_4).unwrap();
+    for z in [2.0, 4.0, 6.0, 8.0] {
+        for k in 0..64 {
+            let a = TAU * f64::from(k) / 64.0;
+            let r = 20.0 - z;
+            let (radial, n) = (
+                Vec3::new(a.cos(), a.sin(), 0.0),
+                Vec3::new(a.cos(), a.sin(), 1.0),
+            );
+            let n = n * FRAC_1_SQRT_2;
+            let p = radial * r + Vec3::Z * z;
+            let hits = cast(&frustum, p + n, -n, FAR);
+            assert_ts(&hits, &[1.0, 1.0 + z * SQRT_2]);
+        }
+    }
 }

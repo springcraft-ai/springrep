@@ -188,7 +188,10 @@ fn line_quadric(o: Point3, d: Vec3, s: &Surface, qa: f64, qb: f64, qc: f64) -> H
         if t1 > t2 {
             std::mem::swap(&mut t1, &mut t2);
         }
-        if at(t_near) <= tol::LINEAR {
+        // One touching point only where the two roots lie within the band of each other: a line
+        // nearly parallel to a cone's generator has a far root, and the surface's distance read
+        // that far out says nothing.
+        if (t2 - t1) * d.norm() <= 2.0 * tol::LINEAR && at(t_near) <= tol::LINEAR {
             vec![t_near]
         } else {
             vec![t1, t2]
