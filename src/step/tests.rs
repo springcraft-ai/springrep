@@ -2012,7 +2012,8 @@ fn a_strict_read_rejects_a_solid_passing_through_itself_and_keeps_one_touching_i
 fn a_face_of_thousands_of_edges_reads_back_on_a_small_stack() {
     // A prism on a 2000-gon of radius 10, 3 tall: each end face's loop has 2000 edges. Read back
     // on a thread with a quarter of a mebibyte of stack, a quarter of what a WebAssembly program
-    // has: tracing a loop's parameter-plane samples must not take a call per edge.
+    // has, or on wasm32-wasip1, which cannot spawn a thread, on that program's own stack: tracing a
+    // loop's parameter-plane samples must not take a call per edge.
     let n = 2000;
     let pts: Vec<Vec2> = (0..n)
         .map(|i| {
@@ -2023,6 +2024,9 @@ fn a_face_of_thousands_of_edges_reads_back_on_a_small_stack() {
     let p = Profile::polygon(&pts, &["side"]);
     let b = extrude(&p, &Frame::WORLD, 3.0, "gon").unwrap();
     let text = write(&b, "gon").unwrap().replace("'springrep'", "'other'");
+    #[cfg(target_os = "wasi")]
+    let read_back = read(text.as_bytes(), "imp").unwrap();
+    #[cfg(not(target_os = "wasi"))]
     let read_back = std::thread::Builder::new()
         .stack_size(256 * 1024)
         .spawn(move || read(text.as_bytes(), "imp").unwrap())
