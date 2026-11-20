@@ -22,6 +22,31 @@ pub struct Issue {
     pub message: String,
 }
 
+/// Each face's trimmed domain, built the first time a check asks for it: a face of many loops is
+/// asked for once per edge round it.
+struct Domains<'a> {
+    b: &'a Brep,
+    built: std::cell::RefCell<HashMap<FaceId, std::rc::Rc<Domain>>>,
+}
+
+impl<'a> Domains<'a> {
+    fn new(b: &'a Brep) -> Self {
+        Domains {
+            b,
+            built: Default::default(),
+        }
+    }
+
+    fn of(&self, f: FaceId) -> std::rc::Rc<Domain> {
+        if let Some(d) = self.built.borrow().get(&f) {
+            return d.clone();
+        }
+        let d = std::rc::Rc::new(face_domain(self.b, f));
+        self.built.borrow_mut().insert(f, d.clone());
+        d
+    }
+}
+
 impl fmt::Display for Issue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.message)
@@ -227,6 +252,7 @@ fn checked(
     sheet: bool,
 ) -> Vec<Issue> {
     let mut out = Vec::new();
+    let domains = Domains::new(b);
     let found = std::cell::Cell::new(0usize);
     let mut issue = |m: String| {
         found.set(found.get() + 1);
@@ -361,7 +387,7 @@ fn checked(
             }
         }
         if u.len() > 2
-            && let Some((f, g)) = lying_on_each_other(b, u)
+            && let Some((f, g)) = lying_on_each_other(b, &domains, u)
         {
             issue(format!(
                 "faces {} and {} lie on each other from edge {}",
@@ -494,7 +520,7 @@ fn checked(
             && !has_pole
             && found.get() == before
             && face.loops.len() > 1
-            && let Some(li) = stray_loop(b, f)
+            && let Some(li) = stray_loop(&domains, f)
         {
             issue(format!(
                 "face {} loop {li} lies outside the region its other loops bound",
@@ -539,13 +565,13 @@ fn checked(
         // makes the two shells one: the regularized result has that area inside it.
         let inside = |f: FaceId, p: Point3| {
             matches!(
-                face_domain(b, f).locate(p),
+                domains.of(f).locate(p),
                 crate::boolean::domain::Where::Inside(_)
             )
         };
         // Whether some point inside face `f` lies inside face `g` too.
         let overlaps = |f: FaceId, g: FaceId| {
-            let d = face_domain(b, f);
+            let d = domains.of(f);
             d.interior_point()
                 .is_some_and(|uv| inside(g, d.surface.eval(uv.x, uv.y)))
         };
@@ -600,9 +626,9 @@ fn checked(
 /// every interior point of one lies on the other's surface inside it: the wedge has no width, and
 /// the faces lie inside the solid, as a union that kept both of two coincident faces leaves them.
 /// Faces that touch along the edge part away from it; partners lying on each other bound a sliver.
-fn lying_on_each_other(b: &Brep, uses: &[CoedgeId]) -> Option<(FaceId, FaceId)> {
+fn lying_on_each_other(b: &Brep, domains: &Domains, uses: &[CoedgeId]) -> Option<(FaceId, FaceId)> {
     let on = |f: FaceId, g: FaceId| {
-        let (d, o) = (face_domain(b, f), face_domain(b, g));
+        let (d, o) = (domains.of(f), domains.of(g));
         let pts = d.interior_points();
         !pts.is_empty()
             && pts.iter().all(|uv| {
@@ -622,8 +648,8 @@ fn lying_on_each_other(b: &Brep, uses: &[CoedgeId]) -> Option<(FaceId, FaceId)> 
 /// tested at a point halfway along the loop's first coedge. A loop that winds once round a period,
 /// as each rim of a band round a cylinder, bounds nothing in the parameters, so such a face has no
 /// region to test.
-fn stray_loop(b: &Brep, f: FaceId) -> Option<usize> {
-    let d = face_domain(b, f);
+fn stray_loop(domains: &Domains, f: FaceId) -> Option<usize> {
+    let d = domains.of(f);
     let periods = [d.surface.u_period(), d.surface.v_period()];
     let wraps = d.samples().iter().any(|l| {
         let mut run = [0.0f64; 2];
