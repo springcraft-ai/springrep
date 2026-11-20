@@ -58,7 +58,7 @@ Run one with `cargo run --example bracket`.
 
 ```toml
 [dependencies]
-springrep = "1"
+springrep = "2"
 ```
 
 ## Documentation

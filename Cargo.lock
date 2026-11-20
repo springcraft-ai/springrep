@@ -4,4 +4,4 @@ version = 4
 
 [[package]]
 name = "springrep"
-version = "1.0.1"
+version = "2.0.0"
