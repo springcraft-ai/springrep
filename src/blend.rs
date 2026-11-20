@@ -438,6 +438,16 @@ impl Path {
         }
     }
 
+    /// Where the section point `q` lies the fraction `f` of the way along the edge.
+    fn place_along(&self, q: Vec2, f: f64) -> Point3 {
+        match *self {
+            Path::Prism { frame, length } => frame.to_world(Vec3::new(q.x, q.y, f * length)),
+            Path::Ring {
+                circle, t0, span, ..
+            } => circle.origin + circle.radial(t0 + f * span) * q.x + circle.z * q.y,
+        }
+    }
+
     /// Where the section point `q` lies at the edge's start (`end` false) or end.
     fn place(&self, q: Vec2, end: bool) -> Point3 {
         match *self {
@@ -966,6 +976,10 @@ fn blend_picked(
     // The corner tools only join the straight pieces as tools: sewing has no corner patch.
     let sewn = if balls.iter().any(|(_, b)| !b.convex) {
         Err("a fillet with a concave corner ball".to_string())
+    } else if let Kind::Fillet { radius } = kind
+        && rounds_meet(body, &picked, &sections, radius)
+    {
+        Err("a fillet whose rounds of two edges meet".to_string())
     } else if !ridges.is_empty() {
         Err("a fillet whose corner splits along a ridge".to_string())
     } else if corner_tools.is_empty() && saddles.is_empty() {
@@ -2095,6 +2109,121 @@ fn spill(body: &Brep, g: FaceId, crossing: &[Point3], width: f64, o: &Outline) -
         at: lo + (hi - lo) * 0.5,
         reach: 0.5 * lo.dist(hi) + 2.0 * o.radius,
     })
+}
+
+/// Whether the rounds of two picked edges that share a face but no vertex share a ball: where the
+/// paths their balls' centres run along meet, within the tolerance, as a set-back corner's rim
+/// rounds do. Two such rounds touch where that ball touches the face, and sewn they pass through
+/// each other there, at a touch the solid checker reads within rounding. Cut as tools, each trims
+/// the other. Rounds whose balls only overlap cross at an angle, which the checker sees. A ball
+/// that reaches past the body's walls is no round's: the paths of a short edge's two neighbours
+/// cross beyond their rounds' trimmed ends.
+fn rounds_meet(body: &Brep, picked: &[Picked], sections: &[Section], radius: f64) -> bool {
+    const SAMPLES: usize = 16;
+    // A path's balls' centres: samples, and the length, so that every centre is within half a
+    // step's length of a sample.
+    struct Run {
+        path: Path,
+        centre: Vec2,
+        samples: Vec<Point3>,
+        length: f64,
+    }
+    let runs: Vec<Option<Run>> = sections
+        .iter()
+        .map(|s| {
+            let sign = if s.convex { -1.0 } else { 1.0 };
+            let centre = fillet_centre(s, radius, sign).ok()?;
+            let samples = (0..=SAMPLES)
+                .map(|k| s.path.place_along(centre, k as f64 / SAMPLES as f64))
+                .collect();
+            let length = match s.path {
+                Path::Prism { length, .. } => length,
+                Path::Ring { span, .. } => centre.x.abs() * span.abs(),
+            };
+            Some(Run {
+                path: s.path,
+                centre,
+                samples,
+                length,
+            })
+        })
+        .collect();
+    // Where two paths meet: about each pair of samples near enough that the paths could meet
+    // between them, a search whose step halves when it no longer moves. Paths that meet tangent
+    // are within the tolerance along a stretch, which the search would crawl down, so it stops at
+    // the first point within; points of one stretch are one meeting.
+    let meetings = |a: &Run, b: &Run| {
+        let slack = 0.5 * (a.length + b.length) / SAMPLES as f64 + tol::LINEAR;
+        let gap = |f: f64, g: f64| {
+            a.path
+                .place_along(a.centre, f)
+                .dist(b.path.place_along(b.centre, g))
+        };
+        let mut found: Vec<Point3> = Vec::new();
+        for (k, p) in a.samples.iter().enumerate() {
+            for (l, q) in b.samples.iter().enumerate() {
+                if p.dist(*q) > slack {
+                    continue;
+                }
+                let mut best = (
+                    p.dist(*q),
+                    k as f64 / SAMPLES as f64,
+                    l as f64 / SAMPLES as f64,
+                );
+                let mut step = 1.0 / SAMPLES as f64;
+                let mut moves = 0;
+                while step > 1e-15 && best.0 > tol::LINEAR && moves < 1000 {
+                    moves += 1;
+                    let (_, f, g) = best;
+                    let mut moved = false;
+                    for (df, dg) in [(step, 0.0), (-step, 0.0), (0.0, step), (0.0, -step)] {
+                        let (nf, ng) = ((f + df).clamp(0.0, 1.0), (g + dg).clamp(0.0, 1.0));
+                        let d = gap(nf, ng);
+                        if d < best.0 {
+                            best = (d, nf, ng);
+                            moved = true;
+                        }
+                    }
+                    if !moved {
+                        step *= 0.5;
+                    }
+                }
+                let at = a.path.place_along(a.centre, best.1);
+                if best.0 <= tol::LINEAR && found.iter().all(|m| m.dist(at) > slack) {
+                    found.push(at);
+                }
+            }
+        }
+        found
+    };
+    let mut walls = None;
+    for (i, a) in picked.iter().enumerate() {
+        let ea = body.edge(a.edge);
+        for (j, b) in picked.iter().enumerate().skip(i + 1) {
+            let eb = body.edge(b.edge);
+            let shares_vertex = [eb.start, eb.end]
+                .iter()
+                .any(|v| *v == ea.start || *v == ea.end);
+            if shares_vertex || !a.faces.iter().any(|f| b.faces.contains(f)) {
+                continue;
+            }
+            let (Some(ra), Some(rb)) = (&runs[i], &runs[j]) else {
+                continue;
+            };
+            for centre in meetings(ra, rb) {
+                let walls =
+                    walls.get_or_insert_with(|| crate::distance::Nearest::boundary(body).ok());
+                let clear = walls
+                    .as_ref()
+                    .and_then(|w| w.to(centre).ok())
+                    .is_some_and(|n| n.distance >= radius - tol::LINEAR);
+                if clear {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Refuses blends of two picked edges that share a face but no vertex when their strips on that

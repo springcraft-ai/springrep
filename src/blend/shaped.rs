@@ -1006,6 +1006,33 @@ mod tests {
             .count();
         assert_eq!(near, 1);
     }
+
+    #[test]
+    fn a_set_back_corner_s_rim_rounds_meet_and_are_cut_not_sewn() {
+        // The 10 mm cube's corner rounded 2.5 and set back 3.25. The patch rounds the three rims of
+        // a sphere cut by the corner's planes, and in the corner's axes each rim's ball centres run
+        // round a circle of radius d − r about (r, d, d) and its turns: each two of those circles
+        // meet, at (r, r, d) and its turns, so each two rounds share a ball and touch where it
+        // touches the sphere. Sewn, they would pass through each other there, which the solid
+        // checker reads within rounding; they are cut as tools instead, on every platform.
+        let b = crate::primitive::block(&Frame::WORLD, Vec3::new(10.0, 10.0, 10.0), "box").unwrap();
+        let at = |p: Point3| crate::measure::edge_at(&b, p).unwrap().0;
+        let edges = [
+            at(Point3::new(5.0, 10.0, 10.0)),
+            at(Point3::new(10.0, 5.0, 10.0)),
+            at(Point3::new(10.0, 10.0, 5.0)),
+        ];
+        crate::blend::FORCE.set(Some(crate::blend::Method::Sewn));
+        let sewn = fillet_setback(&b, &edges, 2.5, 3.25, "blend");
+        crate::blend::FORCE.set(None);
+        match sewn {
+            Err(Error::Unsupported(m)) => assert!(m.contains("rounds of two edges meet"), "{m}"),
+            other => panic!("sewn: {:?}", other.map(|b| b.face_count())),
+        }
+        let out = fillet_setback(&b, &edges, 2.5, 3.25, "blend").unwrap();
+        assert!(crate::check::check(&out).is_empty());
+    }
+
     use crate::{rays::Rays, topo::FaceName};
 
     /// A prism on the polygon `pts`, `h` tall, its sides named `e0`, `e1`, … from the first edge.
