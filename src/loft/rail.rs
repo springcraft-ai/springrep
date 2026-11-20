@@ -8,7 +8,7 @@ use crate::{
     Error, Result,
     geom::Curve,
     math::{Frame, Point3, Vec3},
-    numeric::solve_dense,
+    numeric::{BandLu, SparseRow, solve_dense},
 };
 
 /// `(w·x, w·y, w·z, w)`.
@@ -404,14 +404,19 @@ pub(crate) fn make_compatible(rails: &mut [Rail]) {
     }
 }
 
-/// A linear map from data at `n` sections to the control points of a curve across them:
-/// control `k` is `Σ_s coef[k·n + s]·Q_s`, the B-spline of `degree` on `knots`.
+/// A linear map from data at `n` sections to the control points of a curve across them, the
+/// B-spline of `degree` on `knots`.
 #[derive(Clone, Debug)]
 pub(crate) struct Across {
     pub degree: usize,
     pub knots: Vec<f64>,
-    pub coef: Vec<f64>,
-    pub n: usize,
+    map: Map,
+}
+
+#[derive(Clone, Debug)]
+enum Map {
+    Dense { coef: Vec<f64>, n: usize },
+    Band(BandLu),
 }
 
 impl Across {
@@ -420,18 +425,25 @@ impl Across {
     }
 
     pub(crate) fn apply(&self, data: &[Hom]) -> Vec<Hom> {
-        (0..self.controls())
-            .map(|k| {
-                let mut c = [0.0; 4];
-                for (s, d) in data.iter().enumerate() {
-                    let f = self.coef[k * self.n + s];
-                    for i in 0..4 {
-                        c[i] += f * d[i];
+        match &self.map {
+            Map::Dense { coef, n } => (0..self.controls())
+                .map(|k| {
+                    let mut c = [0.0; 4];
+                    for (s, d) in data.iter().enumerate() {
+                        let f = coef[k * n + s];
+                        for i in 0..4 {
+                            c[i] += f * d[i];
+                        }
                     }
-                }
-                c
-            })
-            .collect()
+                    c
+                })
+                .collect(),
+            Map::Band(lu) => {
+                let mut x = data.to_vec();
+                lu.solve(&mut x);
+                x
+            }
+        }
     }
 
     pub(crate) fn eval(&self, ctrl: &[Hom], v: f64) -> Hom {
@@ -523,8 +535,7 @@ pub(crate) fn bezier_fit(params: &[f64], degree: usize) -> Result<Across> {
     Ok(Across {
         degree: p,
         knots,
-        coef,
-        n,
+        map: Map::Dense { coef, n },
     })
 }
 
@@ -538,21 +549,18 @@ pub(crate) fn interpolation(params: &[f64]) -> Result<Across> {
         knots.extend_from_slice(&params[2..n - 2]);
     }
     knots.extend(std::iter::repeat_n(params[n - 1], p + 1));
-    let mut a = vec![0.0; n * n];
-    for (row, &t) in params.iter().enumerate() {
-        for (j, b) in basis(p, &knots, t).into_iter().enumerate() {
-            a[row * n + j] = b;
-        }
-    }
-    let mut id = vec![0.0; n * n];
-    for i in 0..n {
-        id[i * n + i] = 1.0;
-    }
-    let coef = solve_dense(a, id, n, n)?;
+    let rows: Vec<SparseRow> = params
+        .iter()
+        .map(|&t| {
+            let b = basis(p, &knots, t);
+            let first = b.iter().position(|&v| v != 0.0).unwrap_or(0);
+            let last = b.iter().rposition(|&v| v != 0.0).unwrap_or(first);
+            (first, b[first..=last].to_vec())
+        })
+        .collect();
     Ok(Across {
         degree: p,
         knots,
-        coef,
-        n,
+        map: Map::Band(BandLu::factor(&rows)?),
     })
 }

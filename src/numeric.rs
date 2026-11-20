@@ -225,6 +225,117 @@ pub(crate) fn solve_banded(rows: Vec<SparseRow>, mut b: Vec<f64>, k: usize) -> R
     Ok(x)
 }
 
+/// A banded matrix factored once by Gaussian elimination with partial pivoting (Golub and Van Loan,
+/// *Matrix Computations*, §4.3), so each solve costs `O(n w)` for bandwidth `w`. Rows are as
+/// [`solve_banded`] takes them.
+#[derive(Clone, Debug)]
+pub(crate) struct BandLu {
+    n: usize,
+    kl: usize,
+    ku: usize,
+    a: Vec<f64>,
+    piv: Vec<usize>,
+}
+
+impl BandLu {
+    pub(crate) fn factor(rows: &[SparseRow]) -> Result<BandLu> {
+        let n = rows.len();
+        let singular = || Error::Numerical("singular linear system".into());
+        let (mut kl, mut ku) = (0, 0);
+        for (r, (first, vals)) in rows.iter().enumerate() {
+            if vals.is_empty() {
+                continue;
+            }
+            if first + vals.len() > n {
+                return Err(singular());
+            }
+            kl = kl.max(r.saturating_sub(*first));
+            ku = ku.max((first + vals.len() - 1).saturating_sub(r));
+        }
+        // Pivoting fills each row up to `kl` columns past its own upper band.
+        let s = 2 * kl + ku + 1;
+        let mut lu = BandLu {
+            n,
+            kl,
+            ku,
+            a: vec![0.0; n * s],
+            piv: Vec::with_capacity(n),
+        };
+        for (r, (first, vals)) in rows.iter().enumerate() {
+            for (t, &v) in vals.iter().enumerate() {
+                let i = lu.at(r, first + t);
+                lu.a[i] = v;
+            }
+        }
+        for col in 0..n {
+            let last = (col + kl).min(n - 1);
+            let hi = (col + kl + ku).min(n - 1);
+            let piv = (col..=last)
+                .max_by(|&x, &y| {
+                    lu.a[lu.at(x, col)]
+                        .abs()
+                        .total_cmp(&lu.a[lu.at(y, col)].abs())
+                })
+                .unwrap_or(col);
+            if lu.a[lu.at(piv, col)].abs() < 1e-300 {
+                return Err(singular());
+            }
+            lu.piv.push(piv);
+            if piv != col {
+                for j in col..=hi {
+                    let (x, y) = (lu.at(piv, j), lu.at(col, j));
+                    lu.a.swap(x, y);
+                }
+            }
+            let d = lu.a[lu.at(col, col)];
+            for r in col + 1..=last {
+                let rc = lu.at(r, col);
+                let f = lu.a[rc] / d;
+                lu.a[rc] = f;
+                if f != 0.0 {
+                    for j in col + 1..=hi {
+                        let (x, y) = (lu.at(r, j), lu.at(col, j));
+                        lu.a[x] -= f * lu.a[y];
+                    }
+                }
+            }
+        }
+        Ok(lu)
+    }
+
+    fn at(&self, i: usize, j: usize) -> usize {
+        i * (2 * self.kl + self.ku + 1) + (j + self.kl - i)
+    }
+
+    /// Overwrites `b`, one row of `K` right-hand sides per unknown, with the solution.
+    pub(crate) fn solve<const K: usize>(&self, b: &mut [[f64; K]]) {
+        let n = self.n;
+        for col in 0..n {
+            b.swap(col, self.piv[col]);
+            let x = b[col];
+            let last = (col + self.kl).min(n - 1);
+            for (r, row) in b.iter_mut().enumerate().take(last + 1).skip(col + 1) {
+                let f = self.a[self.at(r, col)];
+                for (v, xv) in row.iter_mut().zip(x) {
+                    *v -= f * xv;
+                }
+            }
+        }
+        for i in (0..n).rev() {
+            let mut s = b[i];
+            let last = (i + self.kl + self.ku).min(n - 1);
+            for (j, xs) in b.iter().enumerate().take(last + 1).skip(i + 1) {
+                let f = self.a[self.at(i, j)];
+                for (v, xv) in s.iter_mut().zip(xs) {
+                    *v -= f * xv;
+                }
+            }
+            let d = self.a[self.at(i, i)];
+            b[i] = s.map(|v| v / d);
+        }
+    }
+}
+
 /// Solves `a x = b` where each row of `a` is a short run of columns that may wrap past the last
 /// column to the first, as a periodic spline's collocation does. Each row's largest value should
 /// lie on the diagonal: the last `w` rows and columns (`w` the longest run) are solved as a border
@@ -361,6 +472,43 @@ pub(crate) fn roots(f: &mut impl FnMut(f64) -> f64, a: f64, b: f64, n: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A banded system that needs row swaps (zero diagonal, larger values below) solves to what
+    /// the dense solver finds.
+    #[test]
+    fn a_band_factored_once_solves_as_the_dense_system_does() {
+        let n = 9;
+        let rows: Vec<SparseRow> = (0..n)
+            .map(|r: usize| {
+                let first = r.saturating_sub(1);
+                let vals = (first..(r + 3).min(n))
+                    .map(|j| {
+                        if j == r {
+                            0.0
+                        } else {
+                            1.0 + ((r * 7 + j * 3) % 5) as f64
+                        }
+                    })
+                    .collect();
+                (first, vals)
+            })
+            .collect();
+        let mut dense = vec![0.0; n * n];
+        for (r, (first, vals)) in rows.iter().enumerate() {
+            for (t, &v) in vals.iter().enumerate() {
+                dense[r * n + first + t] = v;
+            }
+        }
+        let b: Vec<[f64; 2]> = (0..n).map(|r| [r as f64 - 3.0, (r * r) as f64]).collect();
+        let want = solve_dense(dense, b.iter().flatten().copied().collect(), n, 2).unwrap();
+        let mut got = b.clone();
+        BandLu::factor(&rows).unwrap().solve(&mut got);
+        for (r, g) in got.iter().enumerate() {
+            for k in 0..2 {
+                assert!((g[k] - want[r * 2 + k]).abs() < 1e-9, "row {r}: {g:?}");
+            }
+        }
+    }
 
     /// The Kronrod rule is exact to degree 22 and the Gauss rule inside it to degree 13:
     /// `∫ xᵏ` over [−1, 1] is `2 / (k + 1)` for even `k`.
