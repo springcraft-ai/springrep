@@ -5,11 +5,15 @@ use std::f64::consts::TAU;
 use std::rc::Rc;
 
 use crate::{
-    geom::{Curve, Surface},
+    geom::{BSpline, Curve, Surface},
     math::{Aabb, Point3, Vec2, Vec3},
     numeric::solve2,
     tol,
-    topo::project_on,
+    topo::{
+        PCurve,
+        pcurve::{map_spline, spline_rate, spline_uv},
+        project_on,
+    },
 };
 
 /// How a trim's parameter-plane point follows from its curve parameter.
@@ -19,6 +23,46 @@ pub(crate) enum UvMap {
     Affine { origin: Vec2, dir: Vec2 },
     /// The curve point projected onto the surface, periodic parameters continued from a hint.
     Projected,
+    /// A spline's point at `t`, as [`PCurve::Spline`] holds it.
+    Spline(Rc<BSpline>),
+}
+
+impl UvMap {
+    /// The map a coedge's pcurve gives its trims.
+    pub(crate) fn of(pcurve: &PCurve) -> UvMap {
+        match pcurve {
+            PCurve::Affine { origin, dir } => UvMap::Affine {
+                origin: *origin,
+                dir: *dir,
+            },
+            PCurve::Projected { .. } => UvMap::Projected,
+            PCurve::Spline { uv } => UvMap::Spline(Rc::new(uv.clone())),
+        }
+    }
+
+    /// The pcurve a coedge made from a trim at `seed` carries.
+    pub(crate) fn pcurve(&self, seed: Vec2) -> PCurve {
+        match self {
+            UvMap::Affine { origin, dir } => PCurve::Affine {
+                origin: *origin,
+                dir: *dir,
+            },
+            UvMap::Projected => PCurve::Projected { seed },
+            UvMap::Spline(uv) => PCurve::Spline { uv: (**uv).clone() },
+        }
+    }
+
+    /// The map with its parameter plane mapped by `f`, an affine map.
+    pub(crate) fn mapped(&self, f: &dyn Fn(Vec2) -> Vec2) -> UvMap {
+        match self {
+            UvMap::Affine { origin, dir } => UvMap::Affine {
+                origin: f(*origin),
+                dir: f(*origin + *dir) - f(*origin),
+            },
+            UvMap::Projected => UvMap::Projected,
+            UvMap::Spline(uv) => UvMap::Spline(Rc::new(map_spline(uv, f))),
+        }
+    }
 }
 
 /// One directed piece of a face's boundary or of a cut across it.
@@ -56,6 +100,7 @@ impl Trim {
     pub(crate) fn uv(&self, s: &Surface, t: f64, hint: Vec2) -> Vec2 {
         match &self.map {
             UvMap::Affine { origin, dir } => *origin + *dir * t,
+            UvMap::Spline(uv) => spline_uv(uv, t),
             UvMap::Projected => match &self.curve {
                 Some(c) => {
                     // Towards the trim's inside, the side its points near a pole come from.
@@ -91,7 +136,7 @@ impl Trim {
                 }
             }
             let arrived = (hint - self.uv1).norm() <= 1e-6 * (1.0 + self.uv1.norm());
-            if arrived || !periodic || matches!(self.map, UvMap::Affine { .. }) || sub >= 256 {
+            if arrived || !periodic || !matches!(self.map, UvMap::Projected) || sub >= 256 {
                 out.push(self.uv1);
                 return out;
             }
@@ -105,7 +150,7 @@ impl Trim {
     /// swing past a point, and the winding about the point read from the chord is then wrong.
     pub(crate) fn steps(&self) -> usize {
         let pieces = match (&self.map, &self.curve) {
-            (UvMap::Projected, Some(c)) => {
+            (UvMap::Projected | UvMap::Spline(_), Some(c)) => {
                 c.breakpoints(self.t0.min(self.t1), self.t0.max(self.t1))
                     .len()
                     + 1
@@ -139,6 +184,7 @@ impl Trim {
         let sign = if self.t1 >= self.t0 { 1.0 } else { -1.0 };
         match &self.map {
             UvMap::Affine { dir, .. } => *dir * sign,
+            UvMap::Spline(uv) => spline_rate(uv, self.t0) * sign,
             UvMap::Projected => {
                 let Some(c) = &self.curve else {
                     return Vec2::ZERO;
@@ -160,6 +206,16 @@ impl Trim {
     }
 
     /// The distance from `p` to the trim's curve.
+    /// The parameter-plane rate at `t`, where its point is `uv`.
+    pub(crate) fn uv_rate_at(&self, s: &Surface, t: f64, uv: Vec2) -> Vec2 {
+        match (&self.map, &self.curve) {
+            (UvMap::Affine { dir, .. }, _) => *dir,
+            (UvMap::Spline(sp), _) => spline_rate(sp, t),
+            (UvMap::Projected, Some(c)) => uv_rate(s, uv, c.d1(t).1),
+            (UvMap::Projected, None) => Vec2::ZERO,
+        }
+    }
+
     pub(crate) fn distance(&self, p: Point3) -> f64 {
         match &self.curve {
             Some(c) => {
@@ -289,7 +345,7 @@ fn angle(a: Vec2, b: Vec2) -> f64 {
 fn chords(tr: &Trim, samples: &[Vec2]) -> Vec<Vec2> {
     match tr.map {
         UvMap::Affine { .. } => vec![tr.uv0, tr.uv1],
-        UvMap::Projected => samples.to_vec(),
+        UvMap::Projected | UvMap::Spline(_) => samples.to_vec(),
     }
 }
 
@@ -706,7 +762,7 @@ impl Domain {
                 for tr in l {
                     let n = match tr.map {
                         UvMap::Affine { .. } => 1,
-                        UvMap::Projected => per_trim,
+                        UvMap::Projected | UvMap::Spline(_) => per_trim,
                     };
                     let pl = tr.polyline(&self.surface, n);
                     pts.extend_from_slice(&pl[..pl.len() - 1]);

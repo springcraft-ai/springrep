@@ -157,7 +157,11 @@ pub fn draft(b: &Brep, faces: &[FaceId], neutral: &Frame, angle: f64) -> Result<
         }
         move_faces(b, &surfaces)
     };
-    direct.or_else(|e| through::through(b, &paths).map_err(|_| e))
+    direct.or_else(|e| {
+        through::through(b, &paths)
+            .map(|(out, _)| out)
+            .map_err(|_| e)
+    })
 }
 
 /// [`move_planes`], or [`move_faces`] where a curved face meets the moved planes.
@@ -174,26 +178,105 @@ pub(crate) fn planes_or_faces(b: &Brep, moved: &HashMap<FaceId, Frame>) -> Resul
     }
 }
 
-/// `b` with each face of `by` moved that far along its outward normal, onto its offset surface.
+/// `b` with each face of `by` moved that far along its outward normal, onto its offset surface;
+/// empty where every face closes on the way.
 pub fn offset_faces(b: &Brep, by: &HashMap<FaceId, f64>) -> Result<Brep> {
+    offset_faces_closing(b, by).map(|(out, _)| out)
+}
+
+/// [`offset_faces`], and the faces of `b` that closed on the way.
+pub(crate) fn offset_faces_closing(
+    b: &Brep,
+    by: &HashMap<FaceId, f64>,
+) -> Result<(Brep, Vec<FaceId>)> {
     // Where a face closes on the way, a round offset past its radius or a riser between two faces
     // brought level, the offset is followed there.
-    offset_kept(b, by).or_else(|e| {
-        let mut paths: HashMap<FaceId, through::Path> = HashMap::new();
-        for (&f, &d) in by {
-            let face = b.face(f);
-            let natural = if face.reversed { -d } else { d };
-            let (surface, bounds) = (face.surface.clone(), face_box(b, f));
-            paths.insert(
-                f,
-                Box::new(move |s| match offset_surface(&surface, s * natural) {
-                    Err(Error::Unsupported(_)) => offset_fitted(&surface, s * natural, bounds),
-                    r => r,
-                }),
-            );
+    offset_kept(b, by)
+        .map(|out| (out, Vec::new()))
+        .or_else(|e| {
+            let mut paths: HashMap<FaceId, through::Path> = HashMap::new();
+            for (&f, &d) in by {
+                let face = b.face(f);
+                let natural = if face.reversed { -d } else { d };
+                let (surface, bounds) = (face.surface.clone(), face_box(b, f));
+                paths.insert(
+                    f,
+                    Box::new(move |s| match offset_surface(&surface, s * natural) {
+                        Err(Error::Unsupported(_)) => offset_fitted(&surface, s * natural, bounds),
+                        r => r,
+                    }),
+                );
+            }
+            through::through(b, &paths)
+                .or_else(|_| slabbed(b, by).map(|out| (out, Vec::new())))
+                .map_err(|_| e)
+        })
+}
+
+/// [`offset_faces`] as `b` with the slabs of the faces moved out added and those of the faces
+/// moved in taken away (Rossignac and Requicha 1986), where moved faces run into faces they did not
+/// meet (holes widened until they merge) and the move cannot be followed. That is the moved solid
+/// only where every edge a moved face is on keeps the corner the slabs make: a face beside one
+/// that stays meets it square, so the slab's side lies on the other face; two faces moved by one
+/// distance meet where the slabs leave a sharp corner (moved in at a convex edge, out at a concave
+/// one) or tangentially. Otherwise an error.
+fn slabbed(b: &Brep, by: &HashMap<FaceId, f64>) -> Result<Brep> {
+    let refuse = || unsupported("moving faces whose slabs do not make the moved solid");
+    let convex = crate::pick::convex_edges(b)?;
+    let concave = crate::pick::concave_edges(b)?;
+    let outward = |f: FaceId, p: Point3| {
+        let s = &b.face(f).surface;
+        let uv = s.project(p);
+        let n = s.normal(uv.x, uv.y);
+        if b.face(f).reversed { -n } else { n }
+    };
+    for e in b.edge_ids() {
+        let uses: Vec<FaceId> = b
+            .coedge_ids()
+            .filter(|&c| b.coedge(c).edge == e)
+            .map(|c| b.coedge_face(c))
+            .collect();
+        let [f, g] = uses[..] else {
+            return refuse();
+        };
+        let (df, dg) = (
+            by.get(&f).copied().unwrap_or(0.0),
+            by.get(&g).copied().unwrap_or(0.0),
+        );
+        if f == g || (df == 0.0 && dg == 0.0) {
+            continue;
         }
-        through::through(b, &paths).map_err(|_| e)
-    })
+        let x = b.edge(e);
+        let Some(c) = &x.curve else { continue };
+        let sharp = if df < 0.0 { &convex } else { &concave };
+        let kept = if df != 0.0 && dg != 0.0 {
+            df == dg && (sharp.contains(&e) || !convex.contains(&e) && !concave.contains(&e))
+        } else {
+            (0..=4).all(|k| {
+                let p = c.eval(x.range.0 + (x.range.1 - x.range.0) * k as f64 / 4.0);
+                outward(f, p).dot(outward(g, p)).abs() <= tol::ANGULAR
+            })
+        };
+        if !kept {
+            return refuse();
+        }
+    }
+    let feature = "moved";
+    let mut grow = vec![b.clone()];
+    let mut cut = Vec::new();
+    for f in b.face_ids() {
+        match by.get(&f).copied().unwrap_or(0.0) {
+            d if d > 0.0 => grow.push(super::near::slab(b, f, d, feature)?),
+            d if d < 0.0 => cut.push(super::near::slab(b, f, d, feature)?),
+            _ => {}
+        }
+    }
+    let grown = crate::boolean::union_all(&grow.iter().collect::<Vec<_>>())?;
+    if cut.is_empty() {
+        return Ok(grown);
+    }
+    let cut = crate::boolean::union_all(&cut.iter().collect::<Vec<_>>())?;
+    crate::boolean::difference(&grown, &cut)
 }
 
 /// [`offset_faces`] with the solid's topology kept.
@@ -383,7 +466,7 @@ fn derivative(f: &dyn Fn(f64) -> Point3, t: f64, h: f64, (t0, t1): (f64, f64)) -
 /// the curve itself may lose smoothness, so the offset may too) with each piece between them cut
 /// evenly, and the pieces doubled until the cubic lies within [`OFFSET_FIT`] of `true_at` at every
 /// piece's middle. Each node's knot is double, so the cubic keeps the offset's own continuity there.
-fn fit_offset_curve(
+pub(crate) fn fit_offset_curve(
     true_at: &dyn Fn(f64) -> Point3,
     (t0, t1): (f64, f64),
     period: Option<f64>,
@@ -512,58 +595,165 @@ fn offset_fitted(s: &Surface, d: f64, (u, v): ((f64, f64), (f64, f64))) -> Resul
             })))
         }
         _ => {
-            let mut n = 9;
-            while n <= 257 {
-                let us: Vec<f64> = (0..n)
-                    .map(|k| u.0 + (u.1 - u.0) * k as f64 / (n - 1) as f64)
-                    .collect();
-                let vs: Vec<f64> = (0..n)
-                    .map(|k| v.0 + (v.1 - v.0) * k as f64 / (n - 1) as f64)
-                    .collect();
-                // Rows through the grid, then columns through the rows' control points: the
-                // tensor-product cubic through every grid point.
-                let mut rows = Vec::with_capacity(n);
-                for &b in &vs {
-                    let pts: Vec<Point3> = us.iter().map(|&a| at(a, b)).collect();
-                    rows.push(crate::geom::BSpline::interpolate_at(&pts, &us)?);
-                }
-                let ku = rows[0].knots().to_vec();
-                let mut cols = Vec::with_capacity(n);
-                for i in 0..n {
-                    let pts: Vec<Point3> = rows.iter().map(|r| r.control_points()[i]).collect();
-                    cols.push(crate::geom::BSpline::interpolate_at(&pts, &vs)?);
-                }
-                let kv = cols[0].knots().to_vec();
-                let (pu, pv) = (rows[0].degree(), cols[0].degree());
-                let ctrl: Vec<Point3> = cols
-                    .iter()
-                    .flat_map(|c| c.control_points().iter().copied())
-                    .collect();
-                let fit = crate::geom::NurbsSurface::new((pu, pv), (ku, kv), (n, n), ctrl, None)?;
-                let mut worst = 0.0f64;
-                for w in us.windows(2) {
-                    for z in vs.windows(2) {
-                        for (a, b) in [
-                            (0.5 * (w[0] + w[1]), 0.5 * (z[0] + z[1])),
-                            (0.5 * (w[0] + w[1]), z[0]),
-                            (w[0], 0.5 * (z[0] + z[1])),
-                        ] {
-                            worst = worst.max(fit.eval(a, b).dist(at(a, b)));
+            // The surface's own knots cut the box into blocks: across one the offset's curvature
+            // jumps, so an interpolant through it would converge only as h². Each block is fitted
+            // on its own and the blocks are joined at triple knots, along the curves both share.
+            let cuts = |(lo, hi): (f64, f64), breaks: Vec<f64>| {
+                let mut c = vec![lo];
+                c.extend(
+                    breaks
+                        .into_iter()
+                        .filter(|&k| k > lo + 1e-12 && k < hi - 1e-12),
+                );
+                c.push(hi);
+                c
+            };
+            let (ucuts, vcuts) = (
+                cuts(u, s.u_breakpoints(u.0, u.1)),
+                cuts(v, s.v_breakpoints(v.0, v.1)),
+            );
+            // Each column of blocks has its own steps across u and each row its own across v, so
+            // the rows of a column, and the columns of a row, still share their nodes along each
+            // join. A block off the tolerance halves the steps of its column where the fit strays
+            // between its u nodes, and of its row where it strays between its v nodes.
+            let (mut uper, mut vper) =
+                (vec![8usize; ucuts.len() - 1], vec![8usize; vcuts.len() - 1]);
+            while uper.iter().sum::<usize>() <= 512 && vper.iter().sum::<usize>() <= 512 {
+                // Even steps, each block's end steps halved: a not-a-knot interpolant's error is
+                // largest there, and at a block's corner both directions' ends meet.
+                let nodes = |c: &[f64], per: &[usize]| -> Vec<Vec<f64>> {
+                    c.windows(2)
+                        .zip(per)
+                        .map(|(w, &per)| {
+                            let h = (w[1] - w[0]) / per as f64;
+                            let mut n: Vec<f64> = (0..=per).map(|k| w[0] + h * k as f64).collect();
+                            n.insert(1, w[0] + 0.5 * h);
+                            n.insert(n.len() - 1, w[1] - 0.5 * h);
+                            n
+                        })
+                        .collect()
+                };
+                let (ubl, vbl) = (nodes(&ucuts, &uper), nodes(&vcuts, &vper));
+                let fit = fit_blocks(&at, &ubl, &vbl)?;
+                let miss = |a: f64, b: f64| fit.eval(a, b).dist(at(a, b));
+                let (mut finer_u, mut finer_v) = (vec![false; uper.len()], vec![false; vper.len()]);
+                for (i, us) in ubl.iter().enumerate() {
+                    for (j, vs) in vbl.iter().enumerate() {
+                        for w in us.windows(2) {
+                            for z in vs.windows(2) {
+                                let (a, b) = (0.5 * (w[0] + w[1]), 0.5 * (z[0] + z[1]));
+                                let (across_u, across_v) = (miss(a, z[0]), miss(w[0], b));
+                                // Off only in the middle: the direction that strays more.
+                                let middle =
+                                    across_u.max(across_v) <= OFFSET_FIT && miss(a, b) > OFFSET_FIT;
+                                finer_u[i] |=
+                                    across_u > OFFSET_FIT || middle && across_u >= across_v;
+                                finer_v[j] |=
+                                    across_v > OFFSET_FIT || middle && across_v > across_u;
+                            }
                         }
                     }
                 }
-                if worst <= OFFSET_FIT {
+                if !finer_u.contains(&true) && !finer_v.contains(&true) {
                     return Ok(Surface::Nurbs(Box::new(fit)));
                 }
-                n = 2 * n - 1;
+                for (per, finer) in uper
+                    .iter_mut()
+                    .zip(finer_u)
+                    .chain(vper.iter_mut().zip(finer_v))
+                {
+                    if finer {
+                        *per *= 2;
+                    }
+                }
             }
             unsupported("offsetting a face whose offset no spline holds to the tolerance")
         }
     }
 }
 
-/// The box of `f`'s boundary in its surface's parameters, each side grown by a tenth of its span
-/// so the moved edges stay inside, and held to the surface's own domain where it has one.
+/// The bicubic through `at` on the grid of every block of `ubl` × `vbl`, the parameter nodes of
+/// each block in each direction: each block's tensor-product interpolant (rows through the grid,
+/// then columns through the rows' control points), joined to the next at a triple knot. Blocks
+/// that meet share their boundary nodes, so their nets agree along the join.
+fn fit_blocks(
+    at: &dyn Fn(f64, f64) -> Point3,
+    ubl: &[Vec<f64>],
+    vbl: &[Vec<f64>],
+) -> Result<crate::geom::NurbsSurface> {
+    use crate::geom::BSpline;
+    // One block's knots in each direction and its net, u-major.
+    let block = |us: &[f64], vs: &[f64]| -> Result<(Vec<f64>, Vec<f64>, Vec<Point3>)> {
+        let mut rows = Vec::with_capacity(vs.len());
+        for &b in vs {
+            let pts: Vec<Point3> = us.iter().map(|&a| at(a, b)).collect();
+            rows.push(BSpline::interpolate_at(&pts, us)?);
+        }
+        let n = rows[0].control_points().len();
+        let mut cols = Vec::with_capacity(n);
+        for i in 0..n {
+            let pts: Vec<Point3> = rows.iter().map(|r| r.control_points()[i]).collect();
+            cols.push(BSpline::interpolate_at(&pts, vs)?);
+        }
+        let ctrl = cols
+            .iter()
+            .flat_map(|c| c.control_points().iter().copied())
+            .collect();
+        Ok((rows[0].knots().to_vec(), cols[0].knots().to_vec(), ctrl))
+    };
+    // Clamped cubic knot vectors joined end to start, the join's knot kept three times.
+    let join = |parts: &[Vec<f64>]| -> Vec<f64> {
+        let mut out = Vec::new();
+        for (k, p) in parts.iter().enumerate() {
+            let from = if k == 0 { 0 } else { 4 };
+            let to = if k + 1 == parts.len() {
+                p.len()
+            } else {
+                p.len() - 1
+            };
+            out.extend_from_slice(&p[from..to]);
+        }
+        out
+    };
+    let mut blocks = Vec::new();
+    for us in ubl {
+        let mut row = Vec::new();
+        for vs in vbl {
+            row.push(block(us, vs)?);
+        }
+        blocks.push(row);
+    }
+    let ku = join(&blocks.iter().map(|r| r[0].0.clone()).collect::<Vec<_>>());
+    let kv = join(&blocks[0].iter().map(|b| b.1.clone()).collect::<Vec<_>>());
+    let counts: Vec<(usize, usize)> = blocks[0]
+        .iter()
+        .map(|b| (b.0.len() - 4, b.1.len() - 4))
+        .collect();
+    let nus: Vec<usize> = blocks.iter().map(|r| r[0].0.len() - 4).collect();
+    let nvs: Vec<usize> = counts.iter().map(|c| c.1).collect();
+    let nu = nus.iter().sum::<usize>() + 1 - nus.len();
+    let nv = nvs.iter().sum::<usize>() + 1 - nvs.len();
+    let mut ctrl = vec![Point3::ZERO; nu * nv];
+    let mut i0 = 0;
+    for (bi, row) in blocks.iter().enumerate() {
+        let mut j0 = 0;
+        for (bj, (_, _, net)) in row.iter().enumerate() {
+            for i in 0..nus[bi] {
+                for j in 0..nvs[bj] {
+                    ctrl[(i0 + i) * nv + j0 + j] = net[i * nvs[bj] + j];
+                }
+            }
+            j0 += nvs[bj] - 1;
+        }
+        i0 += nus[bi] - 1;
+    }
+    crate::geom::NurbsSurface::new((3, 3), (ku, kv), (nu, nv), ctrl, None)
+}
+
+/// The box of `f`'s boundary in its surface's parameters, read from its pcurves (a pole's among
+/// them, so a face closing on one spans all of it), each side grown by a tenth of its span so the
+/// moved edges stay inside. Along a period the face wraps whole, it is that one period; along one
+/// it does not, it may run past the period's ends; otherwise it is held to the surface's domain.
 fn face_box(b: &Brep, f: FaceId) -> ((f64, f64), (f64, f64)) {
     let face = b.face(f);
     let s = &face.surface;
@@ -572,36 +762,36 @@ fn face_box(b: &Brep, f: FaceId) -> ((f64, f64), (f64, f64)) {
         Vec2::new(f64::NEG_INFINITY, f64::NEG_INFINITY),
     );
     for &lp in &face.loops {
-        let mut last = None;
         for &c in &b.lp(lp).coedges {
-            let x = b.edge(b.coedge(c).edge);
-            let Some(cv) = &x.curve else { continue };
-            for k in 0..=16 {
-                let p = cv.eval(x.range.0 + (x.range.1 - x.range.0) * k as f64 / 16.0);
-                let uv = near_uv(s, p, last);
-                last = Some(uv);
+            for uv in b.coedge_uvs(c, &check::coedge_params(b, c, 16)) {
                 lo = Vec2::new(lo.x.min(uv.x), lo.y.min(uv.y));
                 hi = Vec2::new(hi.x.max(uv.x), hi.y.max(uv.y));
             }
         }
     }
-    let grow = |a: f64, z: f64| {
-        let m = 0.1 * (z - a).max(1e-6);
-        (a - m, z + m)
-    };
-    let (mut u, mut v) = (grow(lo.x, hi.x), grow(lo.y, hi.y));
-    let clamp = |r: (f64, f64), dom: (f64, f64)| (r.0.max(dom.0), r.1.min(dom.1));
-    match s {
-        Surface::Extrusion(e) => u = clamp(u, e.curve.domain()),
-        Surface::Revolution(r) => v = clamp(v, r.curve.domain()),
+    let (du, dv) = match s {
+        Surface::Extrusion(e) => (Some(e.curve.domain()), None),
+        Surface::Revolution(r) => (None, Some(r.curve.domain())),
         Surface::Nurbs(n) => {
             let (du, dv) = n.domain();
-            u = clamp(u, du);
-            v = clamp(v, dv);
+            (Some(du), Some(dv))
         }
-        _ => {}
-    }
-    (u, v)
+        _ => (None, None),
+    };
+    let side = |a: f64, z: f64, period: Option<f64>, dom: Option<(f64, f64)>| {
+        if let Some(p) = period.filter(|&p| z - a >= p - 1e-9 * p) {
+            return (a, a + p);
+        }
+        let m = 0.1 * (z - a).max(1e-6);
+        match (period, dom) {
+            (None, Some(d)) => ((a - m).max(d.0), (z + m).min(d.1)),
+            _ => (a - m, z + m),
+        }
+    };
+    (
+        side(lo.x, hi.x, s.u_period(), du),
+        side(lo.y, hi.y, s.v_period(), dv),
+    )
 }
 
 /// `s` moved `d` along its natural normal: for planes and the analytic surfaces of revolution the
@@ -710,12 +900,51 @@ fn settle(p: Point3, on: &[&Surface]) -> Option<Point3> {
     None
 }
 
+/// The point nearest `p` where the two surfaces of `on` meet, for a point [`settle`] cannot move:
+/// where they are tangent at `p` (a wall moved off the round it ran into), their normals give its
+/// steps one direction and they turn back and forth along it. Points on the faces of `fixed`, which
+/// stay where they are, come before the rest.
+fn meet_near(b: &Brep, p: Point3, on: &[&Surface], fixed: &[FaceId]) -> Option<Point3> {
+    let [s0, s1] = on else { return None };
+    let bx = crate::measure::bbox(b);
+    let reach = bx.min.dist(bx.max) + 1.0;
+    let pad = Vec3::new(reach, reach, reach);
+    let region = crate::math::Aabb {
+        min: bx.min - pad,
+        max: bx.max + pad,
+    };
+    let crate::boolean::ssi::Ssi::Curves { curves, points } =
+        crate::boolean::ssi::intersect(s0, s1, &region, &mut || vec![p]).ok()?
+    else {
+        return None;
+    };
+    let domains: Vec<_> = fixed
+        .iter()
+        .map(|&f| crate::boolean::face_domain(b, f))
+        .collect();
+    let on_fixed = |q: Point3| {
+        domains
+            .iter()
+            .all(|d| !matches!(d.locate(q), crate::boolean::domain::Where::Outside))
+    };
+    curves
+        .iter()
+        .map(|sc| sc.curve.eval(sc.curve.project(p, sc.range.0, sc.range.1)))
+        .chain(points)
+        .min_by(|q, r| {
+            (!on_fixed(*q), q.dist(p))
+                .partial_cmp(&(!on_fixed(*r), r.dist(p)))
+                .expect("finite")
+        })
+}
+
 /// The circle through three points, if they are not on a line.
 fn circle_through(a: Point3, b: Point3, c: Point3) -> Option<crate::geom::Circle> {
     let (ab, ac) = (b - a, c - a);
     let n = ab.cross(ac);
     let n2 = n.norm2();
-    if n2 <= 1e-24 {
+    // Relative to the chords, so a circle closing to nothing (a tube's) is still found while small.
+    if n2 <= 1e-24 * ab.norm2() * ac.norm2() {
         return None;
     }
     let centre = a + (n.cross(ab) * ac.norm2() + ac.cross(n) * ab.norm2()) * (0.5 / n2);
@@ -733,6 +962,34 @@ fn near_uv(s: &Surface, p: Point3, last: Option<Vec2>) -> Vec2 {
         shift(uv.x, to.x, s.u_period()),
         shift(uv.y, to.y, s.v_period()),
     )
+}
+
+/// The `v` of the pole of `s` nearest `near`, where `u` runs round the axis and the surface closes
+/// on it: a cone's apex, a sphere's pole. `None` for a surface with no such pole in closed form.
+fn pole_v(s: &Surface, near: f64) -> Option<f64> {
+    match s {
+        Surface::Cone(c) if c.half_angle.sin().abs() > tol::ANGULAR => {
+            Some(-c.radius / c.half_angle.sin())
+        }
+        Surface::Sphere(_) => Some(std::f64::consts::FRAC_PI_2.copysign(near)),
+        _ => None,
+    }
+}
+
+/// A pole's pcurve on `from` carried onto the pole of `to`, the surface it moved to: a moved cone's
+/// apex lies at another `v` than the old one's.
+fn on_pole(from: &Surface, to: &Surface, pcurve: &PCurve) -> PCurve {
+    if let PCurve::Affine { origin, dir } = pcurve
+        && dir.y == 0.0
+        && let (Some(old), Some(new)) = (pole_v(from, origin.y), pole_v(to, origin.y))
+        && (origin.y - old).abs() <= 1e-9 * (1.0 + old.abs())
+    {
+        return PCurve::Affine {
+            origin: Vec2::new(origin.x, new),
+            dir: *dir,
+        };
+    }
+    pcurve.clone()
 }
 
 /// `b` with each face of `moved` on its new surface (natural normal on the side of its old one),
@@ -760,7 +1017,7 @@ pub fn move_faces_by(b: &Brep, faces: &[FaceId], motion: &Transform) -> Result<B
         .iter()
         .map(|&f| (f, b.face(f).surface.transformed(motion)))
         .collect();
-    move_faces(b, &moved)
+    move_faces_carried(b, &moved, &HashMap::new(), Some(motion))
 }
 
 /// [`move_faces`], with each vertex of `pins` put at its point where that lies on every new surface
@@ -770,6 +1027,18 @@ pub(crate) fn move_faces_pinned(
     b: &Brep,
     moved: &HashMap<FaceId, Surface>,
     pins: &HashMap<VertexId, Point3>,
+) -> Result<Brep> {
+    move_faces_carried(b, moved, pins, None)
+}
+
+/// [`move_faces_pinned`], each edge of a face carried by `motion` found through its old middle
+/// carried by it too. Settled from where it was, the middle of an arc moved further than its
+/// radius lands on the far side of the arc's circle, and the edge would take the rest of it.
+fn move_faces_carried(
+    b: &Brep,
+    moved: &HashMap<FaceId, Surface>,
+    pins: &HashMap<VertexId, Point3>,
+    motion: Option<&Transform>,
 ) -> Result<Brep> {
     clear_of_contacts(b, moved.keys())?;
     let surface_of = |f: FaceId| moved.get(&f).unwrap_or(&b.face(f).surface);
@@ -793,8 +1062,10 @@ pub(crate) fn move_faces_pinned(
         if edge.curve.is_some() || !moved.contains_key(&f) {
             continue;
         }
-        if let PCurve::Affine { origin, dir } = &co.pcurve {
-            let uv = *origin + *dir * edge.range.0;
+        if let PCurve::Affine { origin, dir } =
+            on_pole(&b.face(f).surface, surface_of(f), &co.pcurve)
+        {
+            let uv = origin + dir * edge.range.0;
             poles.insert(edge.start, surface_of(f).eval(uv.x, uv.y));
         }
     }
@@ -813,7 +1084,15 @@ pub(crate) fn move_faces_pinned(
             on.iter()
                 .all(|s| crate::boolean::csi::signed_distance(s, q).abs() <= 1e-2 * tol::LINEAR)
         });
-        let Some(q) = pinned.or_else(|| settle(p, &on)) else {
+        let fixed: Vec<FaceId> = faces
+            .iter()
+            .copied()
+            .filter(|f| !moved.contains_key(f))
+            .collect();
+        let Some(q) = pinned
+            .or_else(|| settle(p, &on))
+            .or_else(|| meet_near(b, p, &on, &fixed))
+        else {
             return unsupported("moving a corner whose faces' new surfaces do not meet near it");
         };
         shifted[v.index()] = q.dist(p) > 0.0;
@@ -913,7 +1192,16 @@ pub(crate) fn move_faces_pinned(
         // The old edge's middle and direction, carried onto both new surfaces.
         let mid_t = 0.5 * (x.range.0 + x.range.1);
         let (old_mid, old_dir) = old.d1(mid_t);
-        let Some(mid) = settle(old_mid, &on) else {
+        let fixed: Vec<FaceId> = faces
+            .iter()
+            .copied()
+            .filter(|f| !moved.contains_key(f))
+            .collect();
+        let (from, old_dir) = match motion {
+            Some(m) if fixed.len() < faces.len() => (m.point(old_mid), m.vector(old_dir)),
+            _ => (old_mid, old_dir),
+        };
+        let Some(mid) = settle(from, &on).or_else(|| meet_near(b, from, &on, &fixed)) else {
             return unsupported("moving an edge whose faces' new surfaces do not meet near it");
         };
         let mut region = old.bbox(x.range.0, x.range.1);
@@ -1031,14 +1319,15 @@ pub(crate) fn move_faces_pinned(
                     // A degenerate edge (a pole) keeps its own line across the parameter plane,
                     // and the next coedge carries on from its end.
                     if x.curve.is_none() {
-                        if let PCurve::Affine { origin, dir } = &co.pcurve {
+                        let pcurve = on_pole(&face.surface, &surface, &co.pcurve);
+                        if let PCurve::Affine { origin, dir } = &pcurve {
                             let t = if reversed { x.range.0 } else { x.range.1 };
                             last = Some(*origin + *dir * t);
                         }
                         return CoedgeSpec {
                             edge,
                             reversed,
-                            pcurve: co.pcurve.clone(),
+                            pcurve,
                         };
                     }
                     let pcurve = if changed || rebuilt[co.edge.index()] {

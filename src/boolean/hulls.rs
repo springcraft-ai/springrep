@@ -29,7 +29,10 @@ pub(crate) fn pieces(c: &Curve, range: (f64, f64)) -> Option<Vec<(f64, f64, Aabb
             (k0..=k1).map(|k| k as f64 * p).collect()
         }
         _ => {
-            if range.0 < a || range.1 > b {
+            // A range that ends a rounding past the knots', as a path's whole number of turns
+            // does, is the curve's own.
+            let slack = 1e-12 * (b - a).abs().max(1.0);
+            if range.0 < a - slack || range.1 > b + slack {
                 return None;
             }
             vec![0.0]
@@ -204,8 +207,12 @@ mod tests {
                 assert!((0..3).all(|j| p[j] >= bb.min[j] - 1e-12 && p[j] <= bb.max[j] + 1e-12));
             }
         }
-        // Past an open curve's end it extends beyond its hull; a line has no control points.
+        // Past an open curve's end it extends beyond its hull; a line has no control points. A
+        // range a rounding past the end, as a path's whole number of turns gives, is the curve's.
         assert!(pieces(&c, (a - 1.0, b)).is_none());
+        let rounded = b + 4.0 * f64::EPSILON * b.abs().max(1.0);
+        assert!(rounded > b);
+        assert_eq!(pieces(&c, (a, rounded)).unwrap().last().unwrap().1, b);
         let line = Curve::Line(Line {
             origin: Vec3::ZERO,
             dir: Vec3::X,

@@ -168,6 +168,95 @@ fn a_spline_sphere_octant_offset_is_the_octant_of_the_grown_sphere() {
     assert!(worst <= 2.0 * OFFSET_FIT, "{worst:e}");
 }
 
+// A quarter of the cylinder of radius 5 about the z axis, 8 tall, as a rational spline whose
+// lines along v are straight, offset 1: the offset is the quarter of the cylinder of radius 6, its
+// lines along v still straight, so the first steps across v already hold it and only u is refined.
+#[test]
+fn a_spline_quarter_cylinder_offset_refines_only_across_its_arc() {
+    use std::f64::consts::FRAC_1_SQRT_2 as H;
+    let arc = [(5., 0.), (5., 5.), (0., 5.)];
+    let ctrl = arc
+        .iter()
+        .flat_map(|&(x, y)| [Vec3::new(x, y, 0.), Vec3::new(x, y, 8.)])
+        .collect();
+    let knots = (vec![0., 0., 0., 1., 1., 1.], vec![0., 0., 1., 1.]);
+    let weights = Some(vec![1., 1., H, H, 1., 1.]);
+    let n = crate::geom::NurbsSurface::new((2, 1), knots, (3, 2), ctrl, weights).unwrap();
+    let s = crate::geom::Surface::Nurbs(Box::new(n));
+    let off = offset_fitted(&s, 1.0, ((0., 1.), (0., 1.))).unwrap();
+    let crate::geom::Surface::Nurbs(n) = &off else {
+        panic!("the offset is a spline")
+    };
+    let (u_spans, v_spans) = n.span_counts();
+    assert_eq!(v_spans, 8, "{u_spans} by {v_spans}");
+    assert!(u_spans > 8);
+    let mut worst = 0.0f64;
+    for i in 0..=37 {
+        for j in 0..=37 {
+            let p = n.eval(i as f64 / 37.0, j as f64 / 37.0);
+            worst = worst.max((p.x.hypot(p.y) - 6.0).abs());
+        }
+    }
+    assert!(worst <= 2.0 * OFFSET_FIT, "{worst:e}");
+}
+
+// The ball of radius 5 as one biquadratic rational spline face, closed on its seam and pinched at
+// its poles, offset 2: its pcurves span the whole period and both poles, so the fit covers the
+// whole face, and the fit cut at the circles' double knots holds the ball of radius 7.
+#[test]
+fn a_spline_ball_offset_whole_is_the_grown_ball() {
+    use std::f64::consts::FRAC_1_SQRT_2 as H;
+    let circle = [
+        (1., 0.),
+        (1., 1.),
+        (0., 1.),
+        (-1., 1.),
+        (-1., 0.),
+        (-1., -1.),
+        (0., -1.),
+        (1., -1.),
+        (1., 0.),
+    ];
+    let cw = [1., H, 1., H, 1., H, 1., H, 1.];
+    let meridian = [(0., -5.), (5., -5.), (5., 0.), (5., 5.), (0., 5.)];
+    let mw = [1., H, 1., H, 1.];
+    let mut ctrl = Vec::new();
+    let mut weights = Vec::new();
+    for (&(cx, cy), &wi) in circle.iter().zip(&cw) {
+        for (&(rho, z), &wj) in meridian.iter().zip(&mw) {
+            ctrl.push(Vec3::new(rho * cx, rho * cy, z));
+            weights.push(wi * wj);
+        }
+    }
+    let ku = vec![0., 0., 0., 0.25, 0.25, 0.5, 0.5, 0.75, 0.75, 1., 1., 1.];
+    let kv = vec![0., 0., 0., 0.5, 0.5, 1., 1., 1.];
+    let skin =
+        crate::geom::NurbsSurface::new((2, 2), (ku, kv), (9, 5), ctrl, Some(weights)).unwrap();
+    let piece = crate::sew::Piece::whole(skin, "skin").unwrap();
+    let ball = crate::sew::sew(&[piece], 0.0, "ball").unwrap();
+    let by: HashMap<FaceId, f64> = ball.face_ids().map(|f| (f, 2.0)).collect();
+    let out = offset_faces(&ball, &by).unwrap();
+    assert!(check::check(&out).is_empty(), "{:?}", check::check(&out));
+    let f = out.face_ids().next().unwrap();
+    let crate::geom::Surface::Nurbs(n) = &out.face(f).surface else {
+        panic!("the offset is a spline")
+    };
+    let ((u0, u1), (v0, v1)) = n.domain();
+    let mut worst = 0.0f64;
+    for i in 0..=37 {
+        for j in 0..=37 {
+            let (u, v) = (
+                u0 + (u1 - u0) * i as f64 / 37.0,
+                v0 + (v1 - v0) * j as f64 / 37.0,
+            );
+            worst = worst.max((n.eval(u, v).norm() - 7.0).abs());
+        }
+    }
+    assert!(worst <= 2.0 * OFFSET_FIT, "{worst:e}");
+    // The fit spans the whole period, not the sliver round the seam a projection reads.
+    assert!(u1 - u0 >= 1.0 && v1 - v0 >= 1.0);
+}
+
 /// A box 4 wide in x, 6 deep and 4 tall, its walls in `walls` drafted about their feet by 45°:
 /// the walls lean in 1 per 1 of height.
 fn drafted_box(walls: &[&str]) -> Result<Brep> {
@@ -195,6 +284,59 @@ fn all_walls_drafted_until_two_meet_make_a_hipped_roof() {
     assert!(check::check(&out).is_empty());
     assert!((measure::volume(&out) - 56.0 / 3.0).abs() < 1e-9);
     assert_eq!(out.face_count(), 5);
+}
+
+/// The prism 8 tall on the polygon `pts`, every side drafted inward about its foot by `degrees`.
+fn drafted_prism(pts: &[(f64, f64)], degrees: f64) -> Brep {
+    let pts: Vec<Vec2> = pts.iter().map(|&(x, y)| Vec2::new(x, y)).collect();
+    let names: Vec<String> = (0..pts.len()).map(|i| format!("e{i}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let b = sweep::extrude(&Profile::polygon(&pts, &names), &Frame::WORLD, 8.0, "box").unwrap();
+    let sides: Vec<FaceId> = names.iter().map(|n| face(&b, n)).collect();
+    draft(&b, &sides, &Frame::WORLD, degrees.to_radians()).unwrap()
+}
+
+// An L of arms 5 wide, its sides drafted 30°: its section at height z is the L moved in by
+// d = z·tan 30°, both arms closing in ridges at d = 2.5 under the top, whose face is taken out
+// with the ridges two walls' edges. Its volume is ∫ (5 − 2d)(30 − 2d) dd / tan 30° over d from 0
+// to 2.5, 2125√3/12.
+#[test]
+fn an_l_s_sides_drafted_until_its_arms_close_meet_in_ridges() {
+    let l = [
+        (0., 0.),
+        (20., 0.),
+        (20., 5.),
+        (5., 5.),
+        (5., 15.),
+        (0., 15.),
+    ];
+    let out = drafted_prism(&l, 30.0);
+    assert!(check::check(&out).is_empty(), "{:?}", check::check(&out));
+    let want = 2125.0 * 3f64.sqrt() / 12.0;
+    assert!((measure::volume(&out) - want).abs() < 1e-9 * want);
+    assert_eq!(out.face_count(), 7);
+}
+
+// A T of bar 20 × 4 and stem 6 wide standing 12 past it, its sides drafted 45°: the bar closes in
+// a ridge at height 2, where its top edge comes down onto the stem's corners and splits there, and
+// each corner of four faces then pulls apart along the stem's wall; the stem closes at 3. Its
+// section at height d is the T moved in by d: ∫₀² (152 − 72d + 4d²) dd + ∫₂³ (6 − 2d)(16 − 2d) dd.
+#[test]
+fn a_t_s_sides_drafted_until_its_bar_and_stem_close_pull_its_corners_apart() {
+    let t = [
+        (0., 0.),
+        (20., 0.),
+        (20., 4.),
+        (13., 4.),
+        (13., 16.),
+        (7., 16.),
+        (7., 4.),
+        (0., 4.),
+    ];
+    let out = drafted_prism(&t, 45.0);
+    assert!(check::check(&out).is_empty(), "{:?}", check::check(&out));
+    let want = 512.0 / 3.0 + 34.0 / 3.0;
+    assert!((measure::volume(&out) - want).abs() < 1e-9 * want);
 }
 
 // An L 10 wide and 6 tall with a step at 2 from x 4 to 10, 3 deep. Raising the step 4 brings it
@@ -266,6 +408,209 @@ fn rounds_offset_past_their_radius_close_to_sharp_corners() {
     assert!(check::check(&out).is_empty());
     assert!((measure::volume(&out) - 105.0).abs() < 1e-9);
     assert_eq!(out.face_count(), 6);
+}
+
+fn up(z: f64) -> Frame {
+    Frame::WORLD.translated(Vec3::Z * z)
+}
+
+// A cylinder of radius 6 from z 0 to 10, both rims rounded 2 (tori of tube 2), every face moved in
+// by 2 and by 3: the rounds close to nothing, leaving the sharp cylinders of radius 4 from z 2 to 8
+// and of radius 3 from z 3 to 7.
+#[test]
+fn a_puck_s_rounds_moved_in_by_their_radius_or_more_close() {
+    let c = crate::primitive::cylinder(&up(0.0), 6.0, 10.0, "puck").unwrap();
+    let pairs = [("puck.start", "puck.side"), ("puck.end", "puck.side")];
+    let b = crate::blend::fillet(&c, &pairs, 2.0, "round").unwrap();
+    for (d, r, h) in [(2.0, 4.0, 6.0), (3.0, 3.0, 4.0)] {
+        let by: HashMap<FaceId, f64> = b.face_ids().map(|f| (f, -d)).collect();
+        let out = offset_faces(&b, &by).unwrap();
+        assert!(check::check(&out).is_empty(), "{:?}", check::check(&out));
+        let want = std::f64::consts::PI * r * r * h;
+        assert!((measure::volume(&out) - want).abs() < 1e-7 * want);
+        assert_eq!(out.face_count(), 3);
+    }
+}
+
+// The cone of base radius 6 at z 0 and apex at z 12, its tip rounded by the ball of radius 1
+// tangent to its side, every face moved in by 1.5: the ball closes onto the moved side's apex at
+// z 12 − 1.5√5, leaving the plain cone of height h = 10.5 − 1.5√5 and base radius h/2, πh³/12.
+#[test]
+fn a_ball_tip_moved_in_past_its_radius_closes_onto_the_cone_s_apex() {
+    use crate::profile::NamedSegment;
+    use std::f64::consts::{FRAC_PI_2, PI, TAU};
+    let s5 = 5f64.sqrt();
+    let centre = Vec2::new(0.0, 12.0 - s5);
+    let touch = Vec2::new(2.0 / s5, 12.0 - 4.0 / s5);
+    let from = (touch.y - centre.y).atan2(touch.x - centre.x);
+    let half = Profile::outline(vec![
+        NamedSegment::line(Vec2::new(0.0, 0.0), Vec2::new(6.0, 0.0), "base"),
+        NamedSegment::line(Vec2::new(6.0, 0.0), touch, "side"),
+        NamedSegment::arc(centre, 1.0, from, FRAC_PI_2 - from, "tip"),
+        NamedSegment::line(Vec2::new(0.0, 13.0 - s5), Vec2::new(0.0, 0.0), "axis"),
+    ]);
+    let plane = Frame::new(Point3::ZERO, -Vec3::Y, Vec3::X).unwrap();
+    let b = sweep::revolve(&half, &plane, Point3::ZERO, Vec3::Z, TAU, "cone").unwrap();
+    let by: HashMap<FaceId, f64> = b.face_ids().map(|f| (f, -1.5)).collect();
+    let out = offset_faces(&b, &by).unwrap();
+    assert!(check::check(&out).is_empty(), "{:?}", check::check(&out));
+    let h = 10.5 - 1.5 * s5;
+    let want = PI * h.powi(3) / 12.0;
+    assert!((measure::volume(&out) - want).abs() < 1e-7 * want);
+    assert_eq!(out.face_count(), 2);
+}
+
+// The cone of base radius 3 at z 0 and apex at z 4 with every face moved out by 1: the side's
+// apex rises 1/sin α = 5/3, α = atan(3/4), and the base drops to z −1, a cone 20/3 tall of base
+// radius 5, 500π/9.
+#[test]
+fn a_cone_moved_out_carries_its_apex_to_the_moved_cone_s() {
+    let c = crate::primitive::cone(&Frame::WORLD, 3.0, 0.0, 4.0, "cone").unwrap();
+    let by: HashMap<FaceId, f64> = c.face_ids().map(|f| (f, 1.0)).collect();
+    let out = offset_faces(&c, &by).unwrap();
+    assert!(check::check(&out).is_empty(), "{:?}", check::check(&out));
+    let want = 500.0 * std::f64::consts::PI / 9.0;
+    assert!((measure::volume(&out) - want).abs() < 1e-7 * want);
+}
+
+// A frustum of radii 6 and 3, 4 tall, bored by a hole of radius 1, every face but its top moved in
+// by 1: the moved side ρ = 4.75 − 3z/4 and the moved bore ρ = 2 meet at z = 11/3 before the top,
+// whose annulus closes between them. Left is the ring of section the triangle (2, 1), (4, 1),
+// (2, 11/3): area 8/3 about ρ̄ = 8/3, so 2π·64/9.
+#[test]
+fn an_annulus_closed_between_two_moved_walls_is_taken_out() {
+    use std::f64::consts::TAU;
+    let pts = [(1.0, 0.0), (6.0, 0.0), (3.0, 4.0), (1.0, 4.0)].map(|(x, y)| Vec2::new(x, y));
+    let names = ["base", "side", "top", "bore"];
+    let plane = Frame::new(Point3::ZERO, -Vec3::Y, Vec3::X).unwrap();
+    let section = Profile::polygon(&pts, &names);
+    let b = sweep::revolve(&section, &plane, Point3::ZERO, Vec3::Z, TAU, "box").unwrap();
+    let top = face(&b, "top");
+    let by: HashMap<FaceId, f64> = b
+        .face_ids()
+        .filter(|&f| f != top)
+        .map(|f| (f, -1.0))
+        .collect();
+    let out = offset_faces(&b, &by).unwrap();
+    assert!(check::check(&out).is_empty(), "{:?}", check::check(&out));
+    let want = TAU * 64.0 / 9.0;
+    assert!((measure::volume(&out) - want).abs() < 1e-7 * want);
+    assert_eq!(out.face_count(), 3);
+}
+
+// The ball of radius 5 below the plane z = 4.5, its sphere moved in by 1 and its flat kept: the
+// sphere shrinks through the plane, whose disk closes onto the sphere's pole at radius 4.5 and is
+// taken out. Left is the whole ball of radius 4, 256π/3.
+#[test]
+fn a_ball_s_flat_closed_by_its_sphere_shrinking_through_it_is_taken_out() {
+    use crate::profile::NamedSegment;
+    use std::f64::consts::{FRAC_PI_2, PI, TAU};
+    let (cut, r) = (4.5f64, 4.75f64.sqrt());
+    let half = Profile::outline(vec![
+        NamedSegment::arc(
+            Vec2::ZERO,
+            5.0,
+            -FRAC_PI_2,
+            FRAC_PI_2 + (cut / 5.0).asin(),
+            "skin",
+        ),
+        NamedSegment::line(Vec2::new(r, cut), Vec2::new(0.0, cut), "top"),
+        NamedSegment::line(Vec2::new(0.0, cut), Vec2::new(0.0, -5.0), "axis"),
+    ]);
+    let plane = Frame::new(Point3::ZERO, -Vec3::Y, Vec3::X).unwrap();
+    let b = sweep::revolve(&half, &plane, Point3::ZERO, Vec3::Z, TAU, "box").unwrap();
+    let out = offset_faces(&b, &HashMap::from([(face(&b, "skin"), -1.0)])).unwrap();
+    assert!(check::check(&out).is_empty(), "{:?}", check::check(&out));
+    let want = 256.0 * PI / 3.0;
+    assert!((measure::volume(&out) - want).abs() < 1e-7 * want);
+    assert_eq!(out.face_count(), 1);
+}
+
+// A cylinder of radius 5 from z 0 to 10 capped by the half ball of radius 5 about (0, 0, 10), its
+// side and base moved in by 1 and its dome kept: the side, tangent to the dome where they meet,
+// runs on as the cylinder of radius 4 up into the dome until it meets the sphere at z 13. Left is
+// that cylinder from z 1 to 13 and the ball's cap above it, 2 high: 192π + 52π/3.
+#[test]
+fn a_wall_moved_off_the_dome_it_ran_into_tangentially_runs_on_to_meet_it() {
+    use crate::profile::NamedSegment;
+    use std::f64::consts::{FRAC_PI_2, PI, TAU};
+    let half = Profile::outline(vec![
+        NamedSegment::line(Vec2::new(0.0, 0.0), Vec2::new(5.0, 0.0), "base"),
+        NamedSegment::line(Vec2::new(5.0, 0.0), Vec2::new(5.0, 10.0), "side"),
+        NamedSegment::arc(Vec2::new(0.0, 10.0), 5.0, 0.0, FRAC_PI_2, "dome"),
+        NamedSegment::line(Vec2::new(0.0, 15.0), Vec2::new(0.0, 0.0), "axis"),
+    ]);
+    let plane = Frame::new(Point3::ZERO, -Vec3::Y, Vec3::X).unwrap();
+    let b = sweep::revolve(&half, &plane, Point3::ZERO, Vec3::Z, TAU, "box").unwrap();
+    let by = HashMap::from([(face(&b, "side"), -1.0), (face(&b, "base"), -1.0)]);
+    let out = offset_faces(&b, &by).unwrap();
+    assert!(check::check(&out).is_empty(), "{:?}", check::check(&out));
+    let want = 192.0 * PI + 52.0 * PI / 3.0;
+    assert!((measure::volume(&out) - want).abs() < 1e-7 * want);
+}
+
+// A plate 40 × 30 × 8 drilled through by two holes of radius 3 whose axes are 10 apart, both walls
+// moved 3 into the plate: the holes of radius 6 run into each other. Left is the plate less the
+// union of the two disks, of area 72(π − α) + 10√11, α = acos(5/6) the half angle each disk's
+// centre sees the other's chord in.
+#[test]
+fn holes_widened_until_they_merge_leave_one_opening() {
+    use std::f64::consts::PI;
+    let holes = vec![
+        Profile::named_circle(Vec2::new(15.0, 15.0), 6.0, "a").loops[0].clone(),
+        Profile::named_circle(Vec2::new(25.0, 15.0), 6.0, "b").loops[0].clone(),
+    ];
+    let section = Profile::rect(Vec2::new(20.0, 15.0), 40.0, 30.0).with_holes(holes);
+    let b = sweep::extrude(&section, &Frame::WORLD, 8.0, "box").unwrap();
+    let by = HashMap::from([(face(&b, "a"), -3.0), (face(&b, "b"), -3.0)]);
+    let out = offset_faces(&b, &by).unwrap();
+    assert!(check::check(&out).is_empty(), "{:?}", check::check(&out));
+    let alpha = (5.0f64 / 6.0).acos();
+    let want = 8.0 * (1200.0 - 72.0 * (PI - alpha) - 10.0 * 11f64.sqrt());
+    assert!((measure::volume(&out) - want).abs() < 1e-7 * want);
+}
+
+// The box 40 × 30 × 10, the edge of its top and its back rounded 3, the top and the round moved up
+// 6, further than the round's radius: the round's arcs on the ends are carried up whole, not taken
+// as the rest of their circles. The box 40 × 30 × 16 less the round's corner, (1 − π/4)·9 by 40.
+#[test]
+fn a_round_moved_further_than_its_radius_keeps_its_arcs() {
+    use std::f64::consts::PI;
+    let body = crate::primitive::block(&Frame::WORLD, Vec3::new(40.0, 30.0, 10.0), "box").unwrap();
+    let b = crate::blend::fillet(&body, &[("box.end", "box.v_max")], 3.0, "round").unwrap();
+    let faces: Vec<FaceId> = b
+        .face_ids()
+        .filter(|&f| {
+            let names = &b.face(f).names;
+            names.contains(&FaceName::new("box", "end"))
+                || names.iter().any(|n| n.feature == "round")
+        })
+        .collect();
+    let out = move_faces_by(
+        &b,
+        &faces,
+        &Transform::translation(Vec3::new(0.0, 0.0, 6.0)),
+    )
+    .unwrap();
+    let want = 40.0 * 30.0 * 16.0 - (1.0 - PI / 4.0) * 9.0 * 40.0;
+    assert!((measure::volume(&out) - want).abs() < 1e-7 * want);
+}
+
+// A plate of radius 8 from z −4 to 0 under a post of radius 3 up to z 8, the concave edge between
+// them filleted 2, every face moved out by 3: the fillet's tube closes and the plate's top meets
+// the post square. A plate of radius 11 from z −7 to 3 and a post of radius 6 from 3 to 11.
+#[test]
+fn a_concave_fillet_grown_past_its_radius_closes_to_a_square_corner() {
+    use crate::primitive::cylinder;
+    let plate = cylinder(&up(-4.0), 8.0, 4.0, "plate").unwrap();
+    let post = cylinder(&up(0.0), 3.0, 8.0, "post").unwrap();
+    let body = crate::boolean::union(&plate, &post).unwrap();
+    let b = crate::blend::fillet(&body, &[("plate.end", "post.side")], 2.0, "f").unwrap();
+    let by: HashMap<FaceId, f64> = b.face_ids().map(|f| (f, 3.0)).collect();
+    let out = offset_faces(&b, &by).unwrap();
+    assert!(check::check(&out).is_empty(), "{:?}", check::check(&out));
+    let want = std::f64::consts::PI * (121.0 * 10.0 + 36.0 * 8.0);
+    assert!((measure::volume(&out) - want).abs() < 1e-7 * want);
 }
 
 // A 10 × 6 block 3 deep with a slot from x 3 to 7 down to 2: its left wall moved 4 across the slot

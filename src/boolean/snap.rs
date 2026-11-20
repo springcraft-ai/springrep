@@ -177,7 +177,9 @@ fn snaps(sa: &Surface, sb: &Surface, pts: &[Point3]) -> Option<f64> {
     if worst <= SNAP {
         return Some(worst);
     }
-    if worst > SNAP_GRAZING {
+    // Two planes cross along a line found in closed form however small the angle, and a wedge
+    // between them may be all the material there is: only a curved pair is moved this far.
+    if worst > SNAP_GRAZING || matches!((sa, sb), (Surface::Plane(_), Surface::Plane(_))) {
         return None;
     }
     let crosses = d.iter().any(|&x| x > 0.5 * worst) && d.iter().any(|&x| x < -0.5 * worst);

@@ -420,6 +420,61 @@ fn stacked_spline_extrusions_share_their_side() {
     assert!((measure::volume(&u) - v).abs() < 1e-9 * v);
 }
 
+/// A drum of radius 5, 0 ≤ z ≤ 10, and a sleeve 5 ≤ ρ ≤ 7, 2 ≤ z ≤ 8, whose bore is the drum's
+/// cylinder written as a rational B-spline surface (the nine-point circle swept along z): the bore
+/// and the drum's side are one surface where they overlap, and the union keeps neither there.
+#[test]
+fn a_sleeve_with_a_spline_bore_on_a_drum_unites_without_the_bore() {
+    use springrep::{
+        edit::move_faces,
+        geom::{NurbsSurface, Surface},
+    };
+    let w = std::f64::consts::FRAC_1_SQRT_2;
+    let ring = [
+        (0.0, 5.0, 1.0),
+        (-5.0, 5.0, w),
+        (-5.0, 0.0, 1.0),
+        (-5.0, -5.0, w),
+        (0.0, -5.0, 1.0),
+        (5.0, -5.0, w),
+        (5.0, 0.0, 1.0),
+        (5.0, 5.0, w),
+        (0.0, 5.0, 1.0),
+    ];
+    let (mut ctrl, mut weights) = (Vec::new(), Vec::new());
+    for (x, y, wt) in ring {
+        ctrl.extend([Vec3::new(x, y, 2.0), Vec3::new(x, y, 8.0)]);
+        weights.extend([wt, wt]);
+    }
+    let around = vec![
+        0.0, 0.0, 0.0, 0.25, 0.25, 0.5, 0.5, 0.75, 0.75, 1.0, 1.0, 1.0,
+    ];
+    let bore = NurbsSurface::new(
+        (2, 1),
+        (around, vec![0.0, 0.0, 1.0, 1.0]),
+        (9, 2),
+        ctrl,
+        Some(weights),
+    )
+    .unwrap();
+    let hole = Profile::named_circle(Vec2::ZERO, 10.0, "bore").loops;
+    let section = Profile::named_circle(Vec2::ZERO, 14.0, "outer").with_holes(hole);
+    let base = Frame::new(Vec3::new(0.0, 0.0, 2.0), Vec3::Z, Vec3::X).unwrap();
+    let plain = extrude(&section, &base, 6.0, "sleeve").unwrap();
+    let f = plain
+        .face_ids()
+        .find(|&f| plain.face(f).names.iter().any(|n| n.face == "bore"))
+        .unwrap();
+    let moved = std::collections::HashMap::from([(f, Surface::Nurbs(Box::new(bore)))]);
+    let sleeve = move_faces(&plain, &moved).unwrap();
+    let drum = rod("drum", [0.0; 3], [0.0, 0.0, 1.0], 5.0, 10.0);
+    let joined = union(&drum, &sleeve).unwrap();
+    // π·5²·10 + π(7² − 5²)·6. Faces: the drum's ends, its side less the bore's 2π·5·6, the
+    // sleeve's annular ends and its outer side.
+    let area = 50.0 * PI + (100.0 * PI - 60.0 * PI) + 48.0 * PI + 84.0 * PI;
+    assert_solid(&joined, 394.0 * PI, area);
+}
+
 #[test]
 fn a_rod_touching_a_box_face_along_a_line_takes_nothing_from_it() {
     // The rod's side touches the face x = 10 along its middle, where both faces' interior points
@@ -548,6 +603,64 @@ fn flush_faces_crossing_at_a_hair_meet_along_their_line() {
             "{turn} {off}: {common}"
         );
     }
+}
+
+#[test]
+fn a_plane_a_millionth_off_a_cube_top_cuts_a_wedge() {
+    // The half-space above z = s·y, s = 1e-6, as a 40 × 40 × 20 block, against the cube
+    // (−5, −5, −10)–(5, 5, 0): the plane crosses the top along the x axis, at a sine of just under
+    // the tangent threshold, and lies 2e-5 mm off it at the block's edges. The common part is a
+    // wedge under the top's half y < 0, 5·s thick at y = −5, and nothing of it may be moved away.
+    let s = 1e-6;
+    let cube = block("cube", [-5.0, -5.0, -10.0], [5.0, 5.0, 0.0]);
+    let f = Frame::from_axis(Vec3::ZERO, Vec3::new(0.0, -s, 1.0)).unwrap();
+    let corner = f.origin - f.x * 20.0 - f.y * 20.0;
+    let above = extrude(
+        &Profile::rect(Vec2::new(20.0, 20.0), 40.0, 40.0),
+        &Frame::new(corner, f.z, f.x).unwrap(),
+        20.0,
+        "above",
+    )
+    .unwrap();
+    let common = intersection(&cube, &above).unwrap();
+    let wedge = 10.0 * 5.0 * 5.0 * s / 2.0;
+    let area = 50.0 + 50.0 * (1.0 + s * s).sqrt() + 10.0 * 5.0 * s + 2.0 * (5.0 * 5.0 * s / 2.0);
+    assert_solid(&common, wedge, area);
+    let cut = difference(&cube, &above).unwrap();
+    assert!(check::check(&cut).is_empty());
+    assert!((measure::volume(&cut) - (1000.0 - wedge)).abs() <= 1e-9);
+}
+
+#[test]
+fn a_plane_a_ten_thousandth_over_a_paraboloids_vertex_cuts_its_tip() {
+    // The paraboloid x² + y² ≤ 8z, z ≤ 8, turned from its parabola (a quadratic Bézier) about the
+    // z axis, against a block whose top is z = h = 1e-4: the two meet in a circle of radius √(8h)
+    // about the vertex, where the turned curve meets the axis.
+    let (k, top, h) = (8.0f64, 8.0f64, 1e-4f64);
+    let r = (k * top).sqrt();
+    let meridian = Profile::outline(vec![
+        NamedSegment::new(
+            Segment::Bezier {
+                ctrl: vec![Vec2::ZERO, Vec2::new(r / 2.0, 0.0), Vec2::new(r, top)],
+                weights: vec![1.0; 3],
+            },
+            "side",
+        ),
+        NamedSegment::line(Vec2::new(r, top), Vec2::new(0.0, top), "top"),
+        NamedSegment::line(Vec2::new(0.0, top), Vec2::ZERO, "axis"),
+    ]);
+    let plane = Frame::new(Vec3::ZERO, Vec3::new(0.0, -1.0, 0.0), Vec3::X).unwrap();
+    let body = revolve(&meridian, &plane, Vec3::ZERO, Vec3::Z, TAU, "p").unwrap();
+    let below = block("below", [-10.0, -10.0, -1.0], [10.0, 10.0, h]);
+    let tip = intersection(&body, &below).unwrap();
+    // ∫ π·k·z dz from 0 to h; the disk π·k·h and the side 2π∫ρ√(1 + (2ρ/k)²) dρ to √(k·h).
+    let volume = PI * k * h * h / 2.0;
+    let side = PI * k * k / 6.0 * ((1.0 + 4.0 * h / k).powf(1.5) - 1.0);
+    assert_solid(&tip, volume, PI * k * h + side);
+    let rest = difference(&body, &below).unwrap();
+    assert!(check::check(&rest).is_empty());
+    let whole = PI * k * top * top / 2.0;
+    assert!((measure::volume(&rest) - (whole - volume)).abs() <= 1e-9 * whole);
 }
 
 /// Two cylinders micrometres across crossing at an odd angle: a loop's parameter images meet to a

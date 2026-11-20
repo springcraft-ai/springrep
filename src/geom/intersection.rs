@@ -317,7 +317,12 @@ fn span_distance(c: &BSpline, p: Point3, (lo, hi): (f64, f64), f: f64) -> f64 {
         if df <= 0.0 {
             break;
         }
-        t = (t - r.dot(d1) / df).clamp(lo, hi);
+        let next = (t - r.dot(d1) / df).clamp(lo, hi);
+        let done = (next - t).abs() <= 1e-14 * (hi - lo);
+        t = next;
+        if done {
+            break;
+        }
     }
     c.eval(t).dist(p)
 }

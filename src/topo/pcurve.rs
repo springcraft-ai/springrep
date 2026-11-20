@@ -1,6 +1,7 @@
 use crate::{
-    geom::{Curve, Surface},
+    geom::{BSpline, Curve, Surface},
     math::{Point3, Vec2, Vec3},
+    numeric::solve2,
     tol,
 };
 
@@ -13,6 +14,212 @@ pub enum PCurve {
     /// the coedge's parameters where it starts, so a seam's two coedges stay apart. Where the edge
     /// meets a pole, `u` is the one its direction there leaves the pole by.
     Projected { seed: Vec2 },
+    /// `uv` read off a B-spline in `t` whose control points lie in the plane `z = 0`: a curve
+    /// whose parameters are known along it, as a swept sheet's own, where projection lands on
+    /// the wrong foot because the surface's map is nearly singular.
+    Spline { uv: BSpline },
+}
+
+impl PCurve {
+    /// The pcurve with its parameter plane mapped by `f`, an affine map.
+    pub(crate) fn mapped(&self, f: &dyn Fn(Vec2) -> Vec2) -> PCurve {
+        match self {
+            PCurve::Affine { origin, dir } => PCurve::Affine {
+                origin: f(*origin),
+                dir: f(*origin + *dir) - f(*origin),
+            },
+            PCurve::Projected { seed } => PCurve::Projected { seed: f(*seed) },
+            PCurve::Spline { uv } => PCurve::Spline {
+                uv: map_spline(uv, f),
+            },
+        }
+    }
+}
+
+/// `s` with its control points mapped by `f`, an affine map of the parameter plane, which a
+/// B-spline follows exactly.
+pub(crate) fn map_spline(s: &BSpline, f: &dyn Fn(Vec2) -> Vec2) -> BSpline {
+    let ctrl = s
+        .control_points()
+        .iter()
+        .map(|p| {
+            let q = f(Vec2::new(p.x, p.y));
+            Vec3::new(q.x, q.y, 0.0)
+        })
+        .collect();
+    BSpline::new(s.degree(), s.knots().to_vec(), ctrl).expect("the same knots and degree")
+}
+
+/// `s` in the parameter `k·t`, for an edge whose parameter is scaled by `k > 0`.
+pub(crate) fn stretch_spline(s: &BSpline, k: f64) -> BSpline {
+    let knots = s.knots().iter().map(|x| x * k).collect();
+    BSpline::new(s.degree(), knots, s.control_points().to_vec()).expect("knots scaled by k > 0")
+}
+
+/// The parameter-plane point of a [`PCurve::Spline`]'s spline at `t`.
+pub(crate) fn spline_uv(s: &BSpline, t: f64) -> Vec2 {
+    let p = s.eval(t);
+    Vec2::new(p.x, p.y)
+}
+
+/// The rate of a [`PCurve::Spline`]'s spline at `t`.
+pub(crate) fn spline_rate(s: &BSpline, t: f64) -> Vec2 {
+    let d = s.eval_ders(t, 1)[1];
+    Vec2::new(d.x, d.y)
+}
+
+/// How far a spline pcurve's point may lie from its curve's.
+const SPLINE_FIT: f64 = tol::LINEAR / 4.0;
+
+/// The cubic B-spline in `t` through `pts`, parameter-plane points of `s` along `curve` from
+/// `range.0` to `range.1`, each at the parameter of `curve` its point is nearest, so that `s` at
+/// the spline's point lies within [`SPLINE_FIT`] of `curve` all along. Each span whose middle
+/// strays further gets a point there, its parameters moved from the spline's by the least change
+/// that brings it onto the curve, so along a direction the map nearly drops it stays put (Nocedal
+/// and Wright 2006, ch. 10). `None` where no such spline is found.
+pub(crate) fn fit_spline(
+    s: &Surface,
+    curve: &Curve,
+    range: (f64, f64),
+    pts: &[Vec2],
+) -> Option<BSpline> {
+    let (lo, hi) = range;
+    if pts.len() < 2 || hi <= lo {
+        return None;
+    }
+    // A link of few points (a straight one, along a line of the plane) gets points between them,
+    // each at the parameter its share of the chords in space gives as a first guess.
+    const LEAST: usize = 32;
+    let per = LEAST.div_ceil(pts.len() - 1).max(1);
+    let mut dense = Vec::with_capacity((pts.len() - 1) * per + 1);
+    for w in pts.windows(2) {
+        for j in 0..per {
+            dense.push(w[0].lerp(w[1], j as f64 / per as f64));
+        }
+    }
+    dense.push(pts[pts.len() - 1]);
+    let at: Vec<Point3> = dense.iter().map(|q| s.eval(q.x, q.y)).collect();
+    let mut along = vec![0.0];
+    for w in at.windows(2) {
+        along.push(along[along.len() - 1] + w[0].dist(w[1]));
+    }
+    let total = along[along.len() - 1].max(1e-300);
+    // Points all on one parameter line keep to it: there the pcurve is that line exactly.
+    let held = if pts.iter().all(|q| q.x == pts[0].x) {
+        Some(true)
+    } else if pts.iter().all(|q| q.y == pts[0].y) {
+        Some(false)
+    } else {
+        None
+    };
+    let mut ts = vec![lo];
+    let mut uvs = vec![pts[0]];
+    let spacing = (hi - lo) * 1e-9;
+    for (k, q) in dense.iter().enumerate().take(dense.len() - 1).skip(1) {
+        let prev = *ts.last().expect("starts at lo");
+        let guess = lo + (hi - lo) * along[k] / total;
+        let t = nearest_param(curve, at[k], guess.max(prev), (prev, hi));
+        if t <= prev + spacing || t >= hi - spacing {
+            continue;
+        }
+        let p = curve.eval(t);
+        let q = if s.eval(q.x, q.y).dist(p) <= SPLINE_FIT {
+            Some(*q)
+        } else {
+            settle(s, p, *q, held)
+        };
+        if let Some(q) = q {
+            ts.push(t);
+            uvs.push(q);
+        }
+    }
+    ts.push(hi);
+    uvs.push(pts[pts.len() - 1]);
+    for _ in 0..12 {
+        let at: Vec<Vec3> = uvs.iter().map(|q| Vec3::new(q.x, q.y, 0.0)).collect();
+        let spline = BSpline::interpolate_at(&at, &ts).ok()?;
+        let mut next_t = vec![ts[0]];
+        let mut next_uv = vec![uvs[0]];
+        let mut fits = true;
+        for i in 0..ts.len() - 1 {
+            for f in [0.25, 0.5, 0.75] {
+                let t = ts[i] + (ts[i + 1] - ts[i]) * f;
+                let uv = spline_uv(&spline, t);
+                let p = curve.eval(t);
+                if s.eval(uv.x, uv.y).dist(p) <= SPLINE_FIT {
+                    continue;
+                }
+                fits = false;
+                let mid = 0.5 * (ts[i] + ts[i + 1]);
+                if mid > ts[i] + spacing && mid < ts[i + 1] - spacing {
+                    let guess = spline_uv(&spline, mid);
+                    next_t.push(mid);
+                    next_uv.push(settle(s, curve.eval(mid), guess, held)?);
+                }
+                break;
+            }
+            next_t.push(ts[i + 1]);
+            next_uv.push(uvs[i + 1]);
+        }
+        if fits {
+            return Some(spline);
+        }
+        if next_t.len() == ts.len() {
+            return None;
+        }
+        (ts, uvs) = (next_t, next_uv);
+    }
+    None
+}
+
+/// The parameter of `curve` in `(lo, hi)` nearest `p`, by Newton steps from `guess`, or the
+/// nearest over the range where those leave it.
+fn nearest_param(curve: &Curve, p: Point3, guess: f64, (lo, hi): (f64, f64)) -> f64 {
+    let mut t = guess.clamp(lo, hi);
+    for _ in 0..32 {
+        let (c, d, dd) = curve.d2(t);
+        let r = c - p;
+        let slope = d.dot(d) + r.dot(dd);
+        if slope <= 0.0 {
+            break;
+        }
+        let step = r.dot(d) / slope;
+        t = (t - step).clamp(lo, hi);
+        if step.abs() <= 1e-15 * (1.0 + t.abs()) {
+            return t;
+        }
+    }
+    if curve.eval(t).dist(p) <= SPLINE_FIT {
+        t
+    } else {
+        curve.project(p, lo, hi)
+    }
+}
+
+/// Parameters near `uv` where `s` reaches `p` to within a tenth of [`SPLINE_FIT`], by damped
+/// Gauss–Newton steps, each the least change that meets the linearised map; with `held`, `u`
+/// (`Some(true)`) or `v` stays as it is.
+fn settle(s: &Surface, p: Point3, mut uv: Vec2, held: Option<bool>) -> Option<Vec2> {
+    for _ in 0..64 {
+        let (at, su, sv) = s.d1(uv.x, uv.y);
+        let r = p - at;
+        if r.norm() <= 0.1 * SPLINE_FIT {
+            return Some(uv);
+        }
+        let (a, b, d) = (su.dot(su), su.dot(sv), sv.dot(sv));
+        let damp = 1e-10 * (a + d);
+        let (x, y) = match held {
+            Some(true) => (0.0, sv.dot(r) / (d + damp)),
+            Some(false) => (su.dot(r) / (a + damp), 0.0),
+            None => solve2(a + damp, b, b, d + damp, su.dot(r), sv.dot(r))?,
+        };
+        if !(x.is_finite() && y.is_finite()) {
+            return None;
+        }
+        uv = Vec2::new(uv.x + x, uv.y + y);
+    }
+    let at = s.eval(uv.x, uv.y);
+    (at.dist(p) <= SPLINE_FIT).then_some(uv)
 }
 
 /// `curve(t)` projected onto `s` near `hint`. At a pole, where every `u` is the same point, `u` is
@@ -203,9 +410,51 @@ mod tests {
     use super::*;
     use crate::{
         edit::{Affine, affine},
+        geom::NurbsSurface,
         math::{Frame, Transform},
         primitive::sphere,
     };
+
+    // The sheet S(s, t) = (s, t·(s² + δ), s²) on [-1, 1]² moves δ along t at s = 0: there its map
+    // nearly drops rank. The curve S(x, x) crosses that line; the spline through its plane points
+    // (x, x) at the curve's own parameter x is that line of the plane, and S over it is the curve.
+    #[test]
+    fn a_spline_pcurve_across_a_nearly_singular_line_keeps_its_parameters() {
+        let delta = 1e-6;
+        let g = [1.0 + delta, delta - 1.0, 1.0 + delta];
+        let ctrl: Vec<Point3> = (0..6)
+            .map(|i| {
+                let (k, t) = (i / 2, if i % 2 == 0 { -1.0 } else { 1.0 });
+                let s = [-1.0, 0.0, 1.0][k];
+                Vec3::new(s, t * g[k], [1.0, -1.0, 1.0][k])
+            })
+            .collect();
+        let knots = (
+            vec![-1.0, -1.0, -1.0, 1.0, 1.0, 1.0],
+            vec![-1.0, -1.0, 1.0, 1.0],
+        );
+        let sheet = Surface::Nurbs(Box::new(
+            NurbsSurface::new((2, 1), knots, (3, 2), ctrl, None).unwrap(),
+        ));
+        let on = |x: f64| Vec3::new(x, x * (x * x + delta), x * x);
+        let xs = [-1.0, -1.0 / 3.0, 1.0 / 3.0, 1.0];
+        let pts: Vec<Vec3> = xs.iter().map(|&x| on(x)).collect();
+        let curve = Curve::BSpline(BSpline::interpolate_at(&pts, &xs).unwrap());
+        let plane: Vec<Vec2> = (0..=8)
+            .map(|i| {
+                let x = -1.0 + 0.25 * i as f64;
+                Vec2::new(x, x)
+            })
+            .collect();
+        let spline = fit_spline(&sheet, &curve, (-1.0, 1.0), &plane).unwrap();
+        for i in 0..=200 {
+            let t = -1.0 + 0.01 * i as f64;
+            let uv = spline_uv(&spline, t);
+            assert!(uv.dist(Vec2::new(t, t)) <= 1e-9, "{t}: {uv:?}");
+            let off = sheet.eval(uv.x, uv.y).dist(curve.eval(t));
+            assert!(off <= SPLINE_FIT, "{t}: {off:e}");
+        }
+    }
 
     // A direction turning once round on [-π, π] and one a hair past its end, as rounding leaves a
     // pole's line along a spline's seam: the end is the answer, not the flat peak's 1e-8 guess.

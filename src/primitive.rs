@@ -1,5 +1,6 @@
-//! The five primitive solids, each placed by a frame: a block and a cylinder extruded along the
-//! frame's z, a sphere, a torus and a cone revolved about it.
+//! The primitive solids, each placed by a frame: a block and a cylinder extruded along the
+//! frame's z, a sphere, a torus and a cone revolved about it, and an ellipsoid stretched from a
+//! ball.
 
 mod slab;
 
@@ -8,10 +9,12 @@ pub use slab::slab;
 use std::f64::consts::{PI, TAU};
 
 use crate::Result;
+use crate::edit::{Affine, affine};
 use crate::error::invalid;
 use crate::math::{Frame, Vec2, Vec3};
 use crate::profile::{NamedSegment, Profile, ProfileLoop, Segment};
 use crate::sweep::{extrude, revolve};
+use crate::tol;
 use crate::topo::Brep;
 
 fn named(segment: Segment, name: &str) -> NamedSegment {
@@ -80,20 +83,76 @@ pub fn sphere(frame: &Frame, radius: f64, feature: &str) -> Result<Brep> {
     turned(&half, frame, feature)
 }
 
-/// The ring about the frame's z axis, its tube's centre circle `major` from the axis and the tube
-/// of radius `minor`, which must be less; its one face is `tube`.
-pub fn torus(frame: &Frame, major: f64, minor: f64, feature: &str) -> Result<Brep> {
-    if minor <= 0.0 || major <= minor {
-        return invalid("a torus's tube must be positive and clear of its axis");
+/// The solid ellipsoid about the frame's origin, its semi-axes `radii.x`, `radii.y` and `radii.z`
+/// along the frame's x, y and z: the unit ball stretched along those axes, its one face `skin`.
+/// Equal radii give the sphere; otherwise the face is the exact rational image of the sphere's
+/// rational form under the stretch (`edit::affine`), poles on the frame's z axis.
+pub fn ellipsoid(frame: &Frame, radii: Vec3, feature: &str) -> Result<Brep> {
+    let r = [radii.x, radii.y, radii.z];
+    if r.iter().any(|&x| !(x > 0.0 && x.is_finite())) {
+        return invalid("an ellipsoid's radii must be positive");
     }
-    let tube = one(vec![named(
-        Segment::Circle {
-            center: Vec2::new(major, 0.0),
+    if (r[0] - r[2]).abs() <= tol::LINEAR && (r[1] - r[2]).abs() <= tol::LINEAR {
+        return sphere(frame, r[2], feature);
+    }
+    let ball = sphere(frame, 1.0, feature)?;
+    let axes = [frame.x, frame.y, frame.z];
+    let mut m = [[0.0; 3]; 3];
+    for (i, row) in m.iter_mut().enumerate() {
+        for (j, cell) in row.iter_mut().enumerate() {
+            *cell = (0..3)
+                .map(|k| r[k] * axes[k].to_array()[i] * axes[k].to_array()[j])
+                .sum();
+        }
+    }
+    let stretch = Affine { m, t: Vec3::ZERO };
+    let o = frame.origin;
+    let stretch = Affine {
+        t: o - stretch.vector(o),
+        ..stretch
+    };
+    affine(&ball, &stretch)
+}
+
+/// The solid torus about the frame's z axis, its tube's centre circle `major` from the axis and the
+/// tube of radius `minor`: every point within `minor` of that circle. Its one face is `tube`. A
+/// tube as wide as its circle (a horn torus) touches the axis at the frame's origin, where the face
+/// pinches to a point; a wider one (a spindle torus) crosses the axis, and the solid is bounded by
+/// the tube's outer arc alone, turned, which meets the axis in a dimple above and below.
+pub fn torus(frame: &Frame, major: f64, minor: f64, feature: &str) -> Result<Brep> {
+    if minor <= 0.0 || major <= 0.0 {
+        return invalid("a torus's centre circle and tube must be positive");
+    }
+    let centre = Vec2::new(major, 0.0);
+    let tube = if minor < major + tol::LINEAR {
+        let minor = if minor > major - tol::LINEAR {
+            major
+        } else {
+            minor
+        };
+        one(vec![named(
+            Segment::Circle {
+                center: centre,
+                radius: minor,
+                ccw: true,
+            },
+            "tube",
+        )])
+    } else {
+        // The outer arc meets the axis at ±(π − acos(major / minor)) about the tube's centre.
+        let reach = PI - (major / minor).acos();
+        let top = Vec2::new(0.0, (minor * minor - major * major).sqrt());
+        let arc = Segment::Arc {
+            center: centre,
             radius: minor,
-            ccw: true,
-        },
-        "tube",
-    )]);
+            start: -reach,
+            sweep: 2.0 * reach,
+        };
+        one(vec![
+            named(arc, "tube"),
+            named(Segment::Line { a: top, b: -top }, "axis"),
+        ])
+    };
     turned(&tube, frame, feature)
 }
 

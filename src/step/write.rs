@@ -635,9 +635,9 @@ fn step_scale(s: &Surface) -> Option<Vec2> {
 /// The most samples a fitted pcurve takes before the writer leaves the coedge without one.
 const MAX_PCURVE_SAMPLES: usize = 4096;
 
-/// Coedge `c`'s pcurve in its face's STEP surface parameters. An affine pcurve is a line, and on a
-/// plane a line or a spline is mapped exactly onto it; any other is a cubic through the coedge's
-/// own parameter-plane points, at enough of them that the surface over it stays within half the
+/// Coedge `c`'s pcurve in its face's STEP surface parameters. An affine pcurve is a line and a
+/// spline one its spline, and on a plane a line or a spline is mapped exactly onto it; any other is
+/// a cubic through the coedge's own parameter-plane points, at enough of them that the surface over it stays within half the
 /// tolerance of the edge's curve. `None` where no such pcurve is found, or the surface's STEP form
 /// has other parameters than the kernel's that no scale maps.
 pub(super) fn pcurve(b: &Brep, c: CoedgeId) -> Option<Curve2> {
@@ -651,6 +651,18 @@ pub(super) fn pcurve(b: &Brep, c: CoedgeId) -> Option<Curve2> {
         return Some(Curve2::Line {
             origin: scaled(*origin),
             dir: scaled(*dir),
+        });
+    }
+    if let PCurve::Spline { uv } = &co.pcurve {
+        return Some(Curve2::Spline {
+            degree: uv.degree(),
+            knots: uv.knots().to_vec(),
+            ctrl: uv
+                .control_points()
+                .iter()
+                .map(|p| scaled(Vec2::new(p.x, p.y)))
+                .collect(),
+            weights: None,
         });
     }
     if let Surface::Plane(pl) = s {

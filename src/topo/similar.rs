@@ -3,7 +3,7 @@
 //! reflection or a scale changes a surface's or curve's parameters, the parameter curves on it
 //! change with them.
 
-use super::{Brep, PCurve};
+use super::{Brep, PCurve, pcurve};
 use crate::{
     Error, Result,
     geom::{Circle, Cone, Curve, Cylinder, Ellipse, Line, Plane, Sphere, Surface, Torus},
@@ -362,6 +362,7 @@ impl Brep {
                 PCurve::Projected { .. } => PCurve::Projected {
                     seed: at(ends[i], on),
                 },
+                spline @ PCurve::Spline { .. } => spline.mapped(&|uv| at(uv, on)),
             };
             c.reversed = !c.reversed;
         }
@@ -402,6 +403,9 @@ impl Brep {
                     dir: by(*dir) / grows[c.edge.index()],
                 },
                 PCurve::Projected { seed } => PCurve::Projected { seed: by(*seed) },
+                PCurve::Spline { uv } => PCurve::Spline {
+                    uv: pcurve::stretch_spline(&pcurve::map_spline(uv, &by), grows[c.edge.index()]),
+                },
             };
         }
         for t in self.tolerances.vertices.values_mut() {

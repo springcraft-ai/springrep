@@ -1,12 +1,18 @@
 //! Sweeps of planar profiles into solids: straight, turned about an axis, along a path of legs
 //! and bends, along a helix, and along a space curve. Every side face takes the names of the
-//! profile segment that sweeps it; caps are `start` (on the sketch plane) and `end`.
+//! profile segment that sweeps it; caps are `start` (on the sketch plane) and `end`. A whole solid
+//! moved rigidly sweeps the solid [`solid`] builds.
 
 mod curve;
 mod helix;
+mod miter;
+mod solid;
+mod until;
 
 pub use curve::along_curve;
 pub use helix::{Helix, helix};
+pub use solid::{Motion, solid};
+pub use until::{Meet, extrude_to_next, revolve_to_next};
 
 use std::f64::consts::TAU;
 
@@ -35,6 +41,12 @@ pub enum Leg {
     /// either side run to the corner, and the part of the profile outside the turn is turned
     /// about the corner to fill it. The profile must be bounded by lines and arcs.
     Turn { angle: f64, axis: Vec3 },
+    /// A sharp corner through `angle` on the spot, right-handed about `axis`, mitered: the
+    /// straight legs either side run on past the corner and are cut by, and meet in, the plane
+    /// through it that bisects the turn. Both neighbouring legs must be straight, and the turn
+    /// less than half a turn. A path whose last leg is a miter that brings it back to its start,
+    /// heading as it started, is closed: that miter joins the last straight leg to the first.
+    Miter { angle: f64, axis: Vec3 },
 }
 
 /// A turn's axis as a unit vector, which must be square to the heading.
@@ -84,17 +96,15 @@ fn sharp_turn(
 
 /// `profile`, drawn on `frame`'s xy plane, carried along `legs` from the frame's origin, starting
 /// along its z and staying square to the path: an extrusion for each straight leg, a revolution
-/// for each bend and the fill of each sharp turn, joined into one solid.
+/// for each bend and the fill of each sharp turn, joined into one solid. A straight leg beside a
+/// miter is extruded on past the corner and cut back to the miter's plane.
 pub fn along(profile: &Profile, frame: &Frame, legs: &[Leg], feature: &str) -> Result<Brep> {
-    let mut fr = *frame;
+    let path = miter::Path::of(profile, frame, legs)?;
     let mut whole: Option<Brep> = None;
-    for leg in legs {
+    for (i, leg) in legs.iter().enumerate() {
+        let fr = path.frames[i];
         let pieces = match *leg {
-            Leg::Line { length } => {
-                let b = extrude(profile, &fr, length, feature)?;
-                fr = fr.translated(fr.z * length);
-                vec![b]
-            }
+            Leg::Line { length } => vec![path.line(profile, i, length, feature)?],
             Leg::Arc {
                 radius,
                 angle,
@@ -102,16 +112,13 @@ pub fn along(profile: &Profile, frame: &Frame, legs: &[Leg], feature: &str) -> R
             } => {
                 let n = turn_axis(axis, &fr)?;
                 let centre = fr.origin + n.cross(fr.z) * radius;
-                let b = revolve(profile, &fr, centre, n, angle, feature)?;
-                fr = fr.transformed(&Transform::rotation(centre, n, angle));
-                vec![b]
+                vec![revolve(profile, &fr, centre, n, angle, feature)?]
             }
             Leg::Turn { angle, axis } => {
                 let n = turn_axis(axis, &fr)?;
-                let filled = sharp_turn(profile, &fr, n, angle, feature)?;
-                fr = fr.transformed(&Transform::rotation(fr.origin, n, angle));
-                filled
+                sharp_turn(profile, &fr, n, angle, feature)?
             }
+            Leg::Miter { .. } => Vec::new(),
         };
         for piece in pieces {
             whole = Some(match whole {
@@ -408,33 +415,48 @@ fn classify(axis: &Axis, s: &PlacedSegment) -> Sweep {
             let mid = phi0 + sign * 0.5 * (s.range.0 + s.range.1);
             let phi0 = phi0 - (mid / TAU).round() * TAU;
             let frame = axis.at_height(h);
-            let surface = if rho <= tol::LINEAR {
-                Surface::Sphere(Sphere {
+            if rho <= tol::LINEAR {
+                let surface = Surface::Sphere(Sphere {
                     frame,
                     radius: c.radius,
-                })
-            } else {
-                Surface::Torus(Torus {
-                    frame,
-                    major: rho,
-                    minor: c.radius,
-                })
-            };
+                });
+                return Sweep::Curved {
+                    surface,
+                    v0: phi0,
+                    dv: sign,
+                };
+            }
+            if (c.frame.origin - axis.origin).dot(e_rho) < 0.0 {
+                // The circle's centre lies across the axis from the arc: the arc turns into the
+                // inner sheet of a spindle torus, where a torus's closed-form projection, which
+                // takes the half-plane of the point, finds the outer sheet. Its exact surface of
+                // revolution projects onto the arc itself.
+                return revolution(axis, &s.curve);
+            }
+            let surface = Surface::Torus(Torus {
+                frame,
+                major: rho,
+                minor: c.radius,
+            });
             Sweep::Curved {
                 surface,
                 v0: phi0,
                 dv: sign,
             }
         }
-        other => Sweep::Curved {
-            surface: Surface::Revolution(Box::new(Revolution {
-                curve: other.clone(),
-                origin: axis.origin,
-                axis: a,
-            })),
-            v0: 0.0,
-            dv: 1.0,
-        },
+        other => revolution(axis, other),
+    }
+}
+
+fn revolution(axis: &Axis, curve: &Curve) -> Sweep {
+    Sweep::Curved {
+        surface: Surface::Revolution(Box::new(Revolution {
+            curve: curve.clone(),
+            origin: axis.origin,
+            axis: axis.frame.z,
+        })),
+        v0: 0.0,
+        dv: 1.0,
     }
 }
 

@@ -202,6 +202,27 @@ pub(crate) fn band(a: &Surface, b: &Surface, q: Point3, dir: Vec3) -> f64 {
     (2.0 * tol::LINEAR / (2.0 * gap / (h * h))).sqrt()
 }
 
+/// How far from `p`, a point of both surfaces where they are tangent and cross, a point within the
+/// tolerance of both can lie in every direction: `√(2·tol/|λ|)` for the gap form's eigenvalue `λ`
+/// of largest size. Two branches of their intersection cross there, and a trace of either passes
+/// the point only to within that reach. `None` where they are not tangent at `p`, or the gap form
+/// is definite (they touch at `p` alone), nearly singular (they touch along a curve), or bends
+/// apart by less than [`CROSSING_BEND`] (they lie along each other over a patch).
+pub(crate) fn crossing_reach(a: &Surface, b: &Surface, p: Point3) -> Option<f64> {
+    let ((l1, l2), _, _) = gap_form(a, b, p)?;
+    let (least, most) = (l1.abs().min(l2.abs()), l1.abs().max(l2.abs()));
+    // A form whose one eigenvalue is this small a share of the other is read off differences of
+    // normals that only nearly agree along a curve of contact, not off two branches crossing.
+    (l1 * l2 < 0.0 && least > 1e-3 * most && most >= CROSSING_BEND)
+        .then(|| (2.0 * tol::LINEAR / most).sqrt())
+}
+
+/// The least bend of the gap, per mm, at which two tangent surfaces are taken to cross at a point:
+/// flatter, they stay within the tolerance of each other for over a hundredth of a millimetre all
+/// round, as two nearly flat faces of a milled floor do, and any vertex there would be taken as on
+/// every curve through that patch.
+const CROSSING_BEND: f64 = 1e-3;
+
 /// A guard against rounding in the normals' differences, not a tolerance: an eigenvalue nearer
 /// zero than this share of the other may be zero.
 const ROUNDING: f64 = 1e-6;
@@ -320,5 +341,27 @@ mod tests {
             frame: Frame::from_axis(Point3::ZERO, Vec3::X).unwrap(),
         });
         assert!(touch_at(&ball, &wall, Point3::ZERO).is_none());
+    }
+
+    // The plane x = R − r is tangent to the torus about z at its inner equator, a saddle that
+    // bends 1/r toward the plane along its tube and 1/(R − r) away along the equator: the gap form
+    // is ±1/r there for R = 2r, and the two cross along z = ±y within √(2·tol·r). A torus a hundred
+    // metres across bends apart from its plane by under a thousandth per millimetre: no crossing.
+    #[test]
+    fn a_plane_tangent_to_a_torus_inside_crosses_it_unless_the_torus_is_flat() {
+        let reach = |r: f64| {
+            let torus = Surface::Torus(crate::geom::Torus {
+                frame: Frame::WORLD,
+                major: 2.0 * r,
+                minor: r,
+            });
+            let frame = Frame::from_axis(Point3::new(r, 0.0, 0.0), Vec3::X).unwrap();
+            let plane = Surface::Plane(Plane { frame });
+            crossing_reach(&torus, &plane, Point3::new(r, 0.0, 0.0))
+        };
+        let near = reach(1.0).expect("a crossing");
+        let want = (2.0 * tol::LINEAR).sqrt();
+        assert!((near - want).abs() <= 1e-6 * want, "{near} {want}");
+        assert!(reach(5e4).is_none());
     }
 }

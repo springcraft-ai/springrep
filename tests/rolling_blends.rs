@@ -359,3 +359,62 @@ fn a_rolling_ball_round_an_open_curved_edge_ends_on_a_cylinder() {
     }
     assert!(on_back >= 2, "{on_back} trim edges on the back");
 }
+
+#[test]
+fn a_rolling_ball_round_a_closed_junction_across_a_seam_matches_one_clear_of_it() {
+    use springrep::primitive::cylinder;
+    // A tee: the bar of radius 6 along x joined by the stem of radius 3 up z, the saddle junction
+    // rounded 1. With the bar's seam along its top the junction crosses it twice and the bar's
+    // loop meets the chain in two runs; with the seam along its side the junction stays clear of
+    // it. The round is the same solid both ways.
+    let rounded = |bar_frame: Frame| {
+        let bar = cylinder(&bar_frame, 6.0, 40.0, "bar").unwrap();
+        let stem = cylinder(&Frame::WORLD, 3.0, 15.0, "stem").unwrap();
+        let tee = union(&bar, &stem).unwrap();
+        let b = fillet(&tee, &[("bar.side", "stem.side")], 1.0, "r").unwrap();
+        assert!(check::check(&b).is_empty());
+        (measure::volume(&b), measure::area(&b))
+    };
+    let start = Vec3::new(-20.0, 0.0, 0.0);
+    let across = rounded(Frame::new(start, Vec3::X, Vec3::Z).unwrap());
+    let clear = rounded(Frame::new(start, Vec3::X, Vec3::Y).unwrap());
+    assert!(
+        (across.0 - clear.0).abs() < 1e-9 * clear.0,
+        "{across:?} {clear:?}"
+    );
+    assert!(
+        (across.1 - clear.1).abs() < 1e-9 * clear.1,
+        "{across:?} {clear:?}"
+    );
+}
+
+#[test]
+fn a_rolling_ball_past_the_edge_of_a_spline_face_rolls_on_its_continuation() {
+    use springrep::primitive::slab;
+    // A slab on the square 20 × 20 whose spline top is the plane z = 5 + x/10 + y/20, its edge on
+    // the front y = 0 rounded 1. The round is the cylinder along d = (1, 0, 1/10)/√1.01 whose
+    // section turns through the angle φ between the faces' normals, of area tan(φ/2) − φ/2 past
+    // the arc; the sides x = 0 and x = 20 trim it on a slant, each losing that section stretched
+    // by √1.01. Past each side the ball rolls on the top's continuation beyond its parameters.
+    let heights: Vec<Vec<f64>> = (0..4)
+        .map(|i| (0..4).map(|j| 5.0 + (2 * i + j) as f64 / 3.0).collect())
+        .collect();
+    let knots = [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+    let body = slab(&Frame::WORLD, [20.0, 20.0], (&knots, &knots), &heights, "s").unwrap();
+    let b = fillet(&body, &[("s.top", "s.front")], 1.0, "r").unwrap();
+    assert!(check::check(&b).is_empty());
+    let phi = (0.05 / 1.0125f64.sqrt()).acos();
+    let section = (phi / 2.0).tan() - phi / 2.0;
+    let length = 20.0 * 1.01f64.sqrt();
+    let volume = 2600.0 - section * length;
+    let area = 400.0 * 1.0125f64.sqrt() + 120.0 + 140.0 + 110.0 + 150.0 + 400.0
+        - 2.0 * (phi / 2.0).tan() * length
+        + phi * length
+        - 2.0 * section * 1.01f64.sqrt();
+    let (v, a) = (measure::volume(&b), measure::area(&b));
+    assert!(
+        (v - volume).abs() < 1e-9 * volume,
+        "volume {v} against {volume}"
+    );
+    assert!((a - area).abs() < 1e-9 * area, "area {a} against {area}");
+}

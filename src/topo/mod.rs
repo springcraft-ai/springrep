@@ -592,7 +592,7 @@ impl Brep {
         let co = self.coedge(c);
         let surface = &self.face(self.coedge_face(c)).surface;
         let periodic = surface.u_period().is_some() || surface.v_period().is_some();
-        if !periodic || ts.len() < 2 || matches!(co.pcurve, PCurve::Affine { .. }) {
+        if !periodic || ts.len() < 2 || !matches!(co.pcurve, PCurve::Projected { .. }) {
             return self.coedge_uvs_at(c, ts);
         }
         // An edge winding round its surface several times (a thread's helix) can turn more than
@@ -672,6 +672,7 @@ impl Brep {
         let edge = self.edge(co.edge);
         match &co.pcurve {
             PCurve::Affine { origin, dir } => ts.iter().map(|&t| *origin + *dir * t).collect(),
+            PCurve::Spline { uv } => ts.iter().map(|&t| pcurve::spline_uv(uv, t)).collect(),
             PCurve::Projected { seed } => {
                 let surface = &self.face(self.coedge_face(c)).surface;
                 let mut hint = *seed;
@@ -683,7 +684,11 @@ impl Brep {
                         (Some(curve), Some(&b)) if inside && i > 0 => {
                             pcurve::follow(surface, curve, (b, t), hint)
                         }
-                        (Some(curve), Some(&b)) => pcurve::project_on(surface, curve, t, b, hint),
+                        (Some(curve), Some(&b)) => {
+                            let uv = pcurve::project_on(surface, curve, t, b, hint);
+                            let p = curve.eval(t);
+                            self.exact_beside(c, i == 0, p, uv).unwrap_or(uv)
+                        }
                         (Some(curve), None) => surface.project_near(curve.eval(t), hint),
                         (None, _) => surface.project_near(self.vertex(edge.start).point, hint),
                     };
@@ -693,6 +698,48 @@ impl Brep {
                 out
             }
         }
+    }
+
+    /// The parameters at the start (or end) of coedge `c` that the coedge beside it there gives the
+    /// shared vertex, where that coedge's pcurve is exact and reaches `p`, the periodic parameters
+    /// moved nearest `near`. Where the surface's map is nearly singular, as along a fold of a swept
+    /// sheet, a projected end lands anywhere along the direction the map barely moves in, and the
+    /// two ends must still meet in the parameter plane.
+    fn exact_beside(&self, c: CoedgeId, at_start: bool, p: Point3, near: Vec2) -> Option<Vec2> {
+        let co = self.coedge(c);
+        let cs = &self.lp(co.lp).coedges;
+        let k = cs.iter().position(|&x| x == c)?;
+        let n = cs.len();
+        let other = if at_start {
+            cs[(k + n - 1) % n]
+        } else {
+            cs[(k + 1) % n]
+        };
+        if other == c {
+            return None;
+        }
+        let oc = self.coedge(other);
+        let range = self.edge(oc.edge).range;
+        let t = if at_start != oc.reversed {
+            range.1
+        } else {
+            range.0
+        };
+        let uv = match &oc.pcurve {
+            PCurve::Affine { origin, dir } => *origin + *dir * t,
+            PCurve::Spline { uv } => pcurve::spline_uv(uv, t),
+            PCurve::Projected { .. } => return None,
+        };
+        let surface = &self.face(self.coedge_face(c)).surface;
+        let shift = |x: f64, h: f64, period: Option<f64>| match period {
+            Some(t) => x + ((h - x) / t).round() * t,
+            None => x,
+        };
+        let uv = Vec2::new(
+            shift(uv.x, near.x, surface.u_period()),
+            shift(uv.y, near.y, surface.v_period()),
+        );
+        (surface.eval(uv.x, uv.y).dist(p) <= tol::LINEAR).then_some(uv)
     }
 
     /// How many faces carry each name, over the whole arena.

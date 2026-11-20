@@ -32,6 +32,17 @@ pub fn faces_named(body: &Brep, name: &str) -> BTreeSet<FaceId> {
 /// turn. A face's material lies left of its coedge seen from outside, along `n × t`; the edge is
 /// convex where the other face's outward normal leans away from that side.
 pub fn convex_edges(b: &Brep) -> Result<Vec<EdgeId>> {
+    turned_edges(b, true)
+}
+
+/// The edges of `b` where its faces meet concavely, the solid's inside a wedge wider than a half
+/// turn.
+pub(crate) fn concave_edges(b: &Brep) -> Result<Vec<EdgeId>> {
+    turned_edges(b, false)
+}
+
+/// The edges of `b` whose faces meet at an angle: the convex ones, or the concave ones.
+fn turned_edges(b: &Brep, convex: bool) -> Result<Vec<EdgeId>> {
     let outward = |f: FaceId, p: Point3| {
         let s = &b.face(f).surface;
         let uv = s.project(p);
@@ -54,7 +65,7 @@ pub fn convex_edges(b: &Brep) -> Result<Vec<EdgeId>> {
             continue;
         }
         let t = if b.coedge(cf).reversed { -dp } else { dp };
-        if m.dot(n.cross(t)) < 0.0 {
+        if (m.dot(n.cross(t)) < 0.0) == convex {
             out.push(e);
         }
     }

@@ -22,7 +22,10 @@ use crate::{
     geom::{IsoLine, NurbsSurface, Patch, Surface},
     math::{Aabb, Point3, Vec2, Vec3},
     numeric::{KRONROD_7, KRONROD_15, gauss, solve2},
-    topo::{Brep, CoedgeId, FaceId, FaceVolume, IntegralKey, LoopId, PCurve, SolidId, VertexId},
+    topo::{
+        Brep, CoedgeId, FaceId, FaceVolume, IntegralKey, LoopId, PCurve, SolidId, VertexId,
+        pcurve::{spline_rate, spline_uv},
+    },
 };
 
 /// Whether a face's inner integral runs along v, and the lowest value its loops reach along that
@@ -327,7 +330,7 @@ fn pcurve_tables(b: &Brep, f: FaceId) -> &[Vec<Vec<Vec2>>] {
 /// One coedge's entry of [`pcurve_tables`].
 fn pcurve_table(b: &Brep, co: CoedgeId) -> Vec<Vec2> {
     let coedge = b.coedge(co);
-    if !matches!(coedge.pcurve, PCurve::Projected { .. }) || b.edge(coedge.edge).curve.is_none() {
+    if matches!(coedge.pcurve, PCurve::Affine { .. }) || b.edge(coedge.edge).curve.is_none() {
         return Vec::new();
     }
     b.coedge_uvs(co, &coedge_params(b, co, TABLE))
@@ -376,6 +379,7 @@ fn coedge_integral<const K: usize>(
     let uv_and_rate = |t: f64| -> (Vec2, Vec2) {
         match &coedge.pcurve {
             PCurve::Affine { origin, dir } => (*origin + *dir * t, *dir),
+            PCurve::Spline { uv } => (spline_uv(uv, t), spline_rate(uv, t)),
             PCurve::Projected { .. } => {
                 let curve = edge.curve.as_ref().expect("projected pcurves have curves");
                 let (p, dp) = curve.d1(t);
@@ -397,6 +401,10 @@ fn coedge_integral<const K: usize>(
     // piece between two of them, where the halving below takes far more points to find each one.
     if let Some(c) = &edge.curve {
         cuts.extend(c.breakpoints(t0, t1));
+    }
+    if let PCurve::Spline { uv } = &coedge.pcurve {
+        cuts.extend(uv.breakpoints(t0, t1));
+        cuts.sort_by(f64::total_cmp);
     }
     // Where a straight pcurve crosses the surface's knot lines the inner integral has a kink too:
     // along a pole, which has no curve of its own, the adaptive rule would have to find them.
@@ -424,26 +432,48 @@ fn coedge_integral<const K: usize>(
         cuts.sort_by(f64::total_cmp);
     }
     cuts.push(t1);
-    let order = if rel > EXACT { 8 } else { 16 };
-    let mut sum = [0.0; K];
-    for w in cuts.windows(2) {
-        // Most pieces are short and smooth, and a pair of nested low rules settles them with a
-        // third of the points the halving below takes to accept one. To a rough tolerance the
-        // shorter pair settles most of them with half as many again.
-        let short = (rel > EXACT)
-            .then(|| kronrod_k(&f, w[0], w[1], tol, &KRONROD_7))
-            .flatten();
-        let r = match short.or_else(|| kronrod_k(&f, w[0], w[1], tol, &KRONROD_15)) {
-            Some(r) => r,
-            None => {
-                let (whole, _) = gauss_k(&f, w[0], w[1], order);
-                adapt_k(&f, (w[0], w[1]), whole, tol, order, 0)
+    let sum = match iso_line(table) {
+        Some((v_fixed, at)) => {
+            // Along a parameter line of the surface the integral runs along that parameter
+            // between the edge's two ends, and no point of the edge is projected. Beside a cusp of
+            // the line the edge's points have two feet within its tolerance, on either side of
+            // the cusp, and a projection's pick between them is noise no rule can settle.
+            let (start, end) = if coedge.reversed {
+                (table[TABLE], table[0])
+            } else {
+                (table[0], table[TABLE])
+            };
+            let (s0, s1) = if v_fixed {
+                (start.x, end.x)
+            } else {
+                (start.y, end.y)
+            };
+            let g = |s: f64| -> [f64; K] {
+                match (inner_v, v_fixed) {
+                    (true, true) => inner(s, at).map(|g| -g),
+                    (false, false) => inner(s, at),
+                    _ => [0.0; K],
+                }
+            };
+            let mut cuts = vec![s0];
+            if inner_v == v_fixed {
+                let (lo, hi) = (s0.min(s1), s0.max(s1));
+                let mut knots = if v_fixed {
+                    surface.u_breakpoints(lo, hi)
+                } else {
+                    surface.v_breakpoints(lo, hi)
+                };
+                knots.retain(|&k| k > lo && k < hi);
+                if s1 < s0 {
+                    knots.reverse();
+                }
+                cuts.extend(knots);
             }
-        };
-        for i in 0..K {
-            sum[i] += r[i];
+            cuts.push(s1);
+            integrate_pieces(&g, &cuts, tol, rel)
         }
-    }
+        None => integrate_pieces(&f, &cuts, tol, rel),
+    };
     if coedge.reversed {
         sum.map(|x| -x)
     } else {
@@ -451,9 +481,63 @@ fn coedge_integral<const K: usize>(
     }
 }
 
+/// Whether a projected coedge's table runs along one parameter line of its surface: `v` the same
+/// at every entry (`true`) or `u`, and that value.
+fn iso_line(table: &[Vec2]) -> Option<(bool, f64)> {
+    let first = *table.first()?;
+    let same = |x: f64, y: f64| (x - y).abs() <= 1e-12 * (1.0 + y.abs());
+    if table.iter().all(|p| same(p.y, first.y)) {
+        Some((true, first.y))
+    } else if table.iter().all(|p| same(p.x, first.x)) {
+        Some((false, first.x))
+    } else {
+        None
+    }
+}
+
+/// `∫ f` over the pieces between successive `cuts`, each value to its own tolerance in `tol`.
+fn integrate_pieces<const K: usize>(
+    f: &dyn Fn(f64) -> [f64; K],
+    cuts: &[f64],
+    tol: [f64; K],
+    rel: f64,
+) -> [f64; K] {
+    let order = if rel > EXACT { 8 } else { 16 };
+    let mut sum = [0.0; K];
+    for w in cuts.windows(2) {
+        // Most pieces are short and smooth, and a pair of nested low rules settles them with a
+        // third of the points the halving below takes to accept one. To a rough tolerance the
+        // shorter pair settles most of them with half as many again.
+        let short = (rel > EXACT)
+            .then(|| kronrod_k(f, w[0], w[1], tol, &KRONROD_7))
+            .flatten();
+        let r = match short.or_else(|| kronrod_k(f, w[0], w[1], tol, &KRONROD_15)) {
+            Some(r) => r,
+            None => {
+                let (whole, _) = gauss_k(f, w[0], w[1], order);
+                adapt_k(f, (w[0], w[1]), whole, tol, order, 0, f64::INFINITY)
+            }
+        };
+        for i in 0..K {
+            sum[i] += r[i];
+        }
+    }
+    sum
+}
+
 /// How many rounding errors of a rule's own sum two rules may differ by and still agree: halving
 /// cannot settle a difference that small, since each half's sum is rounded as coarsely.
 const ROUNDING: f64 = 64.0 * f64::EPSILON;
+
+/// The share of its last miss a halving must cut an adaptive rule's miss to, below which the miss
+/// is the rule's error and above which it is noise in the integrand.
+const STALL: f64 = 0.75;
+
+/// The largest share of the size of an integrand's values that its noise is taken to reach. A face
+/// integral's boundary integrand is itself an inner integral, by a fixed rule on each knot span
+/// the inner parameter crosses, so it jumps by that rule's error, near 1e-8 of it on a fitted
+/// sheet's `|su × sv|`, each time the boundary crosses a knot.
+const NOISE: f64 = 1e-6;
 
 /// `∫ f` over `[a, b]` by a Kronrod rule where the Gauss rule inside it agrees to `tol`: the Gauss
 /// rule is then that accurate itself, and the Kronrod rule more so.
@@ -504,6 +588,14 @@ fn gauss_k<const K: usize>(
     (s.map(|x| x * h), size.map(|x| x * h.abs()))
 }
 
+/// `∫ f` over `[a, b]`, halved until the rule over the halves agrees with `whole`, the rule over
+/// the whole, to `tol`. `last` is how many times its tolerance the halves of the piece this one was
+/// cut from missed by. The tolerance halves with the piece, so where the rules differ by noise in
+/// `f` (small jumps where an inner rule changes) and not by the rule's error, which shrinks by
+/// orders with each halving, they miss by about as many times at every depth: once a halving no
+/// longer cuts the miss to below `STALL` of the last, and the miss is within `NOISE` of the size
+/// of `f` there, the halves are as near as `f` allows and are taken (the round-off test of
+/// Piessens et al. 1983). Across a kink the miss halves each time.
 fn adapt_k<const K: usize>(
     f: &dyn Fn(f64) -> [f64; K],
     (a, b): (f64, f64),
@@ -511,6 +603,7 @@ fn adapt_k<const K: usize>(
     tol: [f64; K],
     order: usize,
     depth: u32,
+    last: f64,
 ) -> [f64; K] {
     let m = 0.5 * (a + b);
     let ((l, ls), (r, rs)) = (gauss_k(f, a, m, order), gauss_k(f, m, b, order));
@@ -518,16 +611,20 @@ fn adapt_k<const K: usize>(
     for i in 0..K {
         both[i] = l[i] + r[i];
     }
-    let ok = (0..K).all(|i| {
-        let floor = (1e-14 * both[i].abs()).max(ROUNDING * (ls[i] + rs[i]));
-        (both[i] - whole[i]).abs() <= tol[i].max(floor)
-    });
-    if ok || depth >= 20 {
+    let miss = (0..K)
+        .map(|i| {
+            let floor = (1e-14 * both[i].abs()).max(ROUNDING * (ls[i] + rs[i]));
+            (both[i] - whole[i]).abs() / tol[i].max(floor)
+        })
+        .fold(0.0, f64::max);
+    // A miss larger than `NOISE` of the size of `f` is the rule's error, however slowly it shrinks.
+    let small = (0..K).all(|i| (both[i] - whole[i]).abs() <= NOISE * (ls[i] + rs[i]));
+    if miss <= 1.0 || depth >= 20 || (small && miss >= STALL * last) {
         return both;
     }
     let half = tol.map(|t| t * 0.5);
-    let x = adapt_k(f, (a, m), l, half, order, depth + 1);
-    let y = adapt_k(f, (m, b), r, half, order, depth + 1);
+    let x = adapt_k(f, (a, m), l, half, order, depth + 1, miss);
+    let y = adapt_k(f, (m, b), r, half, order, depth + 1, miss);
     let mut out = [0.0; K];
     for i in 0..K {
         out[i] = x[i] + y[i];
@@ -1873,6 +1970,110 @@ mod tests {
         profile::{NamedSegment, Profile, ProfileLoop, Segment},
         sweep::extrude,
     };
+
+    // x² + 1e-9·sin(1e7·x) on [0, 1]: no rule settles the ripple until its pieces are shorter
+    // than its wavelength, 23 halvings down, so to a tolerance of 1e-14 its rules differ by about
+    // as much at every depth. The integral is 1/3 + 1e-16·(1 − cos 1e7), and it is found to within
+    // the ripple's own size after a few halvings, not the millions to depth 20.
+    #[test]
+    fn an_integrand_noisier_than_its_tolerance_is_integrated_to_its_noise_in_few_steps() {
+        let calls = std::cell::Cell::new(0usize);
+        let f = |x: f64| {
+            calls.set(calls.get() + 1);
+            [x * x, x * x + 1e-9 * (1e7 * x).sin()]
+        };
+        let got = integrate_pieces(&f, &[0.0, 1.0], [1e-14, 1e-14], EXACT);
+        let want = 1.0 / 3.0 + 1e-16 * (1.0 - 1e7f64.cos());
+        assert!((got[0] - 1.0 / 3.0).abs() <= 1e-15, "{}", got[0]);
+        assert!((got[1] - want).abs() <= 1e-9, "{}", got[1]);
+        assert!(calls.get() <= 10_000, "{} calls", calls.get());
+    }
+
+    #[test]
+    fn a_face_whose_edges_run_through_a_cusp_of_its_parameter_lines_has_its_closed_form_area() {
+        // S(u, v) = (v², v³, u) over [0, 1] × [−1, 1]: each line u = const is a cuspidal cubic,
+        // and the two edges along such lines pass the cusp at v = 0, where an edge point near it
+        // has a foot on either branch within the tolerance. The area is
+        // ∫∫ |v| √(4 + 9v²) dv du = 2 (13√13 − 8) / 27.
+        use crate::geom::{Curve, Line, NurbsCurve, NurbsSurface};
+        use crate::topo::{CoedgeSpec, PCurve};
+        let row = |u: f64| {
+            [
+                (1.0, -1.0),
+                (-1.0 / 3.0, 1.0),
+                (-1.0 / 3.0, -1.0),
+                (1.0, 1.0),
+            ]
+            .map(|(x, y)| Point3::new(x, y, u))
+        };
+        let cubic = vec![-1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0];
+        let net: Vec<Point3> = row(0.0).into_iter().chain(row(1.0)).collect();
+        let surface = NurbsSurface::new(
+            (1, 3),
+            (vec![0.0, 0.0, 1.0, 1.0], cubic.clone()),
+            (2, 4),
+            net,
+            None,
+        )
+        .unwrap();
+        let mut b = Brep::new();
+        let corner = |u: f64, v: f64| Point3::new(v * v, v * v * v, u);
+        let [a, c, d, e] = [(0.0, -1.0), (1.0, -1.0), (1.0, 1.0), (0.0, 1.0)]
+            .map(|(u, v)| b.add_vertex(corner(u, v)));
+        let line = |from: Point3, dir: Vec3| Curve::Line(Line { origin: from, dir });
+        let cusp = |u: f64| {
+            let c = NurbsCurve::new(3, cubic.clone(), row(u).to_vec(), None).unwrap();
+            Curve::Nurbs(Box::new(c))
+        };
+        let e0 = b.add_edge(line(corner(0.0, -1.0), Vec3::Z), (0.0, 1.0), a, c);
+        let e1 = b.add_edge(cusp(1.0), (-1.0, 1.0), c, d);
+        let e2 = b.add_edge(line(corner(1.0, 1.0), -Vec3::Z), (0.0, 1.0), d, e);
+        let e3 = b.add_edge(cusp(0.0), (-1.0, 1.0), a, e);
+        let f = b.add_face(Surface::Nurbs(Box::new(surface)), false, []);
+        let spec = |edge, reversed, pcurve| CoedgeSpec {
+            edge,
+            reversed,
+            pcurve,
+        };
+        b.add_loop(
+            f,
+            vec![
+                spec(
+                    e0,
+                    false,
+                    PCurve::Affine {
+                        origin: Vec2::new(0.0, -1.0),
+                        dir: Vec2::new(1.0, 0.0),
+                    },
+                ),
+                spec(
+                    e1,
+                    false,
+                    PCurve::Projected {
+                        seed: Vec2::new(1.0, -1.0),
+                    },
+                ),
+                spec(
+                    e2,
+                    false,
+                    PCurve::Affine {
+                        origin: Vec2::new(1.0, 1.0),
+                        dir: Vec2::new(-1.0, 0.0),
+                    },
+                ),
+                spec(
+                    e3,
+                    true,
+                    PCurve::Projected {
+                        seed: Vec2::new(0.0, 1.0),
+                    },
+                ),
+            ],
+        );
+        let (area, _) = face_integrals(&b, f, Point3::ZERO, 2.0, EXACT);
+        let want = 2.0 * (13.0 * 13f64.sqrt() - 8.0) / 27.0;
+        assert!((area - want).abs() < 1e-12, "{area} against {want}");
+    }
 
     #[test]
     fn a_face_moved_keeps_its_box_moved() {

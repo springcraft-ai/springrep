@@ -18,8 +18,10 @@
 //! surface, and by the faces past any short edge its contact runs beyond (`run`); on a curved
 //! face met at a glancing angle it runs on only until that surface takes in its whole section. A
 //! concave piece whose strip is wider than its face runs over the face's convex edge and is
-//! trimmed by the face past it. Three fillets
-//! meeting at a corner of three planes close with the sphere touching all three.
+//! trimmed by the face past it. Three or more fillets meeting at a corner of planes close with the
+//! sphere touching them all, the rolling ball's corner (Rossignac and Requicha 1984), or where no
+//! one ball touches four planes, with two such corners and a round between them ([`ridge`]); three
+//! or more chamfers close with the plane through the points where their contact lines cross.
 
 pub(crate) mod shaped;
 
@@ -32,6 +34,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::f64::consts::{PI, TAU};
 
 mod corner;
+mod flat_corner;
+mod ridge;
 mod saddle;
 mod saddle_patch;
 #[cfg(test)]
@@ -136,28 +140,34 @@ pub fn fillet(body: &Brep, pairs: &[(&str, &str)], radius: f64, feature: &str) -
 
 /// [`fillet`] of `edges` themselves, each between two faces. Every face keeps its names.
 pub fn fillet_edges(body: &Brep, edges: &[EdgeId], radius: f64, feature: &str) -> Result<Brep> {
-    let (apart, names) = apart_names(body, edges)?;
+    let (apart, names, skip) = apart_names(body, edges)?;
     let pairs: Vec<EdgeName> = names
         .iter()
         .map(|(a, b)| EdgeName { a, b, exact: true })
         .collect();
-    Ok(own_names(
-        body,
-        fillet_named(&apart, &pairs, radius, feature)?,
-    ))
+    let out = blend_with(
+        &apart,
+        &pairs,
+        &skip,
+        Kind::Fillet { radius },
+        feature,
+        true,
+    )?;
+    Ok(own_names(body, out))
 }
 
 /// [`chamfer`] of `edges` themselves, each between two faces, set back `distance` on both.
 pub fn chamfer_edges(body: &Brep, edges: &[EdgeId], distance: f64, feature: &str) -> Result<Brep> {
-    let (apart, names) = apart_names(body, edges)?;
+    let (apart, names, skip) = apart_names(body, edges)?;
     let pairs: Vec<EdgeName> = names
         .iter()
         .map(|(a, b)| EdgeName { a, b, exact: true })
         .collect();
-    Ok(own_names(
-        body,
-        chamfer_named(&apart, &pairs, distance, feature)?,
-    ))
+    let kind = Kind::Chamfer {
+        setback: [distance; 2],
+    };
+    let out = blend_with(&apart, &pairs, &skip, kind, feature, true)?;
+    Ok(own_names(body, out))
 }
 
 /// A chamfer of `edge` itself set back `along_first` on face `first`, one of the two it lies
@@ -170,7 +180,7 @@ pub fn chamfer_two_edges(
     along_other: f64,
     feature: &str,
 ) -> Result<Brep> {
-    let (apart, names) = apart_names(body, &[edge])?;
+    let (apart, names, skip) = apart_names(body, &[edge])?;
     let (a, b) = &names[0];
     let on = format!("{APART}.f{}", first.index());
     let (a, b) = if on == *a {
@@ -181,8 +191,113 @@ pub fn chamfer_two_edges(
         return invalid("the face a chamfer's first distance lies on must be one of the edge's");
     };
     let pair = EdgeName { a, b, exact: true };
-    let out = chamfer_two_named(&apart, &[pair], along_first, along_other, feature)?;
+    let kind = Kind::Chamfer {
+        setback: [along_first, along_other],
+    };
+    let out = blend_with(&apart, &[pair], &skip, kind, feature, true)?;
     Ok(own_names(body, out))
+}
+
+/// A chamfer of `edge` itself set back `distance` on face `first`, one of the two it lies between,
+/// whose bevel leaves that face at `angle` (radians) to it, turned back toward the edge, in the
+/// section square to the edge, and runs to where it first meets the other face. It is the chamfer
+/// of two distances whose second is the straight distance from the edge to that point.
+pub fn chamfer_distance_angle(
+    body: &Brep,
+    edge: EdgeId,
+    first: FaceId,
+    distance: f64,
+    angle: f64,
+    feature: &str,
+) -> Result<Brep> {
+    if !(angle > tol::ANGULAR && angle < PI - tol::ANGULAR) {
+        return invalid("a chamfer's angle must lie strictly between 0 and a half turn");
+    }
+    let (apart, names, skip) = apart_names(body, &[edge])?;
+    let (a, b) = &names[0];
+    let on = format!("{APART}.f{}", first.index());
+    let (a, b) = if on == *a {
+        (a, b)
+    } else if on == *b {
+        (b, a)
+    } else {
+        return invalid("the face a chamfer's distance lies on must be one of the edge's");
+    };
+    let pair = EdgeName { a, b, exact: true };
+    let picked = pick(&apart, &[pair], &skip, true)?;
+    let pk = picked
+        .iter()
+        .find(|pk| pk.edge == edge)
+        .ok_or_else(|| Error::Numerical("a chamfered edge not picked".into()))?;
+    let s = section(&apart, pk)?;
+    let other = bevel_reach(&s, distance, angle)?;
+    let kind = Kind::Chamfer {
+        setback: [distance, other],
+    };
+    let out = blend_with(&apart, &[pair], &skip, kind, feature, true)?;
+    Ok(own_names(body, out))
+}
+
+/// The straight distance from the edge to where a bevel set back `distance` on face 0 at `angle`
+/// to it first meets face 1, in the section `s`.
+fn bevel_reach(s: &Section, distance: f64, angle: f64) -> Result<f64> {
+    let p = s.p;
+    // Where the bevel leaves face 0, and that face's direction there back toward the edge and its
+    // outward normal.
+    let (t0, back, normal) = match s.trace[0] {
+        Trace::Line => (p + s.m[0] * distance, -s.m[0], s.n[0]),
+        Trace::Circle { centre, radius } => {
+            let t0 = chord_end(centre, radius, p, s.m[0], distance)?;
+            let away = s.n[0].dot(p - centre).signum();
+            let normal = unit2(t0 - centre).unwrap_or(s.n[0]) * away;
+            let tangent = normal.perp();
+            let back = if tangent.dot(p - t0) >= 0.0 {
+                tangent
+            } else {
+                -tangent
+            };
+            (t0, back, normal)
+        }
+    };
+    // Into the material at a convex edge, into the groove the chamfer fills at a concave one.
+    let into = if s.convex { -normal } else { normal };
+    let (sin, cos) = angle.sin_cos();
+    let turned = |sign: f64| {
+        Vec2::new(
+            back.x * cos - sign * back.y * sin,
+            sign * back.x * sin + back.y * cos,
+        )
+    };
+    let dir = if turned(1.0).dot(into) >= turned(-1.0).dot(into) {
+        turned(1.0)
+    } else {
+        turned(-1.0)
+    };
+    let hit = match s.trace[1] {
+        Trace::Line => {
+            // t0 + λ·dir = p + μ·m₁.
+            let det = dir.cross(s.m[1]);
+            if det.abs() <= tol::ANGULAR {
+                None
+            } else {
+                let lambda = (p - t0).cross(s.m[1]) / det;
+                (lambda > tol::LINEAR).then(|| t0 + dir * lambda)
+            }
+        }
+        Trace::Circle { centre, radius } => {
+            let w = t0 - centre;
+            let (bq, cq) = (w.dot(dir), w.dot(w) - radius * radius);
+            let disc = bq * bq - cq;
+            (disc >= 0.0)
+                .then(|| [-bq - disc.sqrt(), -bq + disc.sqrt()])
+                .and_then(|roots| roots.into_iter().find(|&l| l > tol::LINEAR))
+                .map(|l| t0 + dir * l)
+        }
+    };
+    match hit {
+        Some(t1) if (t1 - p).dot(s.m[1]) > tol::LINEAR => Ok(t1.dist(p)),
+        _ => invalid("a chamfer whose bevel does not meet the edge's other face"),
+    }
 }
 
 /// [`fillet_edges`] whose rounds meet over a concave edge in the crease where they cross, the
@@ -194,12 +309,19 @@ pub(crate) fn fillet_edges_mitred(
     radius: f64,
     feature: &str,
 ) -> Result<Brep> {
-    let (apart, names) = apart_names(body, edges)?;
+    let (apart, names, skip) = apart_names(body, edges)?;
     let pairs: Vec<EdgeName> = names
         .iter()
         .map(|(a, b)| EdgeName { a, b, exact: true })
         .collect();
-    let out = blend_with(&apart, &pairs, Kind::Fillet { radius }, feature, false)?;
+    let out = blend_with(
+        &apart,
+        &pairs,
+        &skip,
+        Kind::Fillet { radius },
+        feature,
+        false,
+    )?;
     Ok(own_names(body, out))
 }
 
@@ -229,8 +351,13 @@ fn own_names(body: &Brep, mut out: Brep) -> Brep {
     out
 }
 
-/// `body` with its faces named apart, and the pair of names of each of `edges`.
-fn apart_names(body: &Brep, edges: &[EdgeId]) -> Result<(Brep, Vec<(String, String)>)> {
+/// A body with its faces named apart, the pair of names of each edge to blend, and a point on each
+/// edge those names pick that is not to be blended.
+type Apart = (Brep, Vec<(String, String)>, Vec<Point3>);
+
+/// `body` with its faces named apart, the pair of names of each of `edges`, and a point on each
+/// other edge between the same two faces (a bore's other rim), which the names would also pick.
+fn apart_names(body: &Brep, edges: &[EdgeId]) -> Result<Apart> {
     let mut apart = body.clone();
     let name = |f: FaceId| format!("{APART}.f{}", f.index());
     for f in body.face_ids() {
@@ -251,7 +378,23 @@ fn apart_names(body: &Brep, edges: &[EdgeId]) -> Result<(Brep, Vec<(String, Stri
         };
         names.push((name(f), name(g)));
     }
-    Ok((apart, names))
+    let faces_of = |e: EdgeId| -> BTreeSet<FaceId> {
+        body.edge_uses(e)
+            .iter()
+            .map(|&c| body.coedge_face(c))
+            .collect()
+    };
+    let wanted: Vec<BTreeSet<FaceId>> = edges.iter().map(|&e| faces_of(e)).collect();
+    let skip = body
+        .edge_ids()
+        .filter(|e| !edges.contains(e) && wanted.contains(&faces_of(*e)))
+        .filter_map(|e| {
+            let edge = body.edge(e);
+            let c = edge.curve.as_ref()?;
+            Some(c.eval(0.5 * (edge.range.0 + edge.range.1)))
+        })
+        .collect();
+    Ok((apart, names, skip))
 }
 
 /// [`fillet`] of the edges `pairs` name.
@@ -347,7 +490,12 @@ struct Outline {
     profile: Profile,
     reach: [(Vec2, f64); 2],
     radius: f64,
+    /// The section runs out over a face it closes to a point on the axis ([`closing_face`]).
+    pole: bool,
 }
+
+/// The sides of a section that runs out over a face into air.
+const OVER: &str = "over";
 
 /// What one end of a piece does at its edge's vertex.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -377,13 +525,15 @@ enum Clip {
 }
 
 pub(crate) fn blend(body: &Brep, pairs: &[EdgeName], kind: Kind, feature: &str) -> Result<Brep> {
-    blend_with(body, pairs, kind, feature, true)
+    blend_with(body, pairs, &[], kind, feature, true)
 }
 
-/// [`blend`], the ball's swing round concave edges between its rounds put back where `swing`.
+/// [`blend`], the ball's swing round concave edges between its rounds put back where `swing`, and
+/// no edge through a point of `skip` picked by the pairs' names.
 fn blend_with(
     body: &Brep,
     pairs: &[EdgeName],
+    skip: &[Point3],
     kind: Kind,
     feature: &str,
     swing: bool,
@@ -395,7 +545,7 @@ fn blend_with(
     if !(size.is_finite() && size > tol::LINEAR) {
         return invalid("a blend's size must be positive");
     }
-    let picked = pick(body, pairs, true)?;
+    let picked = pick(body, pairs, skip, true)?;
     // Concave and convex edges meeting at a vertex: the concave ones are blended first, and the
     // convex ones then run on round the rounds those leave, as a tangent chain picked again.
     let convex: Vec<Option<bool>> = picked
@@ -428,11 +578,11 @@ fn blend_with(
             .filter(|(_, c)| **c == Some(false))
             .map(|(pk, _)| pk.clone())
             .collect();
-        let out = blend_picked(body, pairs, concave, kind, feature, swing)?;
-        let again = pick(&out, pairs, false)?;
-        return blend_picked(&out, pairs, again, kind, feature, swing);
+        let out = blend_picked(body, pairs, skip, concave, kind, feature, swing)?;
+        let again = pick(&out, pairs, skip, false)?;
+        return blend_picked(&out, pairs, skip, again, kind, feature, swing);
     }
-    blend_picked(body, pairs, picked, kind, feature, swing)
+    blend_picked(body, pairs, skip, picked, kind, feature, swing)
 }
 
 /// [`blend`] of the edges `picked` from `pairs`; where `swing`, a fillet's ball swings round each
@@ -440,6 +590,7 @@ fn blend_with(
 fn blend_picked(
     body: &Brep,
     pairs: &[EdgeName],
+    skip: &[Point3],
     picked: Vec<Picked>,
     kind: Kind,
     feature: &str,
@@ -490,11 +641,11 @@ fn blend_picked(
                 return Ok(out);
             }
             // The rest picked again under their own indices, which name their faces.
-            let rest = pick(&out, pairs, false)?;
+            let rest = pick(&out, pairs, skip, false)?;
             return if rest.is_empty() {
                 Ok(out)
             } else {
-                blend_picked(&out, pairs, rest, kind, feature, swing)
+                blend_picked(&out, pairs, skip, rest, kind, feature, swing)
             };
         }
     }
@@ -542,22 +693,25 @@ fn blend_picked(
         && let Some((a, b)) = swallowed_strip(body, &picked, &o)
     {
         let out = shaped::fillet_faces(body, a, b, radius, feature)?;
-        let rest = pick(&out, pairs, false)?;
+        let rest = pick(&out, pairs, skip, false)?;
         return if rest.is_empty() {
             Ok(out)
         } else {
-            blend_picked(&out, pairs, rest, kind, feature, swing)
+            blend_picked(&out, pairs, skip, rest, kind, feature, swing)
         };
     }
     check_apart(body, &picked, &sections, &outlines)?;
 
     let mut ends = vec![[End::Exact; 2]; picked.len()];
-    let mut corners: Vec<(VertexId, Ball)> = Vec::new();
+    let mut corners: Vec<(Vec<usize>, Ball)> = Vec::new();
+    let mut ridges: Vec<Brep> = Vec::new();
     let mut saddles: Vec<saddle::Saddle> = Vec::new();
     let mut joints: Vec<(usize, usize)> = Vec::new();
     let mut creases: Vec<[(usize, usize); 2]> = Vec::new();
     let mut beyonds: Vec<[std::result::Result<run::Beyond, String>; 2]> =
         vec![[Ok(run::Beyond::default()), Ok(run::Beyond::default())]; picked.len()];
+    let mut cornered = false;
+    let mut flats: Vec<flat_corner::Flat> = Vec::new();
     let mut vertices: Vec<&VertexId> = by_vertex.keys().collect();
     vertices.sort();
     for &v in vertices {
@@ -567,6 +721,17 @@ fn blend_picked(
                 let end = end_index(body, picked[*i].edge, v);
                 if let Some(&clip) = corner_ends.get(&(picked[*i].edge, v)) {
                     ends[*i][end] = End::Trim(clip);
+                    continue;
+                }
+                if let Some((first, extra)) =
+                    corner_trims(body, &picked[*i], &sections[*i], &outlines[*i], v)?
+                {
+                    ends[*i][end] = End::Trim(first);
+                    beyonds[*i][end] = Ok(run::Beyond {
+                        extra,
+                        ..Default::default()
+                    });
+                    cornered = true;
                     continue;
                 }
                 ends[*i][end] = free_end(body, &picked[*i], &outlines[*i], v)?;
@@ -657,12 +822,43 @@ fn blend_picked(
                     saddles.push(s);
                     continue;
                 }
+                // Chamfers mitre at the corner, and the plane of their contact points cuts it.
                 let Kind::Fillet { radius } = kind else {
-                    return Err(Error::Unsupported(
-                        "three or more chamfers that meet at a vertex".into(),
-                    ));
+                    let flat = flat_corner::find(body, &picked, &sections, &outlines, at, v)?;
+                    for &i in at {
+                        let end = end_index(body, picked[i].edge, v);
+                        ends[i][end] =
+                            match corner_trims(body, &picked[i], &sections[i], &outlines[i], v)? {
+                                Some((first, extra)) => {
+                                    beyonds[i][end] = Ok(run::Beyond {
+                                        extra,
+                                        ..Default::default()
+                                    });
+                                    End::Trim(first)
+                                }
+                                None => free_end(body, &picked[i], &outlines[i], v)?,
+                            };
+                    }
+                    flats.push(flat);
+                    cornered = true;
+                    continue;
                 };
-                let ball = corner_ball(body, &picked, &sections, at, v, radius)?;
+                let ball = match corner_ball(body, &picked, &sections, at, v, radius) {
+                    Ok(ball) => ball,
+                    Err(why) => {
+                        let Some(split) =
+                            ridge::find(body, &picked, &sections, at, v, radius, feature)?
+                        else {
+                            return Err(why);
+                        };
+                        for (i, end, e) in ridge::ends(body, &picked, &split, v)? {
+                            ends[i][end] = e;
+                        }
+                        corners.extend(split.balls);
+                        ridges.push(split.ridge);
+                        continue;
+                    }
+                };
                 for &i in at {
                     let end = end_index(body, picked[i].edge, v);
                     let along = leaving(body, picked[i].edge, v)
@@ -677,7 +873,7 @@ fn blend_picked(
                     }
                     ends[i][end] = End::Short(short);
                 }
-                corners.push((v, ball));
+                corners.push((at.clone(), ball));
             }
         }
     }
@@ -698,6 +894,10 @@ fn blend_picked(
     let sewing = std::time::Instant::now();
     let sew_tools = if spills.iter().any(|s| !s.is_empty()) {
         Err("a concave blend that runs over the edge of its face".to_string())
+    } else if outlines.iter().any(|o| o.pole) {
+        Err("a blend that closes a face to a point on its axis".to_string())
+    } else if cornered {
+        Err("a blend that ends at a corner of several planes".to_string())
     } else {
         sewing_tools(
             body,
@@ -723,10 +923,7 @@ fn blend_picked(
         })
         .collect();
     let convex: Vec<bool> = sections.iter().map(|s| s.convex).collect();
-    let balls: Vec<(Vec<usize>, Ball)> = corners
-        .into_iter()
-        .map(|(v, ball)| (by_vertex[&v].clone(), ball))
-        .collect();
+    let balls: Vec<(Vec<usize>, Ball)> = corners;
 
     // Each corner tool, the pieces it lies between, and whether it joins the first of them.
     let mut corner_tools: Vec<(usize, usize, Brep, bool)> = Vec::new();
@@ -767,7 +964,11 @@ fn blend_picked(
         corner_tools.push((i, j, tool, sw.arc.is_some()));
     }
     // The corner tools only join the straight pieces as tools: sewing has no corner patch.
-    let sewn = if corner_tools.is_empty() && saddles.is_empty() {
+    let sewn = if balls.iter().any(|(_, b)| !b.convex) {
+        Err("a fillet with a concave corner ball".to_string())
+    } else if !ridges.is_empty() {
+        Err("a fillet whose corner splits along a ridge".to_string())
+    } else if corner_tools.is_empty() && saddles.is_empty() {
         sew_tools.and_then(|(tools, beyond)| {
             sew::sewn(
                 body, &picked, &tools, &beyond, &convex, &names, &balls, feature,
@@ -781,7 +982,7 @@ fn blend_picked(
         for s in &saddles {
             out = saddle::close(&out, s, s.edges.map(|i| &names[i]))?;
         }
-        Ok(out)
+        flat_corner::cut(out, &flats, feature)
     };
     let sewing = sewing.elapsed();
     #[cfg(test)]
@@ -796,6 +997,7 @@ fn blend_picked(
                 &names,
                 &joints,
                 &balls,
+                &ridges,
                 &corner_tools,
                 feature,
             ));
@@ -812,6 +1014,7 @@ fn blend_picked(
             &names,
             &joints,
             &balls,
+            &ridges,
             &corner_tools,
             feature,
         ))
@@ -925,6 +1128,7 @@ fn by_tools(
     names: &[BTreeSet<FaceName>],
     joints: &[(usize, usize)],
     balls: &[(Vec<usize>, Ball)],
+    ridges: &[Brep],
     corners: &[(usize, usize, Brep, bool)],
     feature: &str,
 ) -> Result<Brep> {
@@ -973,8 +1177,14 @@ fn by_tools(
             adds.insert(0, corner);
         }
     }
+    cuts.extend(ridges.iter().cloned());
     for (_, ball) in balls {
-        cuts.push(corner_tool(ball, feature)?);
+        let tool = corner_tool(ball, feature)?;
+        if ball.convex {
+            cuts.push(tool);
+        } else {
+            adds.push(tool);
+        }
     }
 
     let mut out = body.clone();
@@ -993,7 +1203,7 @@ fn by_tools(
 /// corner patch is tangent to the pieces it joins along the curves they share, where a boolean left
 /// to find the meeting finds it only to within the band the two stay within the tolerance over.
 /// Each edge is checked along its length before it is given.
-fn shared_edges(a: &Brep, b: &Brep) -> Facts {
+pub(crate) fn shared_edges(a: &Brep, b: &Brep) -> Facts {
     let mut facts = Facts::default();
     for (side, own, other) in [(0, a, b), (1, b, a)] {
         for f in other.face_ids() {
@@ -1107,7 +1317,7 @@ pub(crate) fn has_name(body: &Brep, f: FaceId, name: &str) -> bool {
 }
 
 pub(crate) fn picked_edges(body: &Brep, pair: &EdgeName) -> Result<Vec<EdgeId>> {
-    Ok(pick(body, &[*pair], true)?
+    Ok(pick(body, &[*pair], &[], true)?
         .into_iter()
         .map(|pk| pk.edge)
         .collect())
@@ -1116,7 +1326,14 @@ pub(crate) fn picked_edges(body: &Brep, pair: &EdgeName) -> Result<Vec<EdgeId>> 
 /// Every edge each pair names, in edge order, then every edge a picked one runs on into
 /// tangentially: a blend runs round the whole tangent chain of each edge it names. An edge two pairs pick is blended once and carries both
 /// pairs' names.
-fn pick(body: &Brep, pairs: &[EdgeName], strict: bool) -> Result<Vec<Picked>> {
+fn pick(body: &Brep, pairs: &[EdgeName], skip: &[Point3], strict: bool) -> Result<Vec<Picked>> {
+    let skipped = |e: EdgeId| {
+        let edge = body.edge(e);
+        edge.curve.as_ref().is_some_and(|c| {
+            skip.iter()
+                .any(|&q| c.eval(c.project(q, edge.range.0, edge.range.1)).dist(q) <= tol::LINEAR)
+        })
+    };
     let mut uses: HashMap<EdgeId, Vec<CoedgeId>> = HashMap::new();
     for c in body.coedge_ids() {
         uses.entry(body.coedge(c).edge).or_default().push(c);
@@ -1145,6 +1362,9 @@ fn pick(body: &Brep, pairs: &[EdgeName], strict: bool) -> Result<Vec<Picked>> {
             let Some((fs, cs)) = two_faced(e) else {
                 continue;
             };
+            if skipped(e) {
+                continue;
+            }
             let order = if on_a.contains(&fs[0]) && on_b.contains(&fs[1]) {
                 [0, 1]
             } else if on_a.contains(&fs[1]) && on_b.contains(&fs[0]) {
@@ -1550,22 +1770,49 @@ fn fillet_centre(s: &Section, radius: f64, sign: f64) -> Result<Vec2> {
         .ok_or_else(|| Error::InvalidInput("a fillet that touches neither face".into()))
 }
 
+/// The point of the circle about `centre` through `p` a chord `length` from `p`, on the side the
+/// circle leaves `p` along `m`.
+fn chord_end(centre: Vec2, radius: f64, p: Vec2, m: Vec2, length: f64) -> Result<Vec2> {
+    if length > 2.0 * radius + tol::LINEAR {
+        return Err(Error::InvalidInput(format!(
+            "a chamfer of {length} on a face curved to a diameter of {}",
+            2.0 * radius
+        )));
+    }
+    let half = (length / (2.0 * radius)).min(1.0).asin();
+    let r = p - centre;
+    let (sin, cos) = (2.0 * half).sin_cos();
+    let turned =
+        |sign: f64| centre + Vec2::new(r.x * cos - sign * r.y * sin, sign * r.x * sin + r.y * cos);
+    let (a, b) = (turned(1.0), turned(-1.0));
+    Ok(if (a - p).dot(m) >= (b - p).dot(m) {
+        a
+    } else {
+        b
+    })
+}
+
 /// The cross-section of the blend's material.
 fn outline(s: &Section, kind: Kind) -> Result<Outline> {
     let p = s.p;
     let (segments, t) = match kind {
         Kind::Chamfer { setback } => {
-            if s.trace.iter().any(|t| matches!(t, Trace::Circle { .. })) {
-                return Err(Error::Unsupported(
-                    "a chamfer on a straight edge of a cylinder".into(),
-                ));
+            // A setback is the straight distance from the edge in the section, so on a curved
+            // trace it is a chord.
+            let mut t = [Vec2::ZERO; 2];
+            for (k, tk) in t.iter_mut().enumerate() {
+                *tk = match s.trace[k] {
+                    Trace::Line => p + s.m[k] * setback[k],
+                    Trace::Circle { centre, radius } => {
+                        chord_end(centre, radius, p, s.m[k], setback[k])?
+                    }
+                };
             }
-            let t = [p + s.m[0] * setback[0], p + s.m[1] * setback[1]];
             (
                 vec![
-                    line(p, t[0], SIDES[0]),
+                    along_face(s, 0, p, t[0]),
                     line(t[0], t[1], "blend"),
-                    line(t[1], p, SIDES[1]),
+                    along_face(s, 1, t[1], p),
                 ],
                 t,
             )
@@ -1648,6 +1895,27 @@ fn outline(s: &Section, kind: Kind) -> Result<Outline> {
             ));
         }
     }
+    let pole = closing_face(s, t);
+    if let Some(k) = pole {
+        // The face closes to a point on the axis, where the swept section would pinch. Past a
+        // convex edge only air lies over the face, so the section runs out over it to the axis.
+        let h = t[0].dist(p).max(t[1].dist(p));
+        let up = match s.trace[k] {
+            Trace::Line => s.n[k],
+            Trace::Circle { centre, .. } => {
+                let away = (s.n[k].dot(p - centre)).signum();
+                unit2(t[k] - centre).unwrap_or(s.n[k]) * away
+            }
+        };
+        let (q1, q2) = (p + s.n[k] * h, Vec2::new(0.0, t[k].y) + up * h);
+        if k == 0 {
+            let over = [line(p, q1, OVER), line(q1, q2, OVER), line(q2, t[k], OVER)];
+            segments.splice(0..1, over);
+        } else {
+            let over = [line(t[k], q2, OVER), line(q2, q1, OVER), line(q1, p, OVER)];
+            segments.splice(2..3, over);
+        }
+    }
     let mut reach = [(Vec2::ZERO, 0.0); 2];
     for k in 0..2 {
         let w = t[k].dist(p);
@@ -1669,7 +1937,17 @@ fn outline(s: &Section, kind: Kind) -> Result<Outline> {
         },
         reach,
         radius,
+        pole: pole.is_some(),
     })
+}
+
+/// The face, if any, that a convex blend about a whole circle takes all of: its contact reaches the
+/// axis, so the face closes to the point there.
+fn closing_face(s: &Section, t: [Vec2; 2]) -> Option<usize> {
+    let Path::Ring { full: true, .. } = s.path else {
+        return None;
+    };
+    (0..2).find(|&k| s.convex && t[k].x.abs() <= tol::LINEAR)
 }
 
 /// Where the point `q` lies in the section's plane, and whether it lies strictly between the
@@ -1997,6 +2275,61 @@ fn free_end(body: &Brep, pk: &Picked, o: &Outline, v: VertexId) -> Result<End> {
         _ => return unsupported(),
     };
     Ok(End::Trim(clip))
+}
+
+/// The end of a straight piece at a corner `v` where several planes besides its edge's own two
+/// meet, every edge there convex: the body there is the region inside all the corner's planes, so
+/// the piece runs past the vertex and is trimmed by each other plane, keeping the side its edge
+/// lies on. The trim that needs the longest run, and the rest. None at any other vertex.
+fn corner_trims(
+    body: &Brep,
+    pk: &Picked,
+    s: &Section,
+    o: &Outline,
+    v: VertexId,
+) -> Result<Option<(Clip, Vec<Clip>)>> {
+    if !matches!(s.path, Path::Prism { .. }) || !s.convex {
+        return Ok(None);
+    }
+    let others: Vec<FaceId> = faces_at(body, v)
+        .into_iter()
+        .filter(|f| !pk.faces.contains(f))
+        .collect();
+    if others.len() < 2
+        || others
+            .iter()
+            .any(|&f| !matches!(body.face(f).surface, Surface::Plane(_)))
+    {
+        return Ok(None);
+    }
+    let all_convex = body
+        .coedge_ids()
+        .filter(|&c| body.coedge_start(c) == v)
+        .all(|c| run::convex(body, c) == Some(true));
+    if !all_convex {
+        return Ok(None);
+    }
+    let at = body.vertex(v).point;
+    let along = leaving(body, pk.edge, v)
+        .ok_or_else(|| Error::Numerical("an edge with no tangent".into()))?;
+    let q = inward_point(body, pk.edge, v, o.radius);
+    let mut clips: Vec<(f64, Clip)> = Vec::new();
+    for f in others {
+        let Surface::Plane(p) = &body.face(f).surface else {
+            unreachable!("every other face is a plane");
+        };
+        let n = outward(body, f, at);
+        let keep = if (q - at).dot(n) >= 0.0 { n } else { -n };
+        let clip = Clip::Plane {
+            origin: p.frame.origin,
+            keep,
+        };
+        clips.push((overrun(o, &clip, at, along)?, clip));
+    }
+    clips.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut clips = clips.into_iter().map(|(_, c)| c);
+    let first = clips.next().expect("two or more planes");
+    Ok(Some((first, clips.collect())))
 }
 
 /// The cylinder or cone about `frame.z`, keeping the side of it `q` lies on.
@@ -2339,6 +2672,9 @@ fn sewing_tools(
         }
         if b.iter().any(|bk| bk.overhung) {
             return Err("a blend that runs on past a short edge under an overhang".into());
+        }
+        if b.iter().any(|bk| bk.on_vertex) {
+            return Err("a blend whose contact ends on a vertex past its edge".into());
         }
         let tool = if ends[i] == e.ends[i] {
             tool.clone()
@@ -2786,6 +3122,13 @@ pub(crate) fn glue(a: &Brep, b: &Brep) -> Option<Brep> {
                                         *origin + *dir * if co.reversed { t.1 } else { t.0 }
                                     }
                                     PCurve::Projected { seed } => *seed,
+                                    PCurve::Spline { uv } => {
+                                        let t = src.edge(co.edge).range;
+                                        crate::topo::pcurve::spline_uv(
+                                            uv,
+                                            if co.reversed { t.1 } else { t.0 },
+                                        )
+                                    }
                                 };
                                 CoedgeSpec {
                                     edge,
@@ -2909,35 +3252,42 @@ fn renamed(mut tool: Brep, blend: &str, names: &BTreeSet<FaceName>) -> Brep {
     tool
 }
 
-/// The sphere that closes a corner where three fillets of `radius` meet on three planes: its
-/// centre, `radius` from each plane inside the corner, and the three planes' outward normals,
-/// right-handed. Each fillet's spine runs `radius` from both its planes, so all three pass through
-/// the centre, and each ends on the section through it: a great circle arc from the foot of the
-/// centre on one plane to its foot on the other. The patch is the spherical triangle of the three
-/// feet, whatever the angles between the planes.
+/// The sphere that closes a corner where three or more fillets of `radius` meet on as many planes,
+/// every edge there filleted and all convex or all concave: its centre, `radius` from each plane on
+/// the side the fillets' balls roll (inside a convex corner, outside a concave one), and the
+/// directions from the centre to its feet on the planes. Each fillet's spine runs `radius` from both
+/// its planes, so all pass through the centre, and each ends on the section through it: a great
+/// circle arc from the ball's foot on one plane to its foot on the other. The patch is the
+/// spherical polygon of the feet, whatever the angles between the planes. More than three planes
+/// have such a ball only where the planes `radius` in from them meet in one point (an octahedron's
+/// corner); a pyramid's apex on a rectangle splits along a ridge ([`ridge`]).
 pub(super) struct Ball {
     centre: Point3,
     radius: f64,
-    normals: [Vec3; 3],
-    /// The corner, and the directions its three filleted edges leave it in.
+    feet: Vec<Vec3>,
+    /// Whether the corner is convex: the patch takes material off, where a concave one adds it.
+    convex: bool,
+    /// The corner, and the directions its filleted edges leave it in.
     corner: Point3,
-    edges: [Vec3; 3],
+    edges: Vec<Vec3>,
 }
 
 impl Ball {
-    /// The direction from the centre to the middle of the patch.
+    /// The direction from the centre to the middle of the patch: toward the corner, which stands
+    /// `radius` off every plane, so every foot lies within a quarter turn of it.
     fn middle(&self) -> Vec3 {
-        let [e1, e2, e3] = self.normals;
-        (e1 + e2 + e3).unit_or_zero()
+        (self.corner - self.centre).unit_or_zero()
     }
 
     /// The sphere with both poles and its seam off the patch: the poles on the great circle square
     /// to the patch's middle, the seam on the far side.
     fn surface(&self) -> Result<crate::geom::Sphere> {
         let m = self.middle();
-        let axis = m
-            .cross(self.normals[2])
-            .unit()
+        let axis = self
+            .feet
+            .iter()
+            .filter_map(|f| m.cross(*f).unit())
+            .next()
             .ok_or_else(|| Error::Numerical("a corner whose normals are parallel".into()))?;
         Ok(crate::geom::Sphere {
             frame: Frame::new(self.centre, axis, -m)?,
@@ -2956,57 +3306,104 @@ fn corner_ball(
 ) -> Result<Ball> {
     let faces = faces_at(body, v);
     let corner = body.vertex(v).point;
-    let unsupported = || {
-        Err(Error::Unsupported(
-            "fillets meeting at a vertex other than three convex edges of three planes".into(),
-        ))
+    let unsupported = |why: &str| {
+        Err(Error::Unsupported(format!(
+            "fillets meeting at a vertex {why}"
+        )))
     };
-    if at.len() != 3 || faces.len() != 3 {
-        return unsupported();
+    let edges_at: BTreeSet<EdgeId> = body
+        .coedge_ids()
+        .filter(|&c| body.coedge_start(c) == v)
+        .map(|c| body.coedge(c).edge)
+        .collect();
+    let picked_at: BTreeSet<EdgeId> = at.iter().map(|&i| picked[i].edge).collect();
+    if at.len() < 3 || faces.len() != at.len() || edges_at != picked_at {
+        return unsupported("with an edge that is not filleted");
     }
     let faces: Vec<FaceId> = faces.into_iter().collect();
-    for &f in &faces {
-        if !matches!(body.face(f).surface, Surface::Plane(_)) {
-            return unsupported();
-        }
+    if faces
+        .iter()
+        .any(|&f| !matches!(body.face(f).surface, Surface::Plane(_)))
+    {
+        return unsupported("of faces other than planes");
     }
+    let convex = sections[at[0]].convex;
     for &i in at {
-        if !sections[i].convex || !matches!(sections[i].path, Path::Prism { .. }) {
-            return unsupported();
+        if sections[i].convex != convex || !matches!(sections[i].path, Path::Prism { .. }) {
+            return unsupported("of straight edges not all convex or all concave");
         }
     }
+    // The point `radius` off each plane where the ball rolls: n_k·(c − corner) = ∓radius, by
+    // least squares over the planes, which more than three must all meet.
+    let side = if convex { -radius } else { radius };
     let n: Vec<Vec3> = faces.iter().map(|&f| outward(body, f, corner)).collect();
-    let det = n[0].cross(n[1]).dot(n[2]);
-    if det.abs() <= tol::ANGULAR {
-        return unsupported();
+    let mut a = [[0.0; 3]; 3];
+    let mut b = [0.0; 3];
+    for nk in &n {
+        let nk = [nk.x, nk.y, nk.z];
+        for r in 0..3 {
+            for c in 0..3 {
+                a[r][c] += nk[r] * nk[c];
+            }
+            b[r] += nk[r] * side;
+        }
     }
-    let normals = if det > 0.0 {
-        [n[0], n[1], n[2]]
-    } else {
-        [n[1], n[0], n[2]]
+    let Some(x) = solve3(a, b) else {
+        return unsupported("of planes that do not meet in a point");
     };
-    let [e1, e2, e3] = normals;
-    // The point `radius` inside each plane: n_k·(c − corner) = −radius for each k.
-    let centre = corner - (e2.cross(e3) + e3.cross(e1) + e1.cross(e2)) * (radius / det.abs());
-    let mut edges = [Vec3::ZERO; 3];
-    for (k, &i) in at.iter().enumerate() {
-        edges[k] = leaving(body, picked[i].edge, v)
-            .ok_or_else(|| Error::Numerical("an edge with no tangent".into()))?;
+    let offset = Vec3::new(x[0], x[1], x[2]);
+    if n.iter()
+        .any(|nk| (nk.dot(offset) - side).abs() > tol::LINEAR)
+    {
+        return unsupported("where no ball touches all its planes");
+    }
+    let centre = corner + offset;
+    let feet = n.iter().map(|&nk| if convex { nk } else { -nk }).collect();
+    let mut edges = Vec::with_capacity(at.len());
+    for &i in at {
+        edges.push(
+            leaving(body, picked[i].edge, v)
+                .ok_or_else(|| Error::Numerical("an edge with no tangent".into()))?,
+        );
     }
     let ball = Ball {
         centre,
         radius,
-        normals,
+        feet,
+        convex,
         corner,
         edges,
     };
     // Each foot must lie on the near side of the patch's middle, so the sphere's poles and seam
     // stay off the patch.
     let m = ball.middle();
-    if normals.iter().any(|e| e.dot(m) <= tol::TANGENT) {
-        return unsupported();
+    if ball.feet.iter().any(|f| f.dot(m) <= tol::TANGENT) {
+        return unsupported("too sharp for its ball's patch");
     }
     Ok(ball)
+}
+
+/// The solution of the 3 × 3 system `a·x = b`, by Cramer's rule; None where `a` is singular.
+fn solve3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
+    let det = |m: [[f64; 3]; 3]| {
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    };
+    let d = det(a);
+    let scale = a.iter().flatten().fold(0.0f64, |m, x| m.max(x.abs()));
+    if d.abs() <= 1e-12 * scale.powi(3) {
+        return None;
+    }
+    let mut x = [0.0; 3];
+    for (c, xc) in x.iter_mut().enumerate() {
+        let mut m = a;
+        for r in 0..3 {
+            m[r][c] = b[r];
+        }
+        *xc = det(m) / d;
+    }
+    Some(x)
 }
 
 /// The parallelepiped at `origin` spanned by `w`, its faces planes facing out.
@@ -3080,22 +3477,68 @@ fn parallelepiped(origin: Point3, w: [Vec3; 3]) -> Result<Brep> {
     Ok(b)
 }
 
+/// The cell between four or more fillets' end sections through a corner ball's centre: the
+/// pyramid from the centre along the lines where neighbouring sections meet, out past the corner
+/// to a base square to the patch's middle.
+fn section_cone(ball: &Ball) -> Result<Brep> {
+    let m = ball.middle();
+    let frame = Frame::new(ball.centre, m, m.any_perpendicular())?;
+    let angle = |d: Vec3| {
+        let l = frame.to_local(ball.centre + d);
+        l.y.atan2(l.x)
+    };
+    let mut edges = ball.edges.clone();
+    edges.sort_by(|a, b| angle(*a).total_cmp(&angle(*b)));
+    let height = 2.0 * ball.corner.dist(ball.centre) + ball.radius;
+    let mut points = vec![ball.centre];
+    for (k, &a) in edges.iter().enumerate() {
+        let b = edges[(k + 1) % edges.len()];
+        let d = a.cross(b);
+        let d = if d.dot(m) > 0.0 { d } else { -d };
+        let along = d.dot(m);
+        if along <= tol::ANGULAR * d.norm() {
+            return Err(Error::Unsupported(
+                "fillets meeting at a corner whose end sections do not close round it".into(),
+            ));
+        }
+        points.push(ball.centre + d * (height / along));
+    }
+    let n = edges.len() as u32;
+    let mut triangles: Vec<[u32; 3]> = (0..n).map(|k| [0, 1 + k, 1 + (k + 1) % n]).collect();
+    triangles.extend((1..n - 1).map(|k| [1, 2 + k, 1 + k]));
+    // Counter-clockwise seen from outside: the first side faces away from the middle of the base.
+    let base = points[1..].iter().fold(Point3::ZERO, |acc, &p| acc + p) * (1.0 / n as f64);
+    let out = (points[1] - points[0]).cross(points[2] - points[0]);
+    if out.dot(points[0] - base) < 0.0 {
+        for t in &mut triangles {
+            t.swap(1, 2);
+        }
+    }
+    crate::mesh::solid(&points, &triangles)
+}
+
 /// The material the sphere patch takes off a corner where three fillets meet: the parallelepiped
 /// at the sphere's centre bounded by the three fillets' end sections, oversized outward, less the
 /// ball.
 fn corner_tool(ball: &Ball, feature: &str) -> Result<Brep> {
-    let (centre, radius, corner, edges) = (ball.centre, ball.radius, ball.corner, ball.edges);
+    let (centre, radius, corner) = (ball.centre, ball.radius, ball.corner);
+    let edges = &ball.edges;
     // The end sections are the planes through the centre square to each edge; the cell between
     // them is spanned by the lines where two of them meet, each running toward the corner.
-    let mut w = [Vec3::ZERO; 3];
-    for j in 0..3 {
-        let d = edges[(j + 1) % 3].cross(edges[(j + 2) % 3]);
-        let d = if d.dot(edges[j]) < 0.0 { d } else { -d };
-        // How far along `d` the corner's own coordinate reaches, twice over.
-        let reach = (corner - centre).dot(edges[j]) / d.dot(edges[j]);
-        w[j] = d * (2.0 * reach.abs().max(radius / d.norm()));
-    }
-    let cell = parallelepiped(centre, w)?;
+    let cell = if let [e0, e1, e2] = edges[..] {
+        let edges = [e0, e1, e2];
+        let mut w = [Vec3::ZERO; 3];
+        for j in 0..3 {
+            let d = edges[(j + 1) % 3].cross(edges[(j + 2) % 3]);
+            let d = if d.dot(edges[j]) < 0.0 { d } else { -d };
+            // How far along `d` the corner's own coordinate reaches, twice over.
+            let reach = (corner - centre).dot(edges[j]) / d.dot(edges[j]);
+            w[j] = d * (2.0 * reach.abs().max(radius / d.norm()));
+        }
+        parallelepiped(centre, w)?
+    } else {
+        section_cone(ball)?
+    };
     let sphere = ball.surface()?;
     let (axis, seam) = (sphere.frame.z, sphere.frame.x);
     let ball_frame = Frame::new(centre, seam.cross(axis), seam)?;
@@ -3274,7 +3717,7 @@ mod tests {
             "box",
         )
         .unwrap();
-        let picked = pick(&body, &by_surface(&[("box.end", "box.v_min")]), true).unwrap();
+        let picked = pick(&body, &by_surface(&[("box.end", "box.v_min")]), &[], true).unwrap();
         let s = section(&body, &picked[0]).unwrap();
         let o = outline(&s, Kind::Fillet { radius: 5.0 }).unwrap();
         let tool = piece(&s, &o, [End::Exact; 2], "f").unwrap();
@@ -3460,5 +3903,47 @@ mod tests {
         );
         assert!((t.minor - 1.0).abs() < 1e-12);
         assert!((t.frame.origin.z - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn every_edge_of_a_slanted_parallelepiped_rounds_to_its_inner_box_grown() {
+        // Spanned by (8, 0, 0), (0, 4, 0) and (8, 5, 3): one corner's normals spread more than a
+        // quarter turn from their sum. Rounding every edge by r leaves the parallelepiped whose
+        // faces stand r in, spanned by w_i·(1 − 2r/h_i) for the width h_i across each pair of faces,
+        // grown by r (Steiner): V' + S'r + M'r² + 4πr³/3, where the four edges along w_i turn through
+        // a whole turn between them, so M' = π·Σ|w_i'|.
+        let w = [
+            Vec3::new(8.0, 0.0, 0.0),
+            Vec3::new(0.0, 4.0, 0.0),
+            Vec3::new(8.0, 5.0, 3.0),
+        ];
+        let body = parallelepiped(Vec3::ZERO, w).unwrap();
+        let r = 0.5;
+        let volume = w[0].cross(w[1]).dot(w[2]).abs();
+        let inner: Vec<Vec3> = (0..3)
+            .map(|i| {
+                let h = volume / w[(i + 1) % 3].cross(w[(i + 2) % 3]).norm();
+                w[i] * (1.0 - 2.0 * r / h)
+            })
+            .collect();
+        let v_in = inner[0].cross(inner[1]).dot(inner[2]).abs();
+        let s_in: f64 = (0..3)
+            .map(|i| 2.0 * inner[(i + 1) % 3].cross(inner[(i + 2) % 3]).norm())
+            .sum();
+        let m_in = PI * inner.iter().map(|x| x.norm()).sum::<f64>();
+        let edges: Vec<EdgeId> = body.edge_ids().collect();
+        let out = fillet_edges(&body, &edges, r, "f").unwrap();
+        assert!(check::check(&out).is_empty());
+        let want_v = v_in + s_in * r + m_in * r * r + 4.0 * PI * r.powi(3) / 3.0;
+        let want_a = s_in + 2.0 * m_in * r + 4.0 * PI * r * r;
+        let (v, a) = (measure::volume(&out), measure::area(&out));
+        assert!(
+            (v - want_v).abs() < 1e-9 * want_v,
+            "volume {v} against {want_v}"
+        );
+        assert!(
+            (a - want_a).abs() < 1e-9 * want_a,
+            "area {a} against {want_a}"
+        );
     }
 }

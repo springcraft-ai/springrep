@@ -2534,4 +2534,27 @@ mod tests {
         }
         assert!(!within(&h, r, Vec3::new(0.0, 0.0, 1.0), tol::LINEAR));
     }
+
+    // A circle in the plane x = 5, turned about the z axis, draws a surface whose meridian runs out
+    // to radius √(25 + r²) and back: the circle lies on it all round, and every point of it is its
+    // own nearest point there, also beside the top and bottom, where the meridian turns back.
+    #[test]
+    fn a_circle_lies_on_its_own_revolution_where_the_meridian_turns_back() {
+        let c = Curve::Circle(Circle {
+            frame: Frame::new(Vec3::new(5.0, 0.0, 0.0), Vec3::X, Vec3::Y).unwrap(),
+            radius: 0.5,
+        });
+        let s = Surface::Revolution(Box::new(Revolution {
+            curve: c.clone(),
+            origin: Vec3::ZERO,
+            axis: Vec3::Z,
+        }));
+        for k in 0..64 {
+            let p = c.eval(std::f64::consts::TAU * k as f64 / 64.0);
+            let uv = s.project(p);
+            assert!(s.eval(uv.x, uv.y).dist(p) < 1e-12, "{k}");
+        }
+        let hits = curve_surface(&c, (0.0, std::f64::consts::TAU), &s);
+        assert!(hits.on_surface, "{hits:?}");
+    }
 }

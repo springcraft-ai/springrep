@@ -3,7 +3,10 @@
 //!
 //! The chain runs the way its side-0 face uses it, with one parameter `s` along it. At each `s` the
 //! ball's centre lies in the plane square to the chain, at the radius from both sides, found by
-//! Newton steps whose rows are the two surface normals and the chain's tangent. A side's contact is
+//! Newton steps whose rows are the two surface normals and the chain's tangent. A ball larger than
+//! the chain's bend has no centre in some of those planes (they cross before they reach the
+//! centres' path), and the fillet is then made again with each section in the plane square to the
+//! centres' path through the chain's point, where the ball's circle of contact lies. A side's contact is
 //! the nearest point on whichever of that side's faces holds it: where a side changes face at a
 //! joint, between faces that meet tangentially, the ball's contact slides from one onto the other,
 //! and a foot counts only on its own face's side of the edge between them.
@@ -144,6 +147,9 @@ struct Roll<'a> {
     radius: f64,
     /// −1 where the ball lies inside the body (a convex chain), +1 outside it.
     side: f64,
+    /// Whether each section lies square to the centres' path, the two contact normals' cross
+    /// product, rather than to the chain.
+    spine: bool,
     /// `joints[i][k]`: the junction on side `k` where link `i` ends and the next begins.
     joints: Vec<[Option<Junction>; 2]>,
     /// The trimmed domain of every face a side has, to tell whether a foot lies in the face.
@@ -206,10 +212,19 @@ impl Roll<'_> {
         &self.body.face(f).surface
     }
 
-    /// The nearest point to `q` on face `f`'s surface, and the outward normal there.
+    /// The nearest point to `q` on face `f`'s surface, and the outward normal there. A spline
+    /// surface runs on past the edge of its parameters as its end spans' polynomials, so a ball
+    /// rolling on past the chain's end keeps a smooth contact instead of one held at that edge.
     fn foot_on(&self, f: FaceId, q: Point3) -> (Point3, Vec3) {
         let s = self.surface(f);
         let uv = s.project(q);
+        if let Surface::Nurbs(n) = s
+            && let Some(uv) = extended_foot(n, q, uv)
+        {
+            let face = self.body.face(f);
+            let nrm = s.normal(uv.x, uv.y);
+            return (s.eval(uv.x, uv.y), if face.reversed { -nrm } else { nrm });
+        }
         let p = s.eval(uv.x, uv.y);
         (p, outward(self.body, f, p))
     }
@@ -282,23 +297,51 @@ impl Roll<'_> {
         }
     }
 
-    /// The section at chain parameter `s`, starting Newton from `guess` or from the chain.
+    /// The section at chain parameter `s`, starting Newton from `guess`, and from the chain where
+    /// there is none or Newton does not settle from it: a neighbouring section's centre lies far
+    /// off where a large ball rolls round a tight bend.
     fn section(&self, s: f64, guess: Option<Point3>) -> Result<Section> {
+        match guess {
+            Some(g) => self.settled(s, g).or_else(|_| self.section(s, None)),
+            None => {
+                let (e, _, i) = self.chain_at(s)?;
+                // The centre of the ball in the wedge of the two faces' tangent planes at the
+                // edge, `r` from both: `(na + nb)·r/(1 + na·nb)` off it.
+                let na = outward(self.body, self.links[i].faces[0], e);
+                let nb = outward(self.body, self.links[i].faces[1], e);
+                let k = self.side * self.radius / (1.0 + na.dot(nb)).max(1e-3);
+                self.settled(s, e + (na + nb) * k)
+            }
+        }
+    }
+
+    /// The section at chain parameter `s` by Newton steps from the centre `c`.
+    fn settled(&self, s: f64, mut c: Point3) -> Result<Section> {
         let (e, along, i) = self.chain_at(s)?;
-        let mut c = guess.unwrap_or_else(|| {
-            let n = outward(self.body, self.links[i].faces[0], e)
-                + outward(self.body, self.links[i].faces[1], e);
-            e + n * (self.side * self.radius)
-        });
         for _ in 0..60 {
             let (pa, na, _) = self.foot(i, 0, c);
             let (pb, nb, _) = self.foot(i, 1, c);
+            // The centres' path runs along both contact normals' cross product: square to it, the
+            // plane through the centre holds both contacts. That direction turns with the centre,
+            // so its row is the gradient of the distance from the plane, by central differences.
+            let off_plane = |q: Point3| {
+                let (_, na, _) = self.foot(i, 0, q);
+                let (_, nb, _) = self.foot(i, 1, q);
+                (q - e).dot(na.cross(nb).unit_or_zero())
+            };
+            let (row, third) = if self.spine {
+                let h = 1e-6 * (1.0 + self.radius);
+                let d = |v: Vec3| (off_plane(c + v * h) - off_plane(c - v * h)) / (2.0 * h);
+                (Vec3::new(d(Vec3::X), d(Vec3::Y), d(Vec3::Z)), off_plane(c))
+            } else {
+                (along, (c - e).dot(along))
+            };
             let f = [
                 (c - pa).dot(na) - self.side * self.radius,
                 (c - pb).dot(nb) - self.side * self.radius,
-                (c - e).dot(along),
+                third,
             ];
-            let step = solve3([na, nb, along], f).ok_or_else(|| {
+            let step = solve3([na, nb, row], f).ok_or_else(|| {
                 Error::Unsupported("a rolling-ball fillet whose faces are parallel".into())
             })?;
             c -= step;
@@ -441,6 +484,38 @@ impl Roll<'_> {
         }
         unsupported("whose end face never crosses it")
     }
+}
+
+/// Where the foot of `q` on spline surface `n` lies past the edge of its parameters, the
+/// projection `uv` having stopped on that edge: Gauss–Newton steps on the surface's polynomial
+/// continuation. None where `uv` lies inside, or the steps do not settle.
+fn extended_foot(n: &NurbsSurface, q: Point3, uv: Vec2) -> Option<Vec2> {
+    let ((u0, u1), (v0, v1)) = n.domain();
+    let edge = |x: f64, a: f64, b: f64| {
+        (x - a).abs() <= 1e-12 * (b - a) || (b - x).abs() <= 1e-12 * (b - a)
+    };
+    let periodic = (n.u_period().is_some(), n.v_period().is_some());
+    let on_edge = (!periodic.0 && edge(uv.x, u0, u1)) || (!periodic.1 && edge(uv.y, v0, v1));
+    if !on_edge {
+        return None;
+    }
+    let mut uv = uv;
+    for _ in 0..40 {
+        let (p, su, sv) = n.d1(uv.x, uv.y);
+        let r = q - p;
+        let (a, b, c) = (su.dot(su), su.dot(sv), sv.dot(sv));
+        let det = a * c - b * b;
+        if det.abs() <= 1e-300 {
+            return None;
+        }
+        let (gu, gv) = (su.dot(r), sv.dot(r));
+        let step = Vec2::new((c * gu - b * gv) / det, (a * gv - b * gu) / det);
+        uv = uv + step;
+        if step.x.abs() * su.norm() + step.y.abs() * sv.norm() <= 1e-3 * tol::LINEAR {
+            return Some(uv);
+        }
+    }
+    None
 }
 
 /// The root of `g` between `lo` and `hi`, `g(lo)` having the sign of `glo`.
@@ -646,11 +721,27 @@ fn chain(body: &Brep, picked: &[Picked]) -> Option<(Vec<Link>, bool)> {
 }
 
 /// The fillet of `radius` along the tangent chain `picked`, edge `i`'s faces named `names[i]`.
+/// Each section lies in the plane square to the chain where it crosses it; where that plane misses
+/// the ball's path (a ball larger than the chain's bend, whose square planes cross before they
+/// reach the centres), in the plane square to the centres' path through the chain's point
+/// instead, the plane the ball's circle of contact lies in.
 pub(super) fn fillet(
     body: &Brep,
     picked: &[Picked],
     radius: f64,
     names: &[BTreeSet<FaceName>],
+) -> Result<Brep> {
+    rolled(body, picked, radius, names, false)
+        .or_else(|e| rolled(body, picked, radius, names, true).map_err(|_| e))
+}
+
+/// [`fillet`], its sections square to the centres' path where `spine`, else to the chain.
+fn rolled(
+    body: &Brep,
+    picked: &[Picked],
+    radius: f64,
+    names: &[BTreeSet<FaceName>],
+    spine: bool,
 ) -> Result<Brep> {
     if body.has_tolerances() {
         return unsupported("on a body with local tolerances");
@@ -750,6 +841,7 @@ pub(super) fn fillet(
         total,
         radius,
         side: if convex { -1.0 } else { 1.0 },
+        spine,
         domains: picked
             .iter()
             .flat_map(|pk| pk.faces)
@@ -1173,6 +1265,9 @@ pub(super) fn fillet(
                 .collect();
             let mut specs: Vec<CoedgeSpec> = Vec::new();
             let mut hint: Option<Vec2> = None;
+            let runs = (0..order.len())
+                .filter(|&x| is_chain(order[x]) && (x == 0 || !is_chain(order[x - 1])))
+                .count();
             let push_new = |specs: &mut Vec<CoedgeSpec>,
                             hint: &mut Option<Vec2>,
                             out: &Brep,
@@ -1279,6 +1374,44 @@ pub(super) fn fillet(
                 let mut mine: Vec<usize> = (0..m)
                     .filter(|&j| pieces[j][k].is_some() && segments[j].face[k] == f)
                     .collect();
+                // A loop the chain passes through more than once (a closed chain across the
+                // face's seam) takes for each run only the contact between the crossings at its
+                // ends.
+                if runs > 1 {
+                    let links: BTreeSet<usize> = order[i..i + run]
+                        .iter()
+                        .map(|&c| {
+                            let e = body.coedge(c).edge;
+                            roll.links
+                                .iter()
+                                .position(|l| l.edge == e)
+                                .expect("a chain edge")
+                        })
+                        .collect();
+                    let n = roll.links.len();
+                    let in_run = |x: usize| links.contains(&x);
+                    let before = |x: usize| (closed || x > 0).then(|| (x + n - 1) % n);
+                    let after = |x: usize| (closed || x + 1 < n).then_some(x);
+                    let first = *links
+                        .iter()
+                        .find(|&&x| before(x).is_none_or(|b| !in_run(b)))
+                        .expect("a run has a first link");
+                    let last = *links
+                        .iter()
+                        .find(|&&x| after(x).is_none_or(|a| !in_run((a + 1) % n)))
+                        .expect("a run has a last link");
+                    let from = before(first)
+                        .and_then(|vi| crossing[vi][k])
+                        .unwrap_or(roll.links[first].s0);
+                    let to = after(last)
+                        .and_then(|vi| crossing[vi][k])
+                        .unwrap_or(roll.links[last].s0 + roll.links[last].len);
+                    let span = roll.wrap(to - from);
+                    mine.retain(|&j| {
+                        let past = roll.wrap(0.5 * (segments[j].a + segments[j].b) - from);
+                        past >= 0.0 && past < span
+                    });
+                }
                 if closed
                     && let Some(gap) = (0..mine.len()).find(|&x| {
                         let (p, q) = (mine[x], mine[(x + 1) % mine.len()]);
@@ -1290,6 +1423,19 @@ pub(super) fn fillet(
                 }
                 if mine.windows(2).any(|w| (w[0] + 1) % m != w[1]) {
                     return unsupported("whose contact leaves a face and comes back to it");
+                }
+                // A closed chain's contact all round the face starts where the loop's run does:
+                // the chain's own start may lie on a later edge of the run.
+                if closed && runs == 1 && mine.len() == m {
+                    let l = &roll.links[li];
+                    let start = roll.wrap(if along { l.s0 } else { l.s0 + l.len });
+                    let close = |a: f64| {
+                        let d = roll.wrap(a - start);
+                        d.min(roll.total - d) <= 1e-9 * (1.0 + roll.total)
+                    };
+                    if let Some(p) = mine.iter().position(|&j| close(segments[j].a)) {
+                        mine.rotate_left(p);
+                    }
                 }
                 if !along {
                     mine.reverse();

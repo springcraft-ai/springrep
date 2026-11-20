@@ -1824,3 +1824,21 @@ fn a_faces_box_holds_every_point_of_the_face() {
         }
     }
 }
+
+#[test]
+fn an_empty_result_is_refused_only_where_the_solids_share_material() {
+    use classify::material_lost;
+    let a = block([0.0; 3], [2.0; 3]);
+    // Overlapping by 1 in x: each has corners inside the other, and outside it.
+    let crossing = block([1.0, 0.5, 0.5], [3.0, 1.5, 1.5]);
+    assert!(material_lost(&a, &crossing, Op::Intersection));
+    assert!(material_lost(&a, &crossing, Op::Difference));
+    // Touching along the face x = 2 only: no point lies clear of the other's surfaces inside it.
+    let touching = block([2.0, 0.0, 0.0], [4.0, 2.0, 2.0]);
+    assert!(!material_lost(&a, &touching, Op::Intersection));
+    // Wholly inside the other: nothing of the inner one is left by taking the outer away.
+    let inner = block([0.5; 3], [1.5; 3]);
+    assert!(!material_lost(&inner, &a, Op::Difference));
+    assert!(material_lost(&inner, &a, Op::Intersection));
+    assert!(!material_lost(&a, &crossing, Op::Union));
+}

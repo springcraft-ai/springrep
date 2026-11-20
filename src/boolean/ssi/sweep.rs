@@ -17,7 +17,7 @@ use super::{Ssi, SsiCurve};
 use crate::{
     Result,
     geom::{Curve, Cylinder, IntersectionCurve, Plane, Surface, Torus},
-    math::{Point3, Vec3},
+    math::{Aabb, Point3, Vec3},
     numeric, tol,
 };
 
@@ -124,10 +124,67 @@ fn at_closed(f: &dyn Family, theta: f64, sheet: f64, corrs: [f64; 2]) -> Point3 
 struct Out {
     curves: Vec<SsiCurve>,
     points: Vec<Point3>,
+    region: Aabb,
 }
+
+/// How many points a branch is read at to find where it passes through the region.
+const READINGS: usize = 1024;
 
 impl Out {
     fn fit(
+        &mut self,
+        sample: &dyn Fn(f64) -> Point3,
+        range: (f64, f64),
+        closed: bool,
+        a: &Surface,
+        b: &Surface,
+    ) -> Result<()> {
+        // Two cylinders whose axes are a hair off parallel meet in loops metres long, of which
+        // only what passes through the region can lie on both faces: only that is fitted, each
+        // stretch reaching one reading past it at each end. A branch between two readings lies
+        // within their spacing of either, so the region is grown by the widest spacing.
+        let s_at = |k: usize| range.0 + (range.1 - range.0) * k as f64 / READINGS as f64;
+        let pts: Vec<Point3> = (0..=READINGS).map(|k| sample(s_at(k))).collect();
+        let step = pts.windows(2).map(|w| w[0].dist(w[1])).fold(0.0, f64::max);
+        let pad = Vec3::new(1.0, 1.0, 1.0) * (step + tol::LINEAR);
+        let (lo, hi) = (self.region.min - pad, self.region.max + pad);
+        // Round a loop the last reading is the first again.
+        let n = if closed { READINGS } else { READINGS + 1 };
+        let inside: Vec<bool> = pts[..n]
+            .iter()
+            .map(|p| (0..3).all(|i| p[i] >= lo[i] && p[i] <= hi[i]))
+            .collect();
+        if self.region.is_empty() || inside.iter().all(|&x| x) {
+            return self.fit_whole(sample, range, closed, a, b);
+        }
+        // Stretches of readings inside, each fitted from the reading before it to the one after:
+        // round a loop they are read from a reading outside, and may run past the range's end.
+        let start = if closed {
+            inside.iter().position(|&x| !x).unwrap_or(0)
+        } else {
+            0
+        };
+        let at = |k: usize| {
+            let k = if closed { k } else { k.min(READINGS) };
+            range.0 + (range.1 - range.0) * k as f64 / READINGS as f64
+        };
+        let mut k = start;
+        while k < start + n {
+            if !inside[k % n] {
+                k += 1;
+                continue;
+            }
+            let first = k;
+            while k < start + n && inside[k % n] {
+                k += 1;
+            }
+            let from = if first == 0 { range.0 } else { at(first - 1) };
+            self.fit_whole(sample, (from, at(k)), false, a, b)?;
+        }
+        Ok(())
+    }
+
+    fn fit_whole(
         &mut self,
         sample: &dyn Fn(f64) -> Point3,
         range: (f64, f64),
@@ -196,12 +253,13 @@ impl Out {
 }
 
 /// The intersection of `a` and `b` where `f` sweeps one of them and `other` is the other.
-fn solve(f: &dyn Family, other: &Surface, a: &Surface, b: &Surface) -> Result<Ssi> {
+fn solve(f: &dyn Family, other: &Surface, a: &Surface, b: &Surface, region: &Aabb) -> Result<Ssi> {
     let c_peak = peak(f);
     let m_peak = margin(f, c_peak);
     let mut out = Out {
         curves: Vec::new(),
         points: Vec::new(),
+        region: *region,
     };
     let thetas = |c: f64| {
         let t = c.clamp(-1.0, 1.0).acos();
@@ -517,8 +575,10 @@ fn generators_cylinder(b: &Cylinder, other: &Cylinder) -> Option<GeneratorsCylin
 /// The intersection of `a` and `b` by a family sweeping one of them, for the pairs that have one:
 /// cylinders whose axes are not parallel, a cylinder and a sphere off its axis, and a torus against
 /// a plane or a sphere off its axis. `None` for any other pair, or one these do not decide.
-pub(super) fn intersect(a: &Surface, b: &Surface) -> Option<Ssi> {
-    let run = |f: &dyn Family, other: &Surface| solve(f, other, a, b).ok();
+/// The intersection of `a` and `b`, of whose branches only the stretches through `region` are
+/// fitted.
+pub(super) fn intersect(a: &Surface, b: &Surface, region: &Aabb) -> Option<Ssi> {
+    let run = |f: &dyn Family, other: &Surface| solve(f, other, a, b, region).ok();
     match (a, b) {
         (Surface::Cylinder(x), Surface::Cylinder(y)) => {
             // The smaller one sweeps: its generators cross the other's axis at the steeper angle.
@@ -675,13 +735,17 @@ mod tests {
 
     /// The curves and points, every one checked on both surfaces, and both orders alike.
     fn meet(a: &Surface, b: &Surface) -> (Vec<SsiCurve>, Vec<Point3>) {
-        let Some(Ssi::Curves { curves, points }) = intersect(a, b) else {
+        let all = Aabb {
+            min: Vec3::new(-1e3, -1e3, -1e3),
+            max: Vec3::new(1e3, 1e3, 1e3),
+        };
+        let Some(Ssi::Curves { curves, points }) = intersect(a, b, &all) else {
             panic!("no closed form");
         };
         let Some(Ssi::Curves {
             curves: c2,
             points: p2,
-        }) = intersect(b, a)
+        }) = intersect(b, a, &all)
         else {
             panic!("no closed form");
         };
@@ -735,6 +799,40 @@ mod tests {
         let (cs, pts) = meet(&big, &into);
         assert_eq!(cs.len(), 1);
         assert!(cs[0].closed && pts.is_empty());
+    }
+
+    #[test]
+    fn nearly_parallel_cylinders_are_fitted_only_through_the_region() {
+        // r 1 about z, and r 1.2 about the line x = 0.5 leaning 1e-3 rad toward y: the second's
+        // axis runs 2.2 off the first's only 2200 mm up and down, so they meet in loops some 9 m
+        // long. Inside the box |x|, |y| ≤ 2, |z| ≤ 1 they meet in stretches a few mm long, and
+        // only those, a reading's spacing past the box at each end, are fitted.
+        let lean: f64 = 1e-3;
+        let a = cyl([0.0; 3], [0.0, 0.0, 1.0], 1.0);
+        let b = cyl([0.5, 0.0, 0.0], [0.0, lean.sin(), lean.cos()], 1.2);
+        let region = Aabb {
+            min: Vec3::new(-2.0, -2.0, -1.0),
+            max: Vec3::new(2.0, 2.0, 1.0),
+        };
+        let Some(Ssi::Curves { curves, .. }) = intersect(&a, &b, &region) else {
+            panic!("no closed form");
+        };
+        assert!(!curves.is_empty());
+        let mut length = 0.0;
+        for c in &curves {
+            let n = 256;
+            let at = |i: usize| {
+                c.curve
+                    .eval(c.range.0 + (c.range.1 - c.range.0) * i as f64 / n as f64)
+            };
+            for i in 0..=n {
+                for s in [&a, &b] {
+                    assert!(signed_distance(s, at(i)).abs() <= tol::LINEAR, "{i}");
+                }
+            }
+            length += (1..=n).map(|i| at(i).dist(at(i - 1))).sum::<f64>();
+        }
+        assert!(length < 100.0, "{length}");
     }
 
     #[test]

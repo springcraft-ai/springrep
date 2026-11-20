@@ -115,6 +115,14 @@ fn merge_once(b: &Brep) -> Option<Brep> {
         Some((v, first, second))
     })?;
 
+    // A spline pcurve holds parameters over its own edge's range alone.
+    if b.coedge_ids().any(|c| {
+        let co = b.coedge(c);
+        (co.edge == first || co.edge == second)
+            && matches!(co.pcurve, crate::topo::PCurve::Spline { .. })
+    }) {
+        return None;
+    }
     let (x1, x2) = (b.edge(first), b.edge(second));
     let c1 = x1.curve.clone()?;
     let c2 = x2.curve.as_ref()?;

@@ -14,7 +14,7 @@
 //!    operation selects pieces, and `sew` joins them, merges faces on one surface, and checks the
 //!    result.
 
-mod arrange;
+pub(crate) mod arrange;
 pub(crate) mod classify;
 mod contact;
 pub(crate) mod csi;
@@ -24,7 +24,7 @@ mod march;
 mod near;
 mod plane;
 mod same;
-mod sew;
+pub(crate) mod sew;
 mod simplify;
 mod snap;
 pub(crate) mod ssi;
@@ -159,19 +159,34 @@ pub(crate) fn boolean_with(a: &Brep, b: &Brep, op: Op, facts: &Facts) -> Result<
 fn combined(a: &Brep, b: &Brep, op: Op, facts: &Facts) -> Result<Brep> {
     // Facts name `b`'s own faces and edges, which a snapped copy would renumber.
     if !facts.on_face.is_empty() {
-        return combined_as(a, b, op, facts);
+        return combined_as(a, b, op, facts).and_then(|out| not_lost(a, b, op, out));
     }
     let snapped = snap::snapped(a, b, snap::Reach::Exact);
-    let first = combined_as(a, snapped.as_ref().unwrap_or(b), op, facts);
+    let used = snapped.as_ref().unwrap_or(b);
+    let first = combined_as(a, used, op, facts).and_then(|out| not_lost(a, used, op, out));
     if first.is_ok() {
         return first;
     }
     // Shapes a hair off each other that the boolean could not place, retried with them on one
     // surface: the answer then differs from the exact one by at most the gap times their area.
     match snap::snapped(a, b, snap::Reach::Grazing) {
-        Some(wide) => combined_as(a, &wide, op, facts).or(first),
+        Some(wide) => combined_as(a, &wide, op, facts)
+            .and_then(|out| not_lost(a, &wide, op, out))
+            .or(first),
         None => first,
     }
+}
+
+/// `out`, the result of `op` on `a` and `b`, unless it is empty where the two share material.
+fn not_lost(a: &Brep, b: &Brep, op: Op, out: Brep) -> Result<Brep> {
+    if out.solid_ids().next().is_some() || !classify::material_lost(a, b, op) {
+        return Ok(out);
+    }
+    Err(Error::Numerical(
+        "the result is empty, but a point of one solid lies well inside the other: an \
+         intersection was missed"
+            .into(),
+    ))
 }
 
 fn combined_as(a: &Brep, b: &Brep, op: Op, facts: &Facts) -> Result<Brep> {
@@ -722,8 +737,10 @@ pub(crate) fn face_bbox(dom: &Domain) -> Aabb {
 /// A coedge's parameter-plane points at edge parameters `ts`, given in its direction; points in
 /// between are sampled so periodic parameters continue across wide gaps.
 fn coedge_uv_at(b: &Brep, c: CoedgeId, ts: &[f64]) -> Vec<Vec2> {
-    if let PCurve::Affine { origin, dir } = &b.coedge(c).pcurve {
-        return ts.iter().map(|&t| *origin + *dir * t).collect();
+    match &b.coedge(c).pcurve {
+        PCurve::Affine { origin, dir } => return ts.iter().map(|&t| *origin + *dir * t).collect(),
+        PCurve::Spline { .. } => return b.coedge_uvs(c, ts),
+        PCurve::Projected { .. } => {}
     }
     let s = &b.face(b.coedge_face(c)).surface;
     // Only a periodic parameter needs the dense samples, to continue across a wide gap.
@@ -743,7 +760,7 @@ fn coedge_uv_at(b: &Brep, c: CoedgeId, ts: &[f64]) -> Vec<Vec2> {
 }
 
 /// A trim for coedge `c` over curve parameters `t0 → t1`, at `uv0 → uv1`, between vertices `v`.
-fn coedge_trim_with(
+pub(crate) fn coedge_trim_with(
     b: &Brep,
     c: CoedgeId,
     piece: usize,
@@ -754,13 +771,7 @@ fn coedge_trim_with(
 ) -> Trim {
     let co = b.coedge(c);
     let edge = b.edge(co.edge);
-    let map = match &co.pcurve {
-        PCurve::Affine { origin, dir } => UvMap::Affine {
-            origin: *origin,
-            dir: *dir,
-        },
-        PCurve::Projected { .. } => UvMap::Projected,
-    };
+    let map = UvMap::of(&co.pcurve);
     Trim {
         piece,
         forward: !co.reversed,
@@ -1977,13 +1988,39 @@ impl<'a> Work<'a> {
                 continue;
             }
             let (d, t) = csi::curve_distance(curve, base.range, p);
-            if d <= tol::between(base.tol, self.vtol[vi]).max(grazing(vi)) {
+            let within = tol::between(base.tol, self.vtol[vi]).max(grazing(vi));
+            if d <= within || (d <= GRAZE_REACH && self.branch_point(cut, vi, d)) {
                 out.push((t, vi, d));
+                // A curve that crosses itself, as where a plane cuts a swept sheet trimmed where
+                // it runs into itself, passes such a vertex twice.
+                let gap = 1e-3 * (base.range.1 - base.range.0);
+                for (lo, hi) in [(base.range.0, t - gap), (t + gap, base.range.1)] {
+                    if hi - lo <= gap {
+                        continue;
+                    }
+                    let (d2, t2) = csi::curve_distance(curve, (lo, hi), p);
+                    if d2 <= within && t2 - lo > 0.5 * gap && hi - t2 > 0.5 * gap {
+                        out.push((t2, vi, d2));
+                    }
+                }
             }
         }
         out.sort_by(|a, b| a.0.total_cmp(&b.0));
-        out.dedup_by_key(|x| x.1);
+        let span = base.range.1 - base.range.0;
+        out.dedup_by(|x, y| x.1 == y.1 && (x.0 - y.0).abs() <= 1e-6 * span);
         out
+    }
+
+    /// Whether vertex `vi`, `d` off the cut between faces `cut`, lies on both their surfaces where
+    /// they are tangent, within the reach there that a trace through the point keeps to: two
+    /// branches of the intersection cross at such a point (a swept sheet's edge and the curve where
+    /// the sheet comes back into the face it left), and the trace passes it only that near.
+    fn branch_point(&self, cut: Option<(usize, usize)>, vi: usize, d: f64) -> bool {
+        let Some((fa, fb)) = cut else { return false };
+        let p = self.pool[vi];
+        let (sa, sb) = (&self.faces[fa].dom.surface, &self.faces[fb].dom.surface);
+        let on = |s: &Surface| csi::signed_distance(s, p).abs() <= self.vtol[vi];
+        on(sa) && on(sb) && contact::crossing_reach(sa, sb, p).is_some_and(|r| d <= r)
     }
 
     /// Step 2a: every base split at its vertices into pieces; intersection pieces outside either
@@ -2000,9 +2037,15 @@ impl<'a> Work<'a> {
                 .map(|(t, v, d)| {
                     // The piece ends where the curve passes the vertex, which must hold it.
                     if d > self.vtol[v] {
-                        // A grazing meeting is known only to its reach: the vertex says so.
+                        // A grazing meeting is known only to its reach, and a branch point only
+                        // to the trace's: the vertex says so.
                         let met = self.meetings.get(&v).into_iter().flatten();
-                        let reach = met.map(|m| m.2).fold(0.0, f64::max);
+                        let mut reach = met.map(|m| m.2).fold(0.0, f64::max);
+                        if let BaseKind::Cut { fa, fb, .. } = self.bases[bi].kind
+                            && self.branch_point(Some((fa, fb)), v, d)
+                        {
+                            reach = reach.max(d);
+                        }
                         self.vtol[v] = d.min(self.cap.max(reach));
                         self.widest = self.widest.max(self.vtol[v]);
                         if !self.tolerant.contains(&v) {
@@ -2350,9 +2393,7 @@ impl<'a> Work<'a> {
                             if co.reversed { -d } else { d }
                         });
                         let mut tr = self.canon_trim(ci, start, along);
-                        if ci == pi
-                            && let UvMap::Affine { .. } = whole.map
-                        {
+                        if ci == pi && !matches!(whole.map, UvMap::Projected) {
                             tr.map = whole.map.clone();
                         }
                         tr
@@ -2773,7 +2814,11 @@ impl<'a> Work<'a> {
 
 /// Splits each pole of a face's boundary where a cut arrives at it, so the cut meets the pole's
 /// parameter-plane image at a node. The new pieces are numbered from `next_id`.
-fn split_poles(boundary: &mut [Vec<Trim>], cuts: &[Trim], next_id: usize) -> Vec<PieceGeom> {
+pub(crate) fn split_poles(
+    boundary: &mut [Vec<Trim>],
+    cuts: &[Trim],
+    next_id: usize,
+) -> Vec<PieceGeom> {
     let mut made = Vec::new();
     for lp in boundary.iter_mut() {
         let mut k = 0;

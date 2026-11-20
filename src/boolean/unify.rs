@@ -107,15 +107,11 @@ fn trim(b: &Brep, c: CoedgeId, curves: &[Option<Rc<crate::geom::Curve>>], pool: 
     let ts = coedge_params(b, c, 16);
     let uvs = coedge_uv_at(b, c, &ts);
     let map = match (&co.pcurve, &edge.curve) {
-        (PCurve::Affine { origin, dir }, _) => UvMap::Affine {
-            origin: *origin,
-            dir: *dir,
-        },
         (PCurve::Projected { .. }, None) => UvMap::Affine {
             origin: uvs[0],
             dir: Vec2::ZERO,
         },
-        (PCurve::Projected { .. }, Some(_)) => UvMap::Projected,
+        (pcurve, _) => UvMap::of(pcurve),
     };
     Trim {
         piece: co.edge.index(),

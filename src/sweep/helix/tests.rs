@@ -128,6 +128,90 @@ fn a_twisted_extrusion_holds_its_section_s_area_all_the_way_up() {
     assert!(rel(measure::volume(&b), PI * rise) < 1e-7);
 }
 
+// A screw is rigid, so a region it carries across its own plane at the rate `v·n` sweeps
+// `v·n dA dt`; `v·n` is affine over the plane, so the volume is the angle times the area times
+// the rate at the centroid. A disc 10 out on a plane leaning toward the axis and a quarter turn:
+// its rate at the centre, v = (0, ±10, ρ) on n = (1, 1, 1)/√3, is |ρ ± 10|/√3.
+#[test]
+fn an_oblique_disc_screwed_sweeps_its_area_times_its_crossing_rate() {
+    let rho = 8.0 / TAU;
+    let n = Vec3::new(1.0, 1.0, 1.0) * (1.0 / 3f64.sqrt());
+    let frame = Frame::from_axis(Vec3::new(10.0, 0.0, 0.0), n).unwrap();
+    let p = Profile::circle(Vec2::ZERO, 2.0);
+    let b = helix(&p, &frame, &about_z(8.0, 1.0), PI / 2.0, "coil").unwrap();
+    assert!(check::check(&b).is_empty());
+    let want = PI / 2.0 * PI * (10.0 + rho) / 3f64.sqrt();
+    assert!(
+        rel(measure::volume(&b), want) < 1e-7,
+        "{}",
+        measure::volume(&b)
+    );
+    let b = helix(&p, &frame, &about_z(8.0, -1.0), PI / 2.0, "coil").unwrap();
+    assert!(check::check(&b).is_empty());
+    let want = PI / 2.0 * PI * (10.0 - rho) / 3f64.sqrt();
+    assert!(
+        rel(measure::volume(&b), want) < 1e-7,
+        "{}",
+        measure::volume(&b)
+    );
+}
+
+// The triangle (5, 1, 1), (5, −1, −1), (3, 1, −1), area 2√3 on n = (1, 1, −1)/√3, its centroid
+// (13/3, 1/3, −1/3) crossing at (4 − ρ)/√3, screwed one and a half turns rising 5 a turn. Each
+// turn clears the last: the triangle is 2 high.
+#[test]
+fn an_oblique_triangle_screwed_one_and_a_half_turns_sweeps_its_area_times_its_crossing_rate() {
+    let rho = 5.0 / TAU;
+    let (a, b, c) = (
+        Vec3::new(5.0, 1.0, 1.0),
+        Vec3::new(5.0, -1.0, -1.0),
+        Vec3::new(3.0, 1.0, -1.0),
+    );
+    let frame = Frame::new(a, (b - a).cross(c - a), b - a).unwrap();
+    let local = |p: Vec3| {
+        let l = frame.to_local(p);
+        Vec2::new(l.x, l.y)
+    };
+    let p = Profile::polygon(&[local(a), local(b), local(c)], &["ab", "bc", "ca"]);
+    let s = helix(&p, &frame, &about_z(5.0, 1.0), 3.0 * PI, "tri").unwrap();
+    assert!(check::check(&s).is_empty());
+    let want = 3.0 * PI * 2.0 * (4.0 - rho);
+    assert!(
+        rel(measure::volume(&s), want) < 1e-7,
+        "{}",
+        measure::volume(&s)
+    );
+}
+
+// A disc of radius 2 square to the helix of its centre, 1.5 from the axis: the rate it crosses
+// its plane, |v| at the centre, falls by 1.5/|v| a millimetre toward the axis, so it is 0 on the
+// line |v|²/1.5 = (1.5² + ρ²)/1.5 ≈ 1.65 from the centre, inside the disc: the sweep folds.
+#[test]
+fn an_oblique_profile_the_motion_runs_along_is_refused() {
+    let screw = about_z(3.0, 1.0);
+    let c = Vec3::new(1.5, 0.0, 0.0);
+    let frame = Frame::from_axis(c, screw.d3(c, 0.0)[1]).unwrap();
+    let p = Profile::circle(Vec2::ZERO, 4.0);
+    let e = helix(&p, &frame, &screw, TAU, "tube");
+    assert!(matches!(e, Err(Error::InvalidInput(_))), "{e:?}");
+}
+
+// A disc 2 across, 10 out and nearly square to the helix of its centre, wound three turns: at a
+// 3 mm pitch each turn clears the last, and at 1.5 mm the next turn comes back across it.
+#[test]
+fn an_oblique_profile_its_next_turn_comes_back_across_is_refused() {
+    let p = Profile::circle(Vec2::ZERO, 2.0);
+    let c = Vec3::new(10.0, 0.0, 0.0);
+    let n = Vec3::new(0.0, 1.0, 0.05);
+    let frame = Frame::from_axis(c, n).unwrap();
+    let b = helix(&p, &frame, &about_z(3.0, 1.0), 3.0 * TAU, "coil").unwrap();
+    assert!(check::check(&b).is_empty());
+    let rate = (10.0 + 0.05 * 3.0 / TAU) / n.norm();
+    assert!(rel(measure::volume(&b), 3.0 * TAU * PI * rate) < 1e-7);
+    let e = helix(&p, &frame, &about_z(1.5, 1.0), 3.0 * TAU, "coil");
+    assert!(matches!(e, Err(Error::Unsupported(_))), "{e:?}");
+}
+
 /// A metric thread's ridge on its shank where it runs out, as a screw's: the shank a cylinder at
 /// the major radius, a cone down to the minor over the runout, the minor cylinder; the ridge the
 /// ISO basic profile (crest flat P/8 on the major radius, 60° flanks) reaching 0.1P below the

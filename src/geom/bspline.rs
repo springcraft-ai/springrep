@@ -649,14 +649,61 @@ impl BSpline {
         if n < 3 || knots.len() != n + 7 || ctrl[n..] != ctrl[..3] {
             return invalid("a periodic cubic needs n + 7 knots and its first three points again");
         }
+        BSpline::periodic(3, knots, ctrl)
+    }
+
+    /// The closed spline of `degree` (1 to 3) over `n` control points, its knots
+    /// `u₋ₚ … u_{n+p}` with `u_{i+n} = u_i + period`, `p` the degree, and its control points the
+    /// `n` with the first `p` repeated after them. It has no end: the curve is as smooth across
+    /// `u₀`, where its parameter wraps, as across any other knot of the same multiplicity.
+    pub fn periodic(degree: usize, knots: Vec<f64>, ctrl: Vec<Vec3>) -> Result<BSpline> {
+        let p = degree;
+        if p == 0 || p > MAX_DEGREE {
+            return invalid("B-spline degree must be 1 to 3");
+        }
+        let n = ctrl.len().saturating_sub(p);
+        if n <= p || knots.len() != n + 2 * p + 1 || ctrl[n..] != ctrl[..p] {
+            return invalid(
+                "a periodic spline of degree p needs more than p points, n + 2p + 1 knots and its \
+                 first p points again",
+            );
+        }
+        if knots.windows(2).any(|w| w[1] < w[0]) {
+            return invalid("B-spline knots must not decrease");
+        }
+        let period = knots[n + p] - knots[p];
+        let wraps = (0..=2 * p).all(|i| {
+            let step = knots[i + n] - knots[i];
+            (step - period).abs() <= 1e-9 * period
+        });
+        if !(period > 0.0 && wraps) {
+            return invalid("a periodic spline's knots must repeat a period apart");
+        }
         Ok(BSpline {
-            degree: 3,
+            degree: p,
             knots,
             ctrl,
             periodic: true,
             spans: SpanCache::default(),
             polys: PolyCache::default(),
         })
+    }
+
+    /// The closed uniform spline of `degree` (1 to 3) on the control polygon `points`, taken in
+    /// order and closing back on the first: one knot span to each point, `u_i = i`, so the
+    /// period is the number of points. A quadratic's span from `u = i` to `i + 1` runs from the
+    /// middle of the side from point `i` to point `i + 1` to the middle of the next side, tangent
+    /// to both.
+    pub fn periodic_uniform(degree: usize, points: &[Vec3]) -> Result<BSpline> {
+        let n = points.len();
+        if n <= degree {
+            return invalid("a periodic spline needs more points than its degree");
+        }
+        let knots = (0..=n + 2 * degree)
+            .map(|i| i as f64 - degree as f64)
+            .collect();
+        let ctrl = (0..n + degree).map(|i| points[i % n]).collect();
+        BSpline::periodic(degree, knots, ctrl)
     }
 }
 
@@ -716,6 +763,36 @@ fn extremes_on_piece(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_periodic_uniform_quadratic_rounds_its_polygon_from_side_middle_to_side_middle() {
+        let square = [
+            Vec3::new(10.0, 10.0, 0.0),
+            Vec3::new(-10.0, 10.0, 0.0),
+            Vec3::new(-10.0, -10.0, 0.0),
+            Vec3::new(10.0, -10.0, 0.0),
+        ];
+        let c = BSpline::periodic_uniform(2, &square).unwrap();
+        assert_eq!(c.domain(), (0.0, 4.0));
+        assert_eq!(c.period(), Some(4.0));
+        for i in 0..4 {
+            let (a, b, z) = (square[i], square[(i + 1) % 4], square[(i + 2) % 4]);
+            let t = i as f64;
+            // The span's ends are the sides' middles; its middle is (a + 6b + z)/8, the uniform
+            // quadratic's basis at its span's middle being 1/8, 6/8 and 1/8.
+            assert!(c.eval(t).dist((a + b) * 0.5) < 1e-12);
+            assert!(c.eval(t + 0.5).dist((a + b * 6.0 + z) / 8.0) < 1e-12);
+            // Tangent to the side at its middle, both sides of the knot, and across the wrap.
+            let [_, d, _] = c.eval_ders(t, 1);
+            assert!(d.cross(b - a).norm() < 1e-9 && d.dot(b - a) > 0.0);
+            let [_, before, _] = c.eval_ders(t - 1e-9 + if i == 0 { 4.0 } else { 0.0 }, 1);
+            assert!(before.dist(d) < 1e-6 * d.norm());
+        }
+        assert!(BSpline::periodic_uniform(2, &square[..2]).is_err());
+        let skewed = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.5, 6.0, 7.0, 8.0];
+        let ctrl: Vec<Vec3> = (0..6).map(|i| square[i % 4]).collect();
+        assert!(BSpline::periodic(2, skewed, ctrl).is_err());
+    }
 
     fn ellipse_points(n: usize) -> Vec<Vec3> {
         (0..n)

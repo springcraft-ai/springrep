@@ -9,22 +9,28 @@ use crate::{
     blend,
     blend::shaped::plane_of,
     boolean,
-    boolean::half_space,
     error::{Error, Result},
     geom::{Curve, Surface},
-    math::{Aabb, Frame, Point3, Vec2, Vec3},
-    measure,
-    pick::convex_edges,
+    math::{Frame, Point3, Vec2, Vec3},
+    pick::{concave_edges, convex_edges},
     profile::{NamedSegment, Profile, ProfileLoop, Segment},
-    sweep::{extrude, revolve},
+    sweep::revolve,
     tol,
     topo::{Brep, EdgeId, FaceId, FaceName},
 };
 
 mod affine;
+mod delete;
+pub(crate) mod near;
+mod parallel;
+mod parted;
+mod rounded;
 pub(crate) mod tweak;
 
 pub use affine::{Affine, affine};
+pub use delete::delete_faces;
+pub use parted::draft_parted;
+pub use rounded::shell_rounded;
 pub use tweak::{draft, move_faces, move_faces_by, offset_faces};
 
 fn named(segment: Segment, name: &str) -> NamedSegment {
@@ -52,31 +58,44 @@ pub fn shell(s: &Brep, open: &[FaceId], thickness: f64, wall: Wall, feature: &st
     }
     let inner = FaceName::new(feature, FaceName::INNER);
     // Every face moved `by` along its outward normal, the open ones `open_by`.
-    let moved = |by: f64, open_by: f64| {
+    // A wall that closes beside an edge turned the other way leaves no corner to meet sharp: the
+    // points within `thickness` of that edge would round it, which the moved faces cannot.
+    let moved = |by: f64, open_by: f64, turned: Vec<EdgeId>| {
         let by: HashMap<FaceId, f64> = s
             .face_ids()
             .map(|f| (f, if open.contains(&f) { open_by } else { by }))
             .filter(|&(_, d)| d != 0.0)
             .collect();
-        tweak::offset_faces(s, &by)
+        let (out, closed) = tweak::offset_faces_closing(s, &by)?;
+        closed_beside(
+            s,
+            &turned,
+            &closed,
+            "a shell whose walls close past an edge",
+        )?;
+        Ok::<_, Error>(out)
     };
+    // The open faces stay where they are: moved out, they would carry the cut past their plane
+    // into a wall that stands beside the opening. The cut lies on them there and leaves no skin.
     match wall {
         Wall::Inward => {
-            // The cavity runs out through the open faces, so the cut leaves no skin there.
-            let mut cavity = moved(-thickness, thickness)?;
-            for f in cavity.face_ids().collect::<Vec<_>>() {
-                cavity.set_face_names(f, std::iter::once(inner.clone()).collect());
-            }
-            boolean::difference(s, &cavity)
+            let sharp = || {
+                let mut cavity = moved(-thickness, 0.0, concave_edges(s)?)?;
+                for f in cavity.face_ids().collect::<Vec<_>>() {
+                    cavity.set_face_names(f, std::iter::once(inner.clone()).collect());
+                }
+                boolean::difference(s, &cavity)
+            };
+            sharp().or_else(|e| hollowed(s, open, thickness, feature).map_err(|_| e))
         }
         Wall::Outward => {
-            let mut outer = moved(thickness, 0.0)?;
+            let mut outer = moved(thickness, 0.0, convex_edges(s)?)?;
             for f in outer.face_ids().collect::<Vec<_>>() {
                 if !open.contains(&f) {
                     outer.set_face_names(f, Default::default());
                 }
             }
-            let mut cavity = moved(0.0, 2.0 * thickness)?;
+            let mut cavity = s.clone();
             for f in cavity.face_ids().collect::<Vec<_>>() {
                 let mut names = cavity.face(f).names.clone();
                 names.insert(inner.clone());
@@ -87,18 +106,139 @@ pub fn shell(s: &Brep, open: &[FaceId], thickness: f64, wall: Wall, feature: &st
     }
 }
 
+/// The two faces of edge `e`, where two use it.
+fn edge_faces(s: &Brep, e: EdgeId) -> Option<(FaceId, FaceId)> {
+    let uses: Vec<FaceId> = s
+        .coedge_ids()
+        .filter(|&c| s.coedge(c).edge == e)
+        .map(|c| s.coedge_face(c))
+        .collect();
+    match uses[..] {
+        [f, g] => Some((f, g)),
+        _ => None,
+    }
+}
+
+/// An inward shell of `s` built as `s` less its points farther than `t` from its faces other than
+/// `open` ([`rounded::near_inside`]), where the moved faces cannot be followed (walls that close
+/// beside a concave edge, or a bore's moved wall running into another). That is the sharp shell
+/// only where it rounds every concave edge, which it may only where a face beside the edge closes,
+/// and where each open face meets the walls at a right angle or less, so the walls' slabs reach it
+/// as the moved walls would; otherwise an error.
+fn hollowed(s: &Brep, open: &[FaceId], t: f64, feature: &str) -> Result<Brep> {
+    let refuse = || {
+        Err(Error::Unsupported(
+            "a shell whose moved walls cannot be followed, and whose wall is not the points near them"
+                .into(),
+        ))
+    };
+    let by: HashMap<FaceId, f64> = s
+        .face_ids()
+        .filter(|f| !open.contains(f))
+        .map(|f| (f, -t))
+        .collect();
+    let closed = tweak::offset_faces_closing(s, &by)
+        .map(|(_, closed)| closed)
+        .unwrap_or_default();
+    for &e in &concave_edges(s)? {
+        let Some((f, g)) = edge_faces(s, e) else {
+            return refuse();
+        };
+        if open.contains(&f) || open.contains(&g) || !(closed.contains(&f) || closed.contains(&g)) {
+            return refuse();
+        }
+    }
+    if rounded::square_openings(s, open).is_err() {
+        return refuse();
+    }
+    let mut cavity = rounded::near_inside(s, open, t, feature)?;
+    let inner = FaceName::new(feature, FaceName::INNER);
+    for f in cavity.face_ids().collect::<Vec<_>>() {
+        cavity.set_face_names(f, std::iter::once(inner.clone()).collect());
+    }
+    boolean::difference(s, &cavity)
+}
+
 /// The points within `distance` of `s`: every face moved out that far, a hole that closes on the
 /// way followed there, each convex edge rounded at `distance` (which leaves a ball's patch at each
-/// convex corner), and over each end of a hole that closed, the dimple its rim leaves.
+/// convex corner), and over each end of a hole that closed, the dimple its rim leaves. Where that
+/// cannot be built (a face beside a convex edge closes on the way, as the walls of a narrow slot,
+/// or a cone's apex is convex), the union of `s` with a slab for each face, a tube about each
+/// convex edge and a ball about each corner; an error where a piece of that is not built.
+///
+/// A negative `distance` shrinks `s`: the points of `s` at least `-distance` from its outside,
+/// each face moved in and each concave edge rounded, or where a face beside a concave edge closes
+/// on the way, `s` less a slab for each face, a tube about each concave edge and a ball about each
+/// concave corner. A solid the shrink splits keeps every piece.
 pub fn offset(s: &Brep, distance: f64, feature: &str) -> Result<Brep> {
     if distance == 0.0 {
         return Ok(s.clone());
     }
     if distance < 0.0 {
-        return Err(Error::Unsupported("an inward offset".into()));
+        return rounded::shrunk(s, -distance, feature);
+    }
+    moved_and_rounded(s, distance, feature).or_else(|e| grown(s, distance, feature).map_err(|_| e))
+}
+
+/// Whether face `f` is a cone whose apex is a convex point: its outward normal leans away from
+/// the axis, so the ball of a distance about the apex would cap the moved cone.
+fn convex_apex(s: &Brep, f: FaceId) -> bool {
+    let face = s.face(f);
+    let Surface::Cone(cone) = &face.surface else {
+        return false;
+    };
+    let dom = boolean::face_domain(s, f);
+    dom.interior_point().is_some_and(|uv| {
+        let p = face.surface.eval(uv.x, uv.y);
+        let n = face.surface.normal(uv.x, uv.y);
+        let off = p - cone.frame.origin;
+        let out = off - cone.frame.z * off.dot(cone.frame.z);
+        (n.dot(out) > 0.0) != face.reversed
+    })
+}
+
+/// `s` grown by `distance` as the union of `s` with the points near each face, each convex edge
+/// and each corner (Rossignac and Requicha 1986).
+fn grown(s: &Brep, distance: f64, feature: &str) -> Result<Brep> {
+    let edges = convex_edges(s)?;
+    let mut parts = vec![s.clone()];
+    for f in s.face_ids() {
+        parts.push(near::slab(s, f, distance, feature)?);
+    }
+    for &e in &edges {
+        parts.push(near::tube(s, e, distance, feature)?);
+    }
+    for v in near::corners(s, &edges, |f| convex_apex(s, f)) {
+        parts.push(near::ball(s.vertex(v).point, distance, feature)?);
+    }
+    let refs: Vec<&Brep> = parts.iter().collect();
+    boolean::union_all(&refs)
+}
+
+/// [`offset`] by moving the faces and rounding the convex edges.
+fn moved_and_rounded(s: &Brep, distance: f64, feature: &str) -> Result<Brep> {
+    let apex = s
+        .coedge_ids()
+        .any(|c| s.edge(s.coedge(c).edge).curve.is_none() && convex_apex(s, s.coedge_face(c)));
+    if apex {
+        return Err(Error::Unsupported(
+            "an offset of a cone's apex: the ball about it is not built".into(),
+        ));
     }
     let by: HashMap<FaceId, f64> = s.face_ids().map(|f| (f, distance)).collect();
-    let moved = tweak::offset_faces(s, &by)?;
+    let (moved, closed) = tweak::offset_faces_closing(s, &by)?;
+    // A hole's rim is rounded by the dimple below; any other convex edge beside a face that
+    // closed would leave its round missing.
+    let closed: Vec<FaceId> = closed
+        .into_iter()
+        .filter(|&f| hole_radius(s, f, distance).is_none())
+        .collect();
+    closed_beside(
+        s,
+        &convex_edges(s)?,
+        &closed,
+        "an offset whose faces close past a convex edge",
+    )?;
     let edges = convex_edges(&moved)?;
     let mut out = if edges.is_empty() {
         moved
@@ -106,14 +246,10 @@ pub fn offset(s: &Brep, distance: f64, feature: &str) -> Result<Brep> {
         blend::fillet_edges_mitred(&moved, &edges, distance, feature)?
     };
     for f in s.face_ids() {
-        let face = s.face(f);
-        let Surface::Cylinder(c) = &face.surface else {
+        let Some(radius) = hole_radius(s, f, distance) else {
             continue;
         };
-        if !face.reversed || c.radius >= distance {
-            continue;
-        }
-        for &lp in &face.loops {
+        for &lp in &s.face(f).loops {
             for &co in &s.lp(lp).coedges {
                 let e = s.coedge(co).edge;
                 let Some(Curve::Circle(rim)) = &s.edge(e).curve else {
@@ -130,12 +266,43 @@ pub fn offset(s: &Brep, distance: f64, feature: &str) -> Result<Brep> {
                 let (_, up) = plane_of(s, g)?;
                 out = boolean::difference(
                     &out,
-                    &dimple(rim.frame.origin, up, c.radius, distance, feature)?,
+                    &dimple(rim.frame.origin, up, radius, distance, feature)?,
                 )?;
             }
         }
     }
     Ok(out)
+}
+
+/// The radius of face `f` where it is a hole's cylindrical wall that an offset by `distance`
+/// closes: no wider than `distance`, or wider by under the tolerance, which closes onto its axis
+/// just as the move ends, its dimples coming down to a cusp there.
+fn hole_radius(s: &Brep, f: FaceId, distance: f64) -> Option<f64> {
+    let face = s.face(f);
+    match &face.surface {
+        Surface::Cylinder(c) if face.reversed && c.radius < distance + tol::LINEAR => {
+            Some(c.radius.min(distance))
+        }
+        _ => None,
+    }
+}
+
+/// An error naming `what` when a face of `closed` lies beside one of `edges`: the move followed
+/// past it took the edge away, with the round about it the distance from the edge would leave.
+fn closed_beside(s: &Brep, edges: &[EdgeId], closed: &[FaceId], what: &str) -> Result<()> {
+    if closed.is_empty() {
+        return Ok(());
+    }
+    let beside = s
+        .coedge_ids()
+        .filter(|&co| edges.contains(&s.coedge(co).edge))
+        .any(|co| closed.contains(&s.coedge_face(co)));
+    if beside {
+        return Err(Error::Unsupported(format!(
+            "{what}: a face beside it closes, and the round about the edge is not built"
+        )));
+    }
+    Ok(())
 }
 
 /// What the offset by `d` leaves open over a hole's rim of radius `r` about `o`, opening along
@@ -182,156 +349,10 @@ pub fn thicken(s: &Brep, faces: &[FaceId], thickness: f64) -> Result<Brep> {
     }
 }
 
-/// `s` with `faces` taken out and the gap they leave closed by their neighbours: the box round
-/// them, square to the neighbouring planes or a cylinder's axis, cut to the inside of every face
-/// across their edges, joined to the solid. The faces must be a recess, a hole, or a corner cut
-/// away; a plane or a cylinder bulging outward must bound it.
-pub fn delete_faces(s: &Brep, faces: &[FaceId]) -> Result<Brep> {
-    let mut near: Vec<FaceId> = Vec::new();
-    let mut rims: Vec<EdgeId> = Vec::new();
-    for &f in faces {
-        for &lp in &s.face(f).loops {
-            for &c in &s.lp(lp).coedges {
-                let e = s.coedge(c).edge;
-                rims.push(e);
-                for g in s
-                    .coedge_ids()
-                    .filter(|&o| s.coedge(o).edge == e)
-                    .map(|o| s.coedge_face(o))
-                {
-                    if !faces.contains(&g) && !near.contains(&g) {
-                        near.push(g);
-                    }
-                }
-            }
-        }
-    }
-    let axes: Vec<Vec3> = near
-        .iter()
-        .chain(faces)
-        .filter_map(|&f| match &s.face(f).surface {
-            Surface::Plane(pl) => Some(pl.frame.z),
-            Surface::Cylinder(c) => Some(c.frame.z),
-            _ => None,
-        })
-        .collect();
-    let z = axes.first().copied().unwrap_or(Vec3::Z);
-    let x = axes
-        .iter()
-        .copied()
-        .find(|a| a.cross(z).norm() > 1e-6)
-        .unwrap_or_else(|| z.any_perpendicular());
-    let axes = Frame::new(Point3::ZERO, z, x)?;
-    let mut bounds = Aabb::EMPTY;
-    for &e in &rims {
-        edge_bounds(s, e, &axes, &mut bounds);
-    }
-    let (lo, hi) = (bounds.min, bounds.max);
-    let size = hi - lo;
-    let frame = Frame::new(axes.to_world(lo), axes.z, axes.x)?;
-    let rect = Profile::rect(Vec2::new(size.x / 2.0, size.y / 2.0), size.x, size.y);
-    let mut fill = extrude(&rect, &frame, size.z, "fill")?;
-    for f in near {
-        let inside = match &s.face(f).surface {
-            Surface::Plane(_) => {
-                let (o, n) = plane_of(s, f)?;
-                half_space(s, o, -n)?
-            }
-            Surface::Cylinder(c) if !s.face(f).reversed => {
-                let b = measure::bbox(s);
-                let reach = b.diagonal() + b.center().dist(c.frame.origin) + 1.0;
-                let base = c.frame.origin - c.frame.z * reach;
-                let fr = Frame::new(base, c.frame.z, c.frame.x)?;
-                extrude(
-                    &Profile::circle(Vec2::ZERO, 2.0 * c.radius),
-                    &fr,
-                    2.0 * reach,
-                    "cyl",
-                )?
-            }
-            other => {
-                return Err(Error::Unsupported(format!(
-                    "closing a gap against a {} face",
-                    other.kind()
-                )));
-            }
-        };
-        fill = boolean::intersection(&fill, &inside)?;
-    }
-    boolean::union(s, &fill)
-}
-
-/// Grows `b`, in `axes`' coordinates, to hold edge `e`: its ends, and each place between them
-/// where its coordinate along an axis turns back, from the curve itself. Samples along the edge
-/// stop short of such a place by the sag of a chord, which a fill block sized by them then lacks.
-fn edge_bounds(s: &Brep, e: EdgeId, axes: &Frame, b: &mut Aabb) {
-    let edge = s.edge(e);
-    let Some(c) = &edge.curve else {
-        b.add(axes.to_local(s.vertex(edge.start).point));
-        return;
-    };
-    let (t0, t1) = (
-        edge.range.0.min(edge.range.1),
-        edge.range.0.max(edge.range.1),
-    );
-    let mut ts = vec![t0, t1];
-    for axis in [axes.x, axes.y, axes.z] {
-        ts.extend(c.extremes(axis, t0, t1));
-    }
-    for t in ts {
-        b.add(axes.to_local(c.eval(t)));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::topo::FaceName;
-
-    #[test]
-    fn an_arcs_reach_along_an_axis_is_its_own_extreme_not_its_nearest_sample() {
-        use crate::profile::{NamedSegment, ProfileLoop, Segment};
-        // A half disc of radius 10, extruded: its rim is a half circle. Along an axis that points
-        // midway between two of 256 even samples of the rim, the rim reaches the full radius.
-        let named = |segment: Segment, name: &str| NamedSegment::new(segment, name);
-        let half = Profile {
-            loops: vec![ProfileLoop {
-                segments: vec![
-                    named(
-                        Segment::Arc {
-                            center: Vec2::ZERO,
-                            radius: 10.0,
-                            start: 0.0,
-                            sweep: std::f64::consts::PI,
-                        },
-                        "rim",
-                    ),
-                    named(
-                        Segment::Line {
-                            a: Vec2::new(-10.0, 0.0),
-                            b: Vec2::new(10.0, 0.0),
-                        },
-                        "chord",
-                    ),
-                ],
-            }],
-        };
-        let b = extrude(&half, &Frame::WORLD, 3.0, "h").unwrap();
-        let rim = b
-            .edge_ids()
-            .find(|&e| {
-                let edge = b.edge(e);
-                matches!(edge.curve, Some(Curve::Circle(_)))
-                    && b.vertex(edge.start).point.z.abs() < 1e-9
-            })
-            .unwrap();
-        let towards = std::f64::consts::PI * 100.5 / 256.0;
-        let x = Vec3::new(towards.cos(), towards.sin(), 0.0);
-        let axes = Frame::new(Point3::ZERO, Vec3::Z, x).unwrap();
-        let mut bounds = Aabb::EMPTY;
-        edge_bounds(&b, rim, &axes, &mut bounds);
-        assert!((bounds.max.x - 10.0).abs() < 1e-9, "{}", bounds.max.x);
-    }
+    use crate::{boolean::half_space, measure, sweep::extrude};
 
     /// A prism on the polygon `pts`, `h` tall, its sides named `e0`, `e1`, … from the first edge.
     fn prism(pts: &[[f64; 2]], h: f64) -> Brep {
@@ -497,6 +518,70 @@ mod tests {
     }
 
     #[test]
+    fn a_shell_wall_closing_a_neck_rounds_the_mouths_about_its_corners() {
+        // A neck 2 wide between two squares, walled 1.5 thick from inside: the walls cross in the
+        // neck, which stays solid, and each pocket's mouth to it is bounded by arcs of radius 1.5
+        // about the neck's corners. A pocket is the square 7 × 7 and the bulge between x = 8.5 and
+        // the arcs about (10, 4) and (10, 6), which meet at (10 − √5/2, 5): β = 3 − √5/2 −
+        // (9/4)·asin(2/3). Both pockets run 4.5 deep in the plate of 208 × 6.
+        let dumbbell = prism(
+            &[
+                [0.0, 0.0],
+                [10.0, 0.0],
+                [10.0, 4.0],
+                [14.0, 4.0],
+                [14.0, 0.0],
+                [24.0, 0.0],
+                [24.0, 10.0],
+                [14.0, 10.0],
+                [14.0, 6.0],
+                [10.0, 6.0],
+                [10.0, 10.0],
+                [0.0, 10.0],
+            ],
+            6.0,
+        );
+        let top = FaceName::new("p", "end");
+        let top: Vec<FaceId> = dumbbell
+            .face_ids()
+            .filter(|&f| dumbbell.face(f).names.contains(&top))
+            .collect();
+        assert_eq!(top.len(), 1);
+        let shelled = shell(&dumbbell, &top, 1.5, Wall::Inward, "w").unwrap();
+        let beta = 3.0 - 5f64.sqrt() / 2.0 - 2.25 * (2.0f64 / 3.0).asin();
+        close(
+            measure::volume(&shelled),
+            208.0 * 6.0 - 4.5 * 2.0 * (49.0 + beta),
+        );
+        // A wall 0.5 thick leaves the neck open: the cavity is two squares 9 on a side and a
+        // channel 5 × 1 between them, 5.5 deep, in the plate of 208 × 6.
+        let shelled = shell(&dumbbell, &top, 0.5, Wall::Inward, "w").unwrap();
+        close(
+            measure::volume(&shelled),
+            208.0 * 6.0 - 5.5 * (2.0 * 81.0 + 5.0),
+        );
+    }
+
+    #[test]
+    fn a_bore_s_moved_wall_running_into_a_shell_s_wall_merges_with_it() {
+        // The block 20 × 20 × 10 bored through by a hole of radius 3 about (15.5, 10), walled 1
+        // thick from inside, open at its top. The bore's wall, moved to radius 4, reaches past the
+        // inside wall x = 19 by the segment of the disk of radius 4 at 3.5 from its centre,
+        // 16·acos(7/8) − 7√15/4; the cavity is the square 18 × 18 less the rest of that disk, 9
+        // deep.
+        let bore = Profile::named_circle(Vec2::new(15.5, 10.0), 6.0, "bore").loops;
+        let section = Profile::rect(Vec2::new(10.0, 10.0), 20.0, 20.0).with_holes(bore);
+        let block = extrude(&section, &Frame::WORLD, 10.0, "p").unwrap();
+        let top = face(&block, "end");
+        let shelled = shell(&block, &[top], 1.0, Wall::Inward, "w").unwrap();
+        let segment = 16.0 * (7.0f64 / 8.0).acos() - 7.0 * 15f64.sqrt() / 4.0;
+        close(
+            measure::volume(&shelled),
+            4000.0 - 90.0 * PI - 9.0 * (324.0 - 16.0 * PI + segment),
+        );
+    }
+
+    #[test]
     fn a_notch_s_faces_taken_out_leave_the_block_whole() {
         let b = prism(
             &[
@@ -515,6 +600,103 @@ mod tests {
         close(measure::volume(&delete_faces(&b, &notch).unwrap()), 24.0);
     }
 
+    fn feature_faces(b: &Brep, feature: &str) -> Vec<FaceId> {
+        b.face_ids()
+            .filter(|&f| b.face(f).names.iter().any(|n| n.feature == feature))
+            .collect()
+    }
+
+    /// `b` with the faces of `feature` deleted: its volume and area.
+    fn deleted(b: &Brep, feature: &str) -> (f64, f64) {
+        let out = delete_faces(b, &feature_faces(b, feature)).unwrap();
+        assert!(
+            crate::check::check(&out).is_empty(),
+            "{:?}",
+            crate::check::check(&out)
+        );
+        (measure::volume(&out), measure::area(&out))
+    }
+
+    #[test]
+    fn a_boss_and_a_concave_round_deleted_take_material_away() {
+        use crate::primitive::cylinder;
+        let at = |z: f64| Frame::new(Point3::new(0.0, 0.0, z), Vec3::Z, Vec3::X).unwrap();
+        // A plate of radius 8 and 4 thick with a boss of radius 3 and 8 tall standing on it.
+        let plate = cylinder(&at(-4.0), 8.0, 4.0, "plate").unwrap();
+        let boss = cylinder(&at(0.0), 3.0, 8.0, "boss").unwrap();
+        let solid = boolean::union(&plate, &boss).unwrap();
+        let (v, a) = deleted(&solid, "boss");
+        close(v, 256.0 * PI);
+        close(a, 192.0 * PI);
+        // An L of outline area 150 and perimeter 70, 8 tall, its inside corner rounded 2.
+        let pts = [
+            [0.0, 0.0],
+            [20.0, 0.0],
+            [20.0, 5.0],
+            [5.0, 5.0],
+            [5.0, 15.0],
+            [0.0, 15.0],
+        ];
+        let l = prism(&pts, 8.0);
+        let rounded = blend::fillet(&l, &[("p.e2", "p.e3")], 2.0, "round").unwrap();
+        let (v, a) = deleted(&rounded, "round");
+        close(v, 150.0 * 8.0);
+        close(a, 2.0 * 150.0 + 70.0 * 8.0);
+    }
+
+    #[test]
+    fn deleted_flats_close_where_the_surfaces_round_them_bulge_past_their_edges() {
+        use crate::primitive::{cone, cylinder, sphere};
+        // A shaft of radius 5 and 20 long with |x| > 4 milled away: whole again, 500π.
+        let shaft = cylinder(&Frame::WORLD, 5.0, 20.0, "shaft").unwrap();
+        let right = half_space(&shaft, Point3::new(4.0, 0.0, 0.0), Vec3::X).unwrap();
+        let left = half_space(&shaft, Point3::new(-4.0, 0.0, 0.0), -Vec3::X).unwrap();
+        let milled = boolean::difference_all(&shaft, &[&right, &left]).unwrap();
+        let (v, a) = deleted(&milled, "half");
+        close(v, 500.0 * PI);
+        close(a, 250.0 * PI);
+        // A ball of radius 5 cut flat at z = 3: its flat's edge lies in its own plane.
+        let ball = sphere(&Frame::WORLD, 5.0, "ball").unwrap();
+        let above = half_space(&ball, Point3::new(0.0, 0.0, 3.0), Vec3::Z).unwrap();
+        let (v, a) = deleted(&boolean::difference(&ball, &above).unwrap(), "half");
+        close(v, 500.0 * PI / 3.0);
+        close(a, 100.0 * PI);
+        // A frustum of radii 6 and 3, 6 tall, its top rim rounded 1: (π·6/3)(6² + 6·3 + 3²).
+        let frustum = cone(&Frame::WORLD, 6.0, 3.0, 6.0, "f").unwrap();
+        let rounded = blend::fillet(&frustum, &[("f.top", "f.side")], 1.0, "round").unwrap();
+        let (v, a) = deleted(&rounded, "round");
+        close(v, 126.0 * PI);
+        close(a, 45.0 * PI + 9.0 * PI * 45f64.sqrt());
+        // A cone of radius 6 up to its apex 8 above, its foot rounded 1: the cone again, its first
+        // vertex the apex, where the side's normal says nothing of which side its material is.
+        // Volume π·6²·8/3; area the base 36π and the side π·6·10.
+        let point = cone(&Frame::WORLD, 6.0, 0.0, 8.0, "c").unwrap();
+        let rounded = blend::fillet(&point, &[("c.bottom", "c.side")], 1.0, "round").unwrap();
+        let (v, a) = deleted(&rounded, "round");
+        close(v, 96.0 * PI);
+        close(a, 96.0 * PI);
+    }
+
+    #[test]
+    fn a_rounded_box_s_top_rim_deleted_runs_its_corner_cylinders_up_only() {
+        // The box 20 × 12 × 8, its upright edges rounded 3, then its top rim rounded 1. Deleted,
+        // the rim leaves the box with its outline a rectangle with quarter circles of radius 3 at
+        // its corners: area 20·12 − (4 − π)·3², perimeter 2(14 + 6) + 2π·3.
+        let body = crate::primitive::block(&Frame::WORLD, Vec3::new(20.0, 12.0, 8.0), "b");
+        let uprights = [
+            ("b.u_min", "b.v_min"),
+            ("b.v_min", "b.u_max"),
+            ("b.u_max", "b.v_max"),
+            ("b.v_max", "b.u_min"),
+        ];
+        let walls = blend::fillet(&body.unwrap(), &uprights, 3.0, "corner").unwrap();
+        let rounded = blend::fillet(&walls, &[("b.end", "b.v_min")], 1.0, "rim").unwrap();
+        let outline = 240.0 - (4.0 - PI) * 9.0;
+        let (v, a) = deleted(&rounded, "rim");
+        close(v, 8.0 * outline);
+        close(a, 2.0 * outline + 8.0 * (40.0 + 6.0 * PI));
+    }
+
     #[test]
     fn a_face_thickened_is_a_slab_on_it() {
         // The 4 × 2 side of a 4 × 3 × 2 block thickened 0.5 outward, then 1 inward.
@@ -522,5 +704,242 @@ mod tests {
         let side = face(&b, "e0");
         close(measure::volume(&thicken(&b, &[side], 0.5).unwrap()), 4.0);
         close(measure::volume(&thicken(&b, &[side], -1.0).unwrap()), 8.0);
+    }
+
+    #[test]
+    fn a_dome_thickened_in_by_its_radius_is_the_half_ball() {
+        // The half ball of radius 5: its dome moved 5 in closes on the centre, and the solid
+        // between them is the half ball itself, 250π/3.
+        let meridian = Profile::outline(vec![
+            NamedSegment::line(Vec2::new(0.0, 0.0), Vec2::new(5.0, 0.0), "base"),
+            NamedSegment::arc(Vec2::ZERO, 5.0, 0.0, PI / 2.0, "sheet"),
+            NamedSegment::line(Vec2::new(0.0, 5.0), Vec2::new(0.0, 0.0), "axis"),
+        ]);
+        let plane = Frame::new(Point3::ZERO, -Vec3::Y, Vec3::X).unwrap();
+        let h = revolve(&meridian, &plane, Point3::ZERO, Vec3::Z, TAU, "p").unwrap();
+        let out = thicken(&h, &[face(&h, "sheet")], -5.0).unwrap();
+        close(measure::volume(&out), 250.0 * PI / 3.0);
+    }
+
+    #[test]
+    fn a_cone_grown_caps_its_apex_with_a_ball() {
+        // The cone of base radius R = 3 and height H = 4 grown by d = 1, by Steiner's formula:
+        // its integrated mean curvature is the side's πH and the base rim's torus turning through
+        // π − β, β = atan(H/R) the angle inside the cone at the rim; the apex is a ball's cap.
+        let c = crate::primitive::cone(&Frame::WORLD, 3.0, 0.0, 4.0, "c").unwrap();
+        let out = offset(&c, 1.0, "o").unwrap();
+        let (r, h, l, d) = (3.0f64, 4.0f64, 5.0, 1.0f64);
+        let m = PI * (h + r * (PI - (h / r).atan()));
+        let s = PI * (r * r + r * l);
+        let v = PI * r * r * h / 3.0;
+        close(
+            measure::volume(&out),
+            v + s * d + m * d * d + 4.0 / 3.0 * PI * d.powi(3),
+        );
+        close(measure::area(&out), s + 2.0 * m * d + 4.0 * PI * d * d);
+    }
+
+    /// The solid turned a whole turn about z from the polygon `pts` in (ρ, z).
+    fn turned_polygon(pts: &[[f64; 2]]) -> Brep {
+        let pts: Vec<Vec2> = pts.iter().map(|p| Vec2::new(p[0], p[1])).collect();
+        let names: Vec<String> = (0..pts.len()).map(|i| format!("m{i}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let plane = Frame::new(Point3::ZERO, -Vec3::Y, Vec3::X).unwrap();
+        let profile = Profile::polygon(&pts, &names);
+        revolve(&profile, &plane, Point3::ZERO, Vec3::Z, TAU, "p").unwrap()
+    }
+
+    #[test]
+    fn a_groove_grown_shut_leaves_the_notch_its_rims_round() {
+        // A drum of radius 10 and height 10 with a groove 1.6 wide and 3 deep about z = 5, grown
+        // by 1: the groove's walls cross, and its rims' tori meet in a crease at ρ = 10.6. By
+        // Pappus, 2π times the section's moment about the axis: the drum with no groove grown
+        // (the rectangle 10 × 12, the strip 1 × 10 beside it and the rims' quarter disks), less the notch
+        // between the rims' disks over z = 5 ± a, a = 0.8, of moment 20a − 10(a√(1 − a²) +
+        // asin a) + a³/3 a side; and 2π times the moment of the outline for the area.
+        let drum = turned_polygon(&[
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0, 4.2],
+            [7.0, 4.2],
+            [7.0, 5.8],
+            [10.0, 5.8],
+            [10.0, 10.0],
+            [0.0, 10.0],
+        ]);
+        let out = offset(&drum, 1.0, "o").unwrap();
+        let a: f64 = 0.8;
+        let whole = 705.0 + 5.0 * PI + 2.0 / 3.0;
+        let notch = 20.0 * a - 10.0 * (a * (1.0 - a * a).sqrt() + a.asin()) + a.powi(3) / 3.0;
+        close(measure::volume(&out), TAU * (whole - notch));
+        let outline = 100.0 + 2.0 * (5.0 * PI + 1.0) + 11.0 * (10.0 - 2.0 * a);
+        close(
+            measure::area(&out),
+            TAU * (outline + 2.0 * (10.0 * a.asin() + a)),
+        );
+    }
+
+    #[test]
+    fn a_torus_grown_past_its_hole_is_an_apple() {
+        // The tube of radius 2 about the circle of radius R = 4 grown by 3: every point within
+        // s = 5 of the circle. Its section is the disk of radius s about (R, 0) less the part past
+        // the axis, which it crosses at heights ±c, c = √(s² − R²), at the half angle
+        // φ = acos(R/s) from the disk's centre.
+        let t = crate::primitive::torus(&Frame::WORLD, 4.0, 2.0, "t").unwrap();
+        let out = offset(&t, 3.0, "o").unwrap();
+        let (r, s) = (4.0f64, 5.0f64);
+        let c = (s * s - r * r).sqrt();
+        let phi = (r / s).acos();
+        close(
+            measure::volume(&out),
+            TAU * (PI * r * s * s + 2.0 * c.powi(3) / 3.0 - r * (s * s * phi - r * c)),
+        );
+        close(
+            measure::area(&out),
+            TAU * (2.0 * r * s * (PI - phi) + 2.0 * s * c),
+        );
+    }
+
+    #[test]
+    fn a_cylinder_cut_aslant_grown_past_its_ellipse_s_bend_holds_steiner_s_formula() {
+        // The cylinder of radius 3 from z = −10 up to the plane z = x·tan 45°, grown by 4: more
+        // than the cut ellipse's least radius of curvature, 9/(3√2). The body is convex, so by
+        // Steiner's formula its volume is V + S·d + M·d² + 4πd³/3: V = 90π, S = 69π + 9π√2, and
+        // M the side's 10π, the bottom rim's 3π²/2 and half of J, the ellipse's turning angle
+        // between its faces' normals, acos(−sin α cos φ), integrated along its length element
+        // 3√(1 + tan²α sin²φ) dφ.
+        let a = PI / 4.0;
+        let c =
+            crate::primitive::cylinder(&Frame::WORLD.translated(-Vec3::Z * 10.0), 3.0, 20.0, "c")
+                .unwrap();
+        let above = half_space(&c, Point3::ZERO, Vec3::new(-a.sin(), 0.0, a.cos())).unwrap();
+        let cut = boolean::difference(&c, &above).unwrap();
+        let d = 4.0;
+        let out = offset(&cut, d, "o").unwrap();
+        let mut turn =
+            |p: f64| (-a.sin() * p.cos()).acos() * 3.0 * (1.0 + (a.tan() * p.sin()).powi(2)).sqrt();
+        let j = crate::numeric::integrate(&mut turn, 0.0, TAU, 1e-13);
+        let m = 10.0 * PI + 1.5 * PI * PI + 0.5 * j;
+        let s = 69.0 * PI + 9.0 * PI / a.cos();
+        close(
+            measure::volume(&out),
+            90.0 * PI + s * d + m * d * d + 4.0 / 3.0 * PI * d.powi(3),
+        );
+        close(measure::area(&out), s + 2.0 * m * d + 4.0 * PI * d * d);
+    }
+
+    #[test]
+    fn an_elliptic_cylinder_of_two_halves_grown_rounds_both_rims_whole() {
+        // The ellipse of semi-axes 5 and 3 drawn as two half ellipses, extruded 10 and made one
+        // face round, grown by 1: each rim's chain is the two halves, its contact on the side
+        // starting where the side's loop meets it. By Steiner's formula, with p the ellipse's
+        // perimeter: V + S·d + M·d² + 4πd³/3, V = πabh, S = 2πab + ph, M = πh + πp/2.
+        let half = |start: f64| {
+            let arc = Segment::Ellipse {
+                center: Vec2::ZERO,
+                rotation: 0.0,
+                major: 5.0,
+                minor: 3.0,
+                start,
+                sweep: PI,
+            };
+            NamedSegment::new(arc, "side")
+        };
+        let base = Profile::outline(vec![half(0.0), half(PI)]);
+        let halves = extrude(&base, &Frame::WORLD, 10.0, "p").unwrap();
+        let body = boolean::unify(&halves).unwrap();
+        let out = offset(&body, 1.0, "o").unwrap();
+        let (a, b, h, d) = (5.0f64, 3.0f64, 10.0, 1.0);
+        let mut speed = |t: f64| (a * a * t.sin().powi(2) + b * b * t.cos().powi(2)).sqrt();
+        let p = crate::numeric::integrate(&mut speed, 0.0, TAU, 1e-13);
+        let (s, m) = (2.0 * PI * a * b + p * h, PI * h + PI * p / 2.0);
+        close(
+            measure::volume(&out),
+            PI * a * b * h + s * d + m * d * d + 4.0 / 3.0 * PI * d.powi(3),
+        );
+        close(measure::area(&out), s + 2.0 * m * d + 4.0 * PI * d * d);
+    }
+
+    #[test]
+    fn an_elliptic_cylinder_shrunk_past_its_curvature_keeps_its_parallel_trimmed() {
+        // The ellipse of semi-axes 5 and 3 extruded 10, shrunk by 2.5 as the cylinder less its
+        // complement grown by 2.5. The ellipse's least radius of curvature is 9/5, so its parallel
+        // 2.5 in loops past both ends of the long axis; the section left is bounded by the
+        // parallel's arcs between where they cross that axis, and its area is ½∮(x dy − y dx)
+        // along them, with o′ = e′·(1 − d·κ) and κ = ab/|e′|³.
+        let (a, b, d) = (5.0f64, 3.0f64, 2.5f64);
+        let half = |start: f64| {
+            let arc = Segment::Ellipse {
+                center: Vec2::ZERO,
+                rotation: 0.0,
+                major: a,
+                minor: b,
+                start,
+                sweep: PI,
+            };
+            NamedSegment::new(arc, "side")
+        };
+        let base = Profile::outline(vec![half(0.0), half(PI)]);
+        let body = boolean::unify(&extrude(&base, &Frame::WORLD, 10.0, "p").unwrap()).unwrap();
+        let room = crate::primitive::block(
+            &Frame::WORLD.translated(Vec3::new(-10.0, -10.0, -5.0)),
+            Vec3::new(20.0, 20.0, 20.0),
+            "room",
+        )
+        .unwrap();
+        let outside = boolean::difference(&room, &body).unwrap();
+        let near = offset(&outside, d, "o").unwrap();
+        let out = boolean::difference(&body, &near).unwrap();
+        let o = |t: f64| {
+            let n = Vec2::new(b * t.cos(), a * t.sin());
+            let e1 = Vec2::new(-a * t.sin(), b * t.cos());
+            let k = a * b / e1.norm().powi(3);
+            let p = Vec2::new(a * t.cos(), b * t.sin()) - n * (d / n.norm());
+            (p, e1 * (1.0 - d * k))
+        };
+        let (mut lo, mut hi) = (1e-9, 0.5 * PI);
+        for _ in 0..200 {
+            let m = 0.5 * (lo + hi);
+            if o(m).0.y < 0.0 {
+                lo = m;
+            } else {
+                hi = m;
+            }
+        }
+        let mut green = |t: f64| {
+            let (p, dp) = o(t);
+            p.cross(dp)
+        };
+        let area = crate::numeric::integrate(&mut green, lo, PI - lo, 1e-13);
+        close(measure::volume(&out), area * 5.0);
+    }
+
+    #[test]
+    fn a_plate_grown_by_its_hole_s_radius_fills_the_hole_and_dimples_to_a_cusp() {
+        // A plate a × b × c with a hole of radius ρ = d through it, grown by d: the box grown by
+        // Steiner's formula, V₀ = abc + 2(ab + bc + ca)d + π(a + b + c)d² + 4πd³/3, with the hole
+        // filled, less over each end of it the dimple inside the horn torus of radius d about the
+        // rim: in the meridian, under z = d and above the quarter circle of radius d about (d, 0),
+        // of volume 2π∫₀^d ρ(d − √(d² − (d − ρ)²)) dρ = 2πd³(5/6 − π/4). Its area: the box's grown,
+        // A₀ = 2(ab + bc + ca) + 2π(a + b + c)d + 4πd², less the disk πd² over each end and plus
+        // the torus inside the rim, 2π∫ρ ds = 2πd²(π/2 − 1).
+        for (a, b, c, d) in [(20.0, 20.0, 4.0, 3.0), (30.0, 24.0, 2.0, 10.0)] {
+            let plate =
+                crate::primitive::block(&Frame::WORLD, Vec3::new(a, b, c), "plate").unwrap();
+            let at = Frame::WORLD.translated(Vec3::new(a / 2.0, b / 2.0, -1.0));
+            let drill = crate::primitive::cylinder(&at, d, c + 2.0, "hole").unwrap();
+            let s = boolean::difference(&plate, &drill).unwrap();
+            let out = offset(&s, d, "o").unwrap();
+            assert!(crate::check::check(&out).is_empty());
+            let v0 = a * b * c
+                + 2.0 * (a * b + b * c + c * a) * d
+                + PI * (a + b + c) * d * d
+                + 4.0 / 3.0 * PI * d.powi(3);
+            let a0 = 2.0 * (a * b + b * c + c * a) + 2.0 * PI * (a + b + c) * d + 4.0 * PI * d * d;
+            let dimple = TAU * d.powi(3) * (5.0 / 6.0 - PI / 4.0);
+            close(measure::volume(&out), v0 - 2.0 * dimple);
+            let rim = TAU * d * d * (PI / 2.0 - 1.0) - PI * d * d;
+            close(measure::area(&out), a0 + 2.0 * rim);
+        }
     }
 }

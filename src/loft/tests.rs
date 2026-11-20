@@ -1,7 +1,7 @@
 use std::f64::consts::PI;
 
 use super::*;
-use crate::{measure, profile::PointsInterp};
+use crate::{geom::NurbsCurve, measure, profile::PointsInterp};
 
 fn at_z(z: f64) -> Frame {
     Frame::WORLD.translated(Vec3::Z * z)
@@ -294,4 +294,375 @@ fn projection_finds_the_nearest_point_on_a_side_wound_past_a_turn() {
     // One span along the sections wound 6.6 rad: the root is about 110 mm long, so seeds a few
     // millimetres apart along it miss its basin.
     assert_projects_nearest(&tooth_space(0.6, 11.0), 1e-3, 4, 24);
+}
+
+// The quarter circle of radius 1 as a rational quadratic: a rail cut from it runs on the circle.
+#[test]
+fn a_rail_cut_from_a_rational_spline_stays_on_it() {
+    let w = std::f64::consts::FRAC_1_SQRT_2;
+    let quarter = NurbsCurve::new(
+        2,
+        vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        vec![Vec3::X, Vec3::new(1.0, 1.0, 0.0), Vec3::Y],
+        Some(vec![1.0, w, 1.0]),
+    )
+    .unwrap();
+    let curve = Curve::Nurbs(Box::new(quarter));
+    let r = Rail::of_curve(&curve, 0.75, 0.25).unwrap();
+    assert!(r.start().dist(curve.eval(0.75)) < 1e-12);
+    assert!(r.end().dist(curve.eval(0.25)) < 1e-12);
+    for k in 0..=10 {
+        let s = f64::from(k) / 10.0;
+        let mut h = [0.0; 4];
+        for (b, p) in rail::basis(r.degree, &r.knots, s).iter().zip(&r.pw) {
+            for i in 0..4 {
+                h[i] += b * p[i];
+            }
+        }
+        assert!((point(h).norm() - 1.0).abs() < 1e-12, "{s}");
+    }
+}
+
+fn hollow_square(outside: f64, hole: f64) -> Profile {
+    let hole = Profile::rect(Vec2::ZERO, hole, hole).loops.remove(0);
+    Profile::rect(Vec2::ZERO, outside, outside).with_holes([hole])
+}
+
+// A tube tapering from 24 square with a 20 square hole to 12 with an 8 hole over 40: the outside
+// frustum less the hole's, each h/3 · (A₀ + A₁ + √(A₀A₁)).
+#[test]
+fn a_hole_is_lofted_with_its_match() {
+    let b = loft(
+        &[
+            sec(hollow_square(24.0, 20.0), at_z(0.0)),
+            sec(hollow_square(12.0, 8.0), at_z(40.0)),
+        ],
+        true,
+        "tube",
+    )
+    .unwrap();
+    assert_eq!(b.face_count(), 10);
+    let frustum = |a: f64, c: f64| 40.0 / 3.0 * (a * a + c * c + a * c);
+    let want = frustum(24.0, 12.0) - frustum(20.0, 8.0);
+    assert!(rel(volume(&b), want) < 1e-12, "{}", volume(&b));
+    let caps = 24.0 * 24.0 - 400.0 + 144.0 - 64.0;
+    let walls = 4.0 * (18.0 + 14.0) * (40f64 * 40.0 + 36.0).sqrt();
+    assert!(rel(measure::area(&b), caps + walls) < 1e-12);
+}
+
+#[test]
+fn sections_with_unequal_holes_are_refused() {
+    let sections = [
+        sec(hollow_square(24.0, 20.0), at_z(0.0)),
+        sec(Profile::rect(Vec2::ZERO, 12.0, 12.0), at_z(40.0)),
+    ];
+    assert!(loft(&sections, true, "tube").is_err());
+}
+
+// A square to a point straight above its centre is a pyramid of four flat triangles, A·h/3; a
+// circle to a point off its axis an oblique cone, its volume the same by Cavalieri.
+#[test]
+fn a_loft_to_a_point_closes_in_a_pyramid_or_a_cone() {
+    let square = [sec(Profile::rect(Vec2::ZERO, 10.0, 10.0), at_z(0.0))];
+    let b = loft_to_point(&square, Vec3::new(0.0, 0.0, 6.0), true, "py").unwrap();
+    assert_eq!(b.face_count(), 5);
+    assert!(b.face_ids().all(|f| b.face(f).surface.kind() == "plane"));
+    assert!(rel(volume(&b), 200.0) < 1e-12, "{}", volume(&b));
+    let slant = (25.0f64 + 36.0).sqrt();
+    assert!(rel(measure::area(&b), 100.0 + 2.0 * 10.0 * slant) < 1e-12);
+
+    let circle = [sec(Profile::circle(Vec2::ZERO, 10.0), at_z(0.0))];
+    let b = loft_to_point(&circle, Vec3::new(3.0, 1.0, 6.0), true, "cone").unwrap();
+    assert_eq!(b.face_count(), 2);
+    let want = PI * 25.0 * 6.0 / 3.0;
+    assert!(rel(volume(&b), want) < 1e-9, "{}", volume(&b));
+}
+
+// Two squares and an apex, smooth: the sides pass through every section and close in a point.
+#[test]
+fn a_smooth_loft_runs_through_its_sections_to_the_apex() {
+    let sections = [
+        sec(Profile::rect(Vec2::ZERO, 10.0, 10.0), at_z(0.0)),
+        sec(Profile::rect(Vec2::ZERO, 12.0, 12.0), at_z(4.0)),
+    ];
+    let b = loft_to_point(&sections, Vec3::new(0.0, 0.0, 10.0), false, "sp").unwrap();
+    assert_eq!(b.face_count(), 5);
+    let bb = measure::bbox(&b);
+    assert!(
+        bb.max.x >= 6.0 - 1e-9 && (bb.max.z - 10.0).abs() < 1e-9,
+        "{bb:?}"
+    );
+}
+
+// A square 40 at z = 0 to the 28 square with its corners cut to 8√2 sides at z = 30: each side of
+// the square to the side parallel to it (a trapezoid), each corner to the cut side facing it (a
+// triangle). The level section at t = z/30 is the Minkowski mix (1 − t)S + tO, of area
+// (1 − t)²|S| + 2t(1 − t)M + t²|O|, M = ½Σ h_S(n)·ℓ_O(n) the mixed area, so the volume is
+// 30(|S| + M + |O|)/3.
+#[test]
+fn a_developable_loft_pairs_a_corner_with_a_side() {
+    let o: Vec<Vec2> = [
+        (6.0, -14.0),
+        (14.0, -6.0),
+        (14.0, 6.0),
+        (6.0, 14.0),
+        (-6.0, 14.0),
+        (-14.0, 6.0),
+        (-14.0, -6.0),
+        (-6.0, -14.0),
+    ]
+    .iter()
+    .map(|&(x, y)| Vec2::new(x, y))
+    .collect();
+    let b = loft_developable(
+        &[
+            sec(Profile::rect(Vec2::ZERO, 40.0, 40.0), at_z(0.0)),
+            sec(Profile::polygon(&o, &["o"]), at_z(30.0)),
+        ],
+        "hood",
+    )
+    .unwrap();
+    assert_eq!(b.face_count(), 10);
+    assert!(b.face_ids().all(|f| b.face(f).surface.kind() == "plane"));
+    let (s, oct) = (1600.0, 28.0 * 28.0 - 4.0 * 32.0);
+    let mixed = 0.5 * (4.0 * 20.0 * 12.0 + 4.0 * 20.0 * 2f64.sqrt() * 8.0 * 2f64.sqrt());
+    let want = 30.0 * (s + mixed + oct) / 3.0;
+    assert!(rel(volume(&b), want) < 1e-12, "{}", volume(&b));
+    let trapezoids = 4.0 * 0.5 * (40.0 + 12.0) * (36.0f64 + 900.0).sqrt();
+    let triangles = 4.0 * 0.5 * 8.0 * 2f64.sqrt() * 1100f64.sqrt();
+    let area = s + oct + trapezoids + triangles;
+    assert!(
+        rel(measure::area(&b), area) < 1e-12,
+        "{}",
+        measure::area(&b)
+    );
+}
+
+// A square 40 at z = 0 to a circle of radius 15 at z = 30: each side to the circle's nearest
+// point (a triangle), each corner to the quarter circle between (an oblique cone). The section at
+// t is (1 − t)S + tD, of area (1 − t)²·1600 + t(1 − t)·160·15 + t²·225π.
+#[test]
+fn a_developable_loft_pairs_a_corner_with_an_arc() {
+    let b = loft_developable(
+        &[
+            sec(Profile::rect(Vec2::ZERO, 40.0, 40.0), at_z(0.0)),
+            sec(Profile::circle(Vec2::ZERO, 30.0), at_z(30.0)),
+        ],
+        "sq",
+    )
+    .unwrap();
+    assert_eq!(b.face_count(), 10);
+    let planes = b
+        .face_ids()
+        .filter(|&f| b.face(f).surface.kind() == "plane")
+        .count();
+    assert_eq!(planes, 6);
+    let want = 30.0 * (1600.0 / 3.0 + 160.0 * 15.0 / 6.0 + 225.0 * PI / 3.0);
+    assert!(rel(volume(&b), want) < 1e-9, "{}", volume(&b));
+}
+
+#[test]
+fn a_developable_loft_refuses_a_section_that_is_not_convex() {
+    let l: Vec<Vec2> = [
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (10.0, 5.0),
+        (5.0, 5.0),
+        (5.0, 10.0),
+        (0.0, 10.0),
+    ]
+    .iter()
+    .map(|&(x, y)| Vec2::new(x, y))
+    .collect();
+    let sections = [
+        sec(Profile::polygon(&l, &["l"]), at_z(0.0)),
+        sec(Profile::rect(Vec2::new(5.0, 5.0), 10.0, 10.0), at_z(10.0)),
+    ];
+    assert!(loft_developable(&sections, "l").is_err());
+}
+
+/// The cubic Bézier through `ctrl` and its mirror images in the xz plane, the yz plane and both,
+/// as guides over `[0, 1]`.
+fn mirrored_guides(ctrl: [[f64; 3]; 4]) -> Vec<Guide> {
+    [(1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)]
+        .iter()
+        .map(|&(sx, sy)| {
+            let pts = ctrl
+                .iter()
+                .map(|c| Vec3::new(sx * c[0], sy * c[1], c[2]))
+                .collect();
+            let knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+            Guide {
+                curve: Curve::Nurbs(Box::new(NurbsCurve::new(3, knots, pts, None).unwrap())),
+                range: (0.0, 1.0),
+            }
+        })
+        .collect()
+}
+
+// Rectangles centred on z, their corners on four mirrored cubic guides (p, q, z)(t): the volume is
+// ∫ 4pq dz over t, a polynomial, 426312/175; each wall is the guide's plane curve carried across,
+// its area ∫ 2q·|(p′, z′)| dt, and these guides are Pythagorean-hodograph cubics,
+// |(p′, z′)| = |(q′, z′)| = 3(9 + (1 − 3t)²), so the walls are ∫ 4(p + q)·3(9 + (1 − 3t)²) dt with
+// p + q = 15.2: 4·15.2·30.
+#[test]
+fn a_loft_along_guides_follows_them_between_its_sections() {
+    let b = loft_guided(
+        &[
+            sec(Profile::rect(Vec2::ZERO, 24.0, 6.4), at_z(0.0)),
+            sec(Profile::rect(Vec2::ZERO, 6.0, 24.4), at_z(24.0)),
+        ],
+        &mirrored_guides([
+            [12.0, 3.2, 0.0],
+            [18.0, -2.8, 8.0],
+            [15.0, 0.2, 19.0],
+            [3.0, 12.2, 24.0],
+        ]),
+        None,
+        "slab",
+    )
+    .unwrap();
+    assert_eq!(b.face_count(), 6);
+    assert!(rel(volume(&b), 426312.0 / 175.0) < 1e-9, "{}", volume(&b));
+    let area = 24.0 * 6.4 + 6.0 * 24.4 + 4.0 * 15.2 * 30.0;
+    assert!(rel(measure::area(&b), area) < 1e-9, "{}", measure::area(&b));
+}
+
+// A square at z = 0 closing to a point at (0, 0, 24) along four ridges (g, g, z)(t): the volume is
+// ∫ 4g² dz = 329832/35, and the walls' area ∫ 8g·3(9 + (1 − 3t)²) dt = 10368/5.
+#[test]
+fn a_loft_along_guides_closes_at_its_apex() {
+    let b = loft_guided(
+        &[sec(Profile::rect(Vec2::ZERO, 18.0, 18.0), at_z(0.0))],
+        &mirrored_guides([
+            [9.0, 9.0, 0.0],
+            [15.0, 15.0, 8.0],
+            [12.0, 12.0, 19.0],
+            [0.0, 0.0, 24.0],
+        ]),
+        Some(Vec3::new(0.0, 0.0, 24.0)),
+        "spire",
+    )
+    .unwrap();
+    assert_eq!(b.face_count(), 5);
+    assert!(rel(volume(&b), 329832.0 / 35.0) < 1e-9, "{}", volume(&b));
+    let area = 324.0 + 10368.0 / 5.0;
+    assert!(rel(measure::area(&b), area) < 1e-9, "{}", measure::area(&b));
+}
+
+// A 10 × 2 rectangle at z = 0, 10 and 20, its corners on four helices turning once over the 20:
+// every level section is the same rectangle turned, so the volume is 20·20 to within the helices'
+// fit, whatever the middle section adds.
+#[test]
+fn a_loft_along_helical_guides_twists_its_section() {
+    let screw = crate::sweep::Helix {
+        origin: Vec3::ZERO,
+        axis: Vec3::Z,
+        rise: 20.0 / TAU,
+        sign: 1.0,
+    };
+    let corners = [(5.0, -1.0), (5.0, 1.0), (-5.0, 1.0), (-5.0, -1.0)];
+    let guides: Vec<Guide> = corners
+        .iter()
+        .map(|&(x, y)| Guide {
+            curve: screw.spiral(Vec3::new(x, y, 0.0), TAU, 0.0).unwrap(),
+            range: (0.0, TAU),
+        })
+        .collect();
+    let turned = |z: f64| {
+        let a = TAU * z / 20.0;
+        sec(
+            Profile::rect(Vec2::ZERO, 10.0, 2.0),
+            Frame::new(Vec3::Z * z, Vec3::Z, Vec3::new(a.cos(), a.sin(), 0.0)).unwrap(),
+        )
+    };
+    for sections in [
+        vec![turned(0.0), turned(20.0)],
+        vec![turned(0.0), turned(10.0), turned(20.0)],
+    ] {
+        let b = loft_guided(&sections, &guides, None, "blade").unwrap();
+        assert_eq!(b.face_count(), 6);
+        assert!(rel(volume(&b), 400.0) < 1e-9, "{}", volume(&b));
+    }
+}
+
+#[test]
+fn a_guide_that_misses_a_vertex_is_refused() {
+    let mut guides = mirrored_guides([
+        [12.0, 3.2, 0.0],
+        [18.0, -2.8, 8.0],
+        [15.0, 0.2, 19.0],
+        [3.0, 12.2, 24.0],
+    ]);
+    guides[0].range = (0.0, 0.9);
+    let sections = [
+        sec(Profile::rect(Vec2::ZERO, 24.0, 6.4), at_z(0.0)),
+        sec(Profile::rect(Vec2::ZERO, 6.0, 24.4), at_z(24.0)),
+    ];
+    assert!(loft_guided(&sections, &guides, None, "slab").is_err());
+}
+
+// A square of side 30 − z/2 from z = 0 to 40, turned half a turn on the way, its corners on four
+// conical spirals: every level is a square, so the volume is ∫ s² dz = 52000/3.
+#[test]
+fn a_loft_along_spiral_guides_twists_and_tapers() {
+    let screw = crate::sweep::Helix {
+        origin: Vec3::ZERO,
+        axis: Vec3::Z,
+        rise: 40.0 / PI,
+        sign: 1.0,
+    };
+    let growth = -10.0 * 2f64.sqrt() / PI;
+    let guides: Vec<Guide> = [(15.0, 15.0), (-15.0, 15.0), (-15.0, -15.0), (15.0, -15.0)]
+        .iter()
+        .map(|&(x, y)| Guide {
+            curve: screw.spiral(Vec3::new(x, y, 0.0), PI, growth).unwrap(),
+            range: (0.0, PI),
+        })
+        .collect();
+    let sections = [
+        sec(Profile::rect(Vec2::ZERO, 30.0, 30.0), at_z(0.0)),
+        sec(Profile::rect(Vec2::ZERO, 10.0, 10.0), at_z(40.0)),
+    ];
+    let b = loft_guided(&sections, &guides, None, "tw").unwrap();
+    assert_eq!(b.face_count(), 6);
+    assert!(rel(volume(&b), 52000.0 / 3.0) < 1e-9, "{}", volume(&b));
+}
+
+// A hollow square duct round a quarter turn of radius 30 about z, its half-width h running 9 → 6
+// and its wall 2: each corner, at (30 ± h) from the axis and z = ±h, runs on a spiral. Pappus
+// over the turn: ∫ 30·16(h − 1) dθ = 1560π.
+#[test]
+fn a_loft_along_guides_carries_a_hole_on_its_own_guides() {
+    let dh = -6.0 / PI;
+    let mut guides = Vec::new();
+    for wall in [0.0, 2.0] {
+        for (sr, sz) in [(1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+            let h = 9.0 - wall;
+            let screw = crate::sweep::Helix {
+                origin: Vec3::ZERO,
+                axis: Vec3::Z,
+                rise: sz * dh,
+                sign: 1.0,
+            };
+            let p = Vec3::new(30.0 + sr * h, 0.0, sz * h);
+            guides.push(Guide {
+                curve: screw.spiral(p, PI / 2.0, sr * dh).unwrap(),
+                range: (0.0, PI / 2.0),
+            });
+        }
+    }
+    let sections = [
+        sec(
+            hollow_square(18.0, 14.0),
+            Frame::new(Vec3::new(30.0, 0.0, 0.0), Vec3::Y, Vec3::X).unwrap(),
+        ),
+        sec(
+            hollow_square(12.0, 8.0),
+            Frame::new(Vec3::new(0.0, 30.0, 0.0), -Vec3::X, Vec3::Y).unwrap(),
+        ),
+    ];
+    let b = loft_guided(&sections, &guides, None, "duct").unwrap();
+    assert_eq!(b.face_count(), 10);
+    assert!(rel(volume(&b), 1560.0 * PI) < 1e-9, "{}", volume(&b));
 }

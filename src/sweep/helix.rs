@@ -28,7 +28,7 @@ use crate::{
 /// crossing slides along it by its error over that angle: a ten-thousandth of the linear
 /// tolerance keeps the crossing within a hundredth of the tolerance of the true one.
 const SCREW_FIT: f64 = tol::LINEAR * 1e-4;
-const DEGREE: usize = 7;
+pub(super) const DEGREE: usize = 7;
 
 /// A screw motion: a turn of `sign·θ` about the axis through `origin` along `axis`, and a rise of
 /// `rise·θ` along it.
@@ -66,10 +66,55 @@ impl Helix {
         Transform::rotation(self.origin, self.axis, self.sign * t)
             .then(&Transform::translation(self.axis * (self.rise * t)))
     }
+
+    /// The path of `p` through turns 0 to `angle`, its parameter the turn, while its distance from
+    /// the axis changes by `growth` per radian: a helix when `growth` is 0, a conical spiral
+    /// otherwise. Degree-7 Hermite pieces through the path's points and first three derivatives,
+    /// spaced as a screw sweep's columns are, so they stay within `SCREW_FIT` of it.
+    pub fn spiral(&self, p: Point3, angle: f64, growth: f64) -> Result<Curve> {
+        let Some(axis) = self.axis.unit() else {
+            return invalid("a spiral needs an axis");
+        };
+        if !(angle.is_finite() && angle > tol::ANGULAR && growth.is_finite()) {
+            return invalid("a spiral runs through a positive angle");
+        }
+        let screw = Helix { axis, ..*self };
+        let q = p - screw.origin;
+        let r0 = (q - axis * q.dot(axis)).norm();
+        let r1 = r0 + growth * angle;
+        if r0 <= tol::LINEAR || r1 <= tol::LINEAR {
+            return invalid("a spiral keeps off its axis");
+        }
+        // With f(t) = 1 + k·t the radius's scale and R(t) the point turned about the axis, the
+        // path is f·R plus the rise: P′ = kR + fR′, P″ = 2kR′ + fR″, P‴ = 3kR″ + fR‴.
+        let k = growth / r0;
+        let d3 = |t: f64| -> [Vec3; 4] {
+            let [at, d1, d2, d3] = screw.d3(p, t);
+            let lift = screw.axis * (screw.rise * t);
+            let r = at - lift - (screw.origin + axis * q.dot(axis));
+            let r1 = d1 - screw.axis * screw.rise;
+            let f = 1.0 + k * t;
+            [
+                at - r + r * f,
+                r * k + r1 * f + screw.axis * screw.rise,
+                r1 * (2.0 * k) + d2 * f,
+                d2 * (3.0 * k) + d3 * f,
+            ]
+        };
+        // An eighth derivative of f·R is at most r·(f + 8|k|): the nodes for that radius.
+        let reach = r0.max(r1) + 8.0 * growth.abs();
+        let nodes = nodes(angle, reach);
+        let mut pts = vec![d3(nodes[0])[0]];
+        for w in nodes.windows(2) {
+            pts.extend(hermite(d3(w[0]), d3(w[1]), w[1] - w[0]));
+        }
+        let c = NurbsCurve::new(DEGREE, knots(&nodes), pts, None)?;
+        Ok(Curve::Nurbs(Box::new(c)))
+    }
 }
 
 /// Knots of a curve in Hermite pieces between `nodes`.
-fn knots(nodes: &[f64]) -> Vec<f64> {
+pub(super) fn knots(nodes: &[f64]) -> Vec<f64> {
     let mut k = vec![nodes[0]; DEGREE + 1];
     for &n in &nodes[1..nodes.len() - 1] {
         k.extend(std::iter::repeat_n(n, DEGREE));
@@ -92,7 +137,7 @@ fn hermite(a: [Vec3; 4], b: [Vec3; 4], h: f64) -> [Point3; 7] {
 }
 
 /// The control points of `p`'s helix in Hermite pieces between `nodes`.
-fn column(screw: &Helix, p: Point3, nodes: &[f64]) -> Vec<Point3> {
+pub(super) fn column(screw: &Helix, p: Point3, nodes: &[f64]) -> Vec<Point3> {
     let mut out = vec![screw.at(p, nodes[0])];
     for w in nodes.windows(2) {
         let (a, b) = (screw.d3(p, w[0]), screw.d3(p, w[1]));
@@ -103,7 +148,7 @@ fn column(screw: &Helix, p: Point3, nodes: &[f64]) -> Vec<Point3> {
 
 /// Evenly spaced turns from 0 to `angle`, close enough that a Hermite piece follows a helix of
 /// radius up to `radius` within `SCREW_FIT`: its error is at most `radius · (h/2)⁸ / 8!`.
-fn nodes(angle: f64, radius: f64) -> Vec<f64> {
+pub(super) fn nodes(angle: f64, radius: f64) -> Vec<f64> {
     let h = 2.0 * (40320.0 * SCREW_FIT / radius.max(tol::LINEAR)).powf(1.0 / 8.0);
     let n = (angle / h).ceil().max(1.0) as usize;
     (0..=n).map(|k| angle * k as f64 / n as f64).collect()
@@ -148,15 +193,7 @@ pub(crate) struct Seg {
 /// along the axis, which the sweep lays in the same half-plane a turn later.
 fn self_contact(profile: &Profile, frame: &Frame, screw: &Helix, angle: f64) -> Result<()> {
     let side = screw.axis.cross(frame.z);
-    let curves: Vec<(Curve, (f64, f64))> = profile
-        .loops
-        .iter()
-        .flat_map(|lp| &lp.segments)
-        .map(|s| {
-            let placed = s.segment.place(frame);
-            (placed.curve, placed.range)
-        })
-        .collect();
+    let curves = placed_curves(profile, frame);
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
     let (mut z_lo, mut z_hi) = (f64::INFINITY, f64::NEG_INFINITY);
     for (c, (t0, t1)) in &curves {
@@ -195,10 +232,144 @@ fn self_contact(profile: &Profile, frame: &Frame, screw: &Helix, angle: f64) -> 
     Ok(())
 }
 
+/// The profile's boundary as curves placed on `frame`, each with its parameter range.
+fn placed_curves(profile: &Profile, frame: &Frame) -> Vec<(Curve, (f64, f64))> {
+    profile
+        .loops
+        .iter()
+        .flat_map(|lp| &lp.segments)
+        .map(|s| {
+            let placed = s.segment.place(frame);
+            (placed.curve, placed.range)
+        })
+        .collect()
+}
+
+/// The side of its plane the screw carries a profile on an oblique plane to, 1 along `frame.z`
+/// and −1 against it. The rate a point crosses the plane,
+/// `n·v(p) = sign·(n × axis)·(p − origin) + rise·n·axis`, is affine in `p`, so over the profile
+/// it is least and greatest where the boundary is extreme along `n × axis`. Where it is 0 the motion runs along the plane and the
+/// swept solid folds over itself.
+fn crossing_side(curves: &[(Curve, (f64, f64))], frame: &Frame, screw: &Helix) -> Result<f64> {
+    let across = frame.z.cross(screw.axis);
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for (c, (t0, t1)) in curves {
+        let mut ts = vec![*t0, *t1];
+        ts.extend(c.extremes(across, *t0, *t1));
+        for t in ts {
+            let v = screw.d3(c.eval(t), 0.0)[1];
+            let rate = v.dot(frame.z) / v.norm().max(f64::MIN_POSITIVE);
+            (lo, hi) = (lo.min(rate), hi.max(rate));
+        }
+    }
+    if lo > tol::ANGULAR {
+        Ok(1.0)
+    } else if hi < -tol::ANGULAR {
+        Ok(-1.0)
+    } else {
+        invalid("a screw sweep folds: its motion runs along its profile's plane over the profile")
+    }
+}
+
+/// Boundary points tested along each segment for a turn that brings them back across the plane.
+const RETURN_SAMPLES: usize = 64;
+
+/// Where the sweep of a profile on an oblique plane might meet itself. The profile and its copy
+/// turned by `t` meet only where a boundary point of one lies on the other, so a boundary point's
+/// helix, run forward or back by `t`, crosses the plane in the direction `side` that the profile
+/// crosses it. The copies are `rise·t` apart along the axis, so only turns within the profile's
+/// height over the rise count. Along each point's helix the height over the plane is
+/// `h(t) = C·(cos σt − 1) + B·sin σt + L·t`, monotone between the turns where `h′` is 0, which
+/// are found in closed form, so each crossing is bracketed and found by bisection. A helix that
+/// does cross that way within reach may still miss the profile, so this refuses as unsupported
+/// rather than invalid.
+fn returns(
+    curves: &[(Curve, (f64, f64))],
+    frame: &Frame,
+    screw: &Helix,
+    angle: f64,
+    side: f64,
+) -> Result<()> {
+    let (n, a, sigma) = (frame.z, screw.axis, screw.sign);
+    let (mut z_lo, mut z_hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for (c, (t0, t1)) in curves {
+        let mut ts = vec![*t0, *t1];
+        ts.extend(c.extremes(a, *t0, *t1));
+        for t in ts {
+            let z = (c.eval(t) - screw.origin).dot(a);
+            (z_lo, z_hi) = (z_lo.min(z), z_hi.max(z));
+        }
+    }
+    let reach = if screw.rise.abs() > 0.0 {
+        angle.min((z_hi - z_lo + tol::LINEAR) / screw.rise.abs())
+    } else {
+        angle
+    };
+    let l = screw.rise * n.dot(a);
+    for (c, (t0, t1)) in curves {
+        for k in 0..=RETURN_SAMPLES {
+            let b = c.eval(t0 + (t1 - t0) * k as f64 / RETURN_SAMPLES as f64);
+            let q = b - screw.origin;
+            let x = q - a * q.dot(a);
+            let (cx, by) = (n.dot(x), n.dot(a.cross(x)));
+            let k_amp = cx.hypot(by);
+            if k_amp <= l.abs() {
+                continue;
+            }
+            let h = |t: f64| cx * ((sigma * t).cos() - 1.0) + by * (sigma * t).sin() + l * t;
+            let dh = |t: f64| sigma * (by * (sigma * t).cos() - cx * (sigma * t).sin()) + l;
+            // h′ = 0 where cos(σt + δ) = −σL/K, δ = atan2(C, B).
+            let (delta, w) = (cx.atan2(by), (-sigma * l / k_amp).acos());
+            let mut nodes = vec![-reach, 0.0, reach];
+            let m_max = (reach / TAU).ceil() + 1.0;
+            let mut m = -m_max;
+            while m <= m_max {
+                for u in [-delta + w + TAU * m, -delta - w + TAU * m] {
+                    let t = sigma * u;
+                    if t.abs() < reach && t != 0.0 {
+                        nodes.push(t);
+                    }
+                }
+                m += 1.0;
+            }
+            nodes.sort_by(f64::total_cmp);
+            for win in nodes.windows(2) {
+                let (mut lo, mut hi) = (win[0], win[1]);
+                // The piece beside 0 is monotone from h(0) = 0.
+                if lo == 0.0 || hi == 0.0 || h(lo) * h(hi) > 0.0 {
+                    continue;
+                }
+                let up = h(hi) > h(lo);
+                for _ in 0..200 {
+                    let mid = 0.5 * (lo + hi);
+                    if mid <= lo || mid >= hi {
+                        break;
+                    }
+                    if (h(mid) < 0.0) == up {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                if dh(0.5 * (lo + hi)) * side > 0.0 {
+                    return Err(Error::Unsupported(
+                        "a screw sweep whose turns bring its oblique profile back across its \
+                         plane"
+                            .into(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Screws `profile`, drawn on `frame`'s xy plane, through `angle` radians of `screw`. The
-/// profile's plane must hold the axis, and the profile must keep to one side of it and clear of
-/// itself a turn later; or its plane is square to the axis, a twisted extrusion. Caps are `start` and `end`; each side face is named after its profile
-/// segment.
+/// profile's plane may hold the axis, and the profile must then keep to one side of it and clear
+/// of itself a turn later; or its plane is square to the axis, a twisted extrusion; or it is
+/// oblique, and the screw must carry every point of the profile across the plane the same way, and
+/// no turn within reach may bring the profile's boundary back across it. Caps are `start` and
+/// `end`; each side face is named after its profile segment.
 pub fn helix(
     profile: &Profile,
     frame: &Frame,
@@ -216,20 +387,18 @@ pub fn helix(
     // A profile square to the axis rises as it turns, a twisted extrusion: each level holds one
     // turned copy of it, so it can never meet itself, and its outline may go round the axis.
     let square = frame.z.cross(axis).norm() <= tol::ANGULAR;
-    if !square
-        && (frame.z.dot(axis).abs() > tol::ANGULAR
-            || (frame.origin - screw.origin).dot(frame.z).abs() > tol::LINEAR)
-    {
-        return Err(Error::Unsupported(
-            "a screw sweep's profile off a plane through its axis or square to it".into(),
-        ));
-    }
+    let through = frame.z.dot(axis).abs() <= tol::ANGULAR
+        && (frame.origin - screw.origin).dot(frame.z).abs() <= tol::LINEAR;
     if square && screw.rise.abs() <= tol::LINEAR {
         return invalid("a twisted extrusion must rise");
     }
     let mut profile = profile.normalized()?;
-    if !square {
+    if through {
         self_contact(&profile, frame, &screw, angle)?;
+    } else if !square {
+        let curves = placed_curves(&profile, frame);
+        let side = crossing_side(&curves, frame, &screw)?;
+        returns(&curves, frame, &screw, angle, side)?;
     }
     let (mut radius, mut far) = (0.0f64, frame.origin);
     for lp in &profile.loops {

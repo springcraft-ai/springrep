@@ -187,7 +187,7 @@ fn analytic(s: &Surface) -> bool {
 /// Whether two faces' surfaces are the same point set where the faces are. Analytic pairs are
 /// decided in closed form by [`same_domain`]; any other pair (swept, ruled or spline surfaces in
 /// different frames or parameterisations, or one of them against an analytic surface) by checking
-/// that each face's parameter window lies on the other surface, with the same normal line, within
+/// that one face's parameter window lies on the other's surface, with the same normal line, within
 /// the tolerance.
 pub(crate) fn same_domain_faces(a: &Domain, b: &Domain) -> bool {
     if same_domain(&a.surface, &b.surface) {
@@ -203,8 +203,10 @@ pub(crate) fn same_domain_faces(a: &Domain, b: &Domain) -> bool {
     if analytic(&a.surface) && analytic(&b.surface) && !planes {
         return false;
     }
+    // One face lying on the other's surface is enough: they can overlap only where it is. A
+    // spline surface ends where its face does, so the other face, larger, does not lie on it.
     let n = 6;
-    [(a, b), (b, a)].iter().all(|(from, to)| {
+    [(a, b), (b, a)].iter().any(|(from, to)| {
         (0..=n).all(|i| {
             (0..=n).all(|j| {
                 let u = from.lo.x + (from.hi.x - from.lo.x) * i as f64 / n as f64;
@@ -755,22 +757,91 @@ fn tangent_at(a: &Surface, b: &Surface, p: Point3) -> bool {
     a.normal(ua.x, ua.y).cross(b.normal(ub.x, ub.y)).norm() <= tol::TANGENT
 }
 
+/// `c` carried along `dir` onto the plane through `o` square to `n`: a parallel projection, which
+/// is affine, so a spline's image is the spline of its control points' images and a circle's or
+/// ellipse's is the ellipse on its two images of conjugate radii. A curve lying level with the
+/// plane is moved whole, and keeps its parameter.
+fn projected_along(c: &Curve, dir: Vec3, o: Point3, n: Vec3) -> Option<Curve> {
+    let rate = dir.dot(n);
+    let onto = |q: Point3| q + dir * ((o - q).dot(n) / rate);
+    let flat = |v: Vec3| v - dir * (v.dot(n) / rate);
+    let (d0, d1) = c.domain();
+    let start = if d0.is_finite() { d0 } else { 0.0 };
+    let shift = onto(c.eval(start)) - c.eval(start);
+    let level = match c {
+        Curve::Line(l) => l.dir.dot(n).abs() <= tol::ANGULAR,
+        Curve::Circle(k) => parallel(k.frame.z, n),
+        Curve::Ellipse(k) => parallel(k.frame.z, n),
+        _ => {
+            let off = |t: f64| (c.eval(t) - c.eval(start)).dot(n).abs() <= tol::LINEAR;
+            (0..=32).all(|i| off(d0 + (d1 - d0) * i as f64 / 32.0))
+                && c.extremes(n, d0, d1).into_iter().all(off)
+        }
+    };
+    if level {
+        return Some(c.transformed(&crate::math::Transform::translation(shift)));
+    }
+    let conic = |centre: Point3, a: Vec3, b: Vec3| -> Option<Curve> {
+        // The two radii of the image that are conjugate and square to each other.
+        let t0 = 0.5 * (2.0 * a.dot(b)).atan2(a.dot(a) - b.dot(b));
+        let (s, k) = t0.sin_cos();
+        let (u, w) = (a * k + b * s, b * k - a * s);
+        let (u, w) = if u.norm() >= w.norm() {
+            (u, w)
+        } else {
+            (w, -u)
+        };
+        let frame = Frame::new(centre, u.cross(w), u).ok()?;
+        Some(Curve::Ellipse(Ellipse {
+            frame,
+            major: u.norm(),
+            minor: w.norm(),
+        }))
+    };
+    match c {
+        Curve::Line(l) => Some(Curve::Line(Line {
+            origin: onto(l.origin),
+            dir: flat(l.dir).unit()?,
+        })),
+        Curve::Circle(k) => conic(
+            onto(k.frame.origin),
+            flat(k.frame.x * k.radius),
+            flat(k.frame.y * k.radius),
+        ),
+        Curve::Ellipse(k) => conic(
+            onto(k.frame.origin),
+            flat(k.frame.x * k.major),
+            flat(k.frame.y * k.minor),
+        ),
+        Curve::BSpline(s) => {
+            let ctrl = s.control_points().iter().map(|&q| onto(q)).collect();
+            let image = if s.is_periodic() {
+                crate::geom::BSpline::periodic(s.degree(), s.knots().to_vec(), ctrl).ok()?
+            } else {
+                crate::geom::BSpline::new(s.degree(), s.knots().to_vec(), ctrl).ok()?
+            };
+            Some(Curve::BSpline(image))
+        }
+        Curve::Nurbs(s) => {
+            let ctrl = s.control_points().iter().map(|&q| onto(q)).collect();
+            let w = s.weights().map(|w| w.to_vec());
+            let image = crate::geom::NurbsCurve::new(s.degree(), s.knots().to_vec(), ctrl, w);
+            Some(Curve::Nurbs(Box::new(image.ok()?)))
+        }
+        Curve::Intersection(_) => None,
+    }
+}
+
 /// An extrusion or revolution against a surface that shares its symmetry: the profile curve's
 /// meetings with the other surface, swept the same way, are lines or circles; a plane across an
-/// extrusion cuts it in a copy of its curve.
+/// extrusion cuts it in its curve carried along the extrusion onto the plane.
 fn swept(a: &Surface, b: &Surface, region: &Aabb) -> Option<Ssi> {
     match a {
         Surface::Extrusion(e) => {
             if let Surface::Plane(p) = b
                 && parallel(p.frame.z, e.dir)
             {
-                let (d0, _) = e.curve.domain();
-                let on = e.curve.eval(d0);
-                let n = p.frame.z;
-                let shift = e.dir * ((p.frame.origin - on).dot(n) / e.dir.dot(n));
-                let curve = e
-                    .curve
-                    .transformed(&crate::math::Transform::translation(shift));
+                let curve = projected_along(&e.curve, e.dir, p.frame.origin, p.frame.z)?;
                 let range = curve.domain();
                 let closed = curve.period().is_some();
                 return Some(Ssi::Curves {
@@ -857,7 +928,7 @@ fn closed_form(a: &Surface, b: &Surface, region: &Aabb) -> Option<Ssi> {
                 let pts = meridian_points(plane_meridian, meridian(b, axis)?)?;
                 return Some(circles_about(axis, axis.dir.any_perpendicular(), pts));
             }
-            return sweep::intersect(a, b);
+            return sweep::intersect(a, b, region);
         }
         (Surface::Plane(p), Surface::Cone(c)) => {
             let axis = axis_of(b)?;
@@ -874,7 +945,7 @@ fn closed_form(a: &Surface, b: &Surface, region: &Aabb) -> Option<Ssi> {
             return conic::plane_cone(p, c, region);
         }
         (Surface::Cylinder(x), Surface::Cylinder(y)) => {
-            return cylinder_cylinder(x, y, region).or_else(|| sweep::intersect(a, b));
+            return cylinder_cylinder(x, y, region).or_else(|| sweep::intersect(a, b, region));
         }
         _ => {}
     }
@@ -902,7 +973,7 @@ fn closed_form(a: &Surface, b: &Surface, region: &Aabb) -> Option<Ssi> {
             .flatten(),
         _ => same_axis(xa, xb).then(|| coaxial(a, b, xa)).flatten(),
     };
-    symmetric.or_else(|| sweep::intersect(a, b))
+    symmetric.or_else(|| sweep::intersect(a, b, region))
 }
 
 #[cfg(test)]
@@ -923,6 +994,38 @@ mod tests {
         ctrl.extend_from_within(..3);
         let knots = (0..n + 7).map(|i| i as f64 - 3.0).collect();
         Curve::BSpline(crate::geom::BSpline::periodic_cubic(knots, ctrl).unwrap())
+    }
+
+    // A circle of radius 2 tilted 30° from level, extruded straight down, is cut by a level plane in
+    // its shadow: the ellipse of semi-axes 2 and 2 cos 30°, on the plane and on the extrusion.
+    #[test]
+    fn a_level_plane_cuts_an_extrusion_of_a_tilted_circle_in_its_shadow() {
+        let tilt = 30f64.to_radians();
+        let frame = Frame::new(
+            Vec3::new(1.0, 2.0, 3.0),
+            Vec3::new(0.0, -tilt.sin(), tilt.cos()),
+            Vec3::X,
+        )
+        .unwrap();
+        let ext = Surface::Extrusion(Box::new(crate::geom::Extrusion {
+            curve: Curve::Circle(Circle { frame, radius: 2.0 }),
+            dir: -Vec3::Z,
+        }));
+        let plane = Surface::Plane(Plane {
+            frame: Frame::WORLD.translated(Vec3::new(0.0, 0.0, -5.0)),
+        });
+        let Some(Ssi::Curves { curves, .. }) = swept(&ext, &plane, &Aabb::EMPTY) else {
+            panic!("an extrusion square to a plane meets it in a curve");
+        };
+        let Curve::Ellipse(e) = &curves[0].curve else {
+            panic!("a tilted circle's shadow is an ellipse");
+        };
+        assert!((e.major - 2.0).abs() < 1e-12 && (e.minor - 2.0 * tilt.cos()).abs() < 1e-12);
+        for k in 0..16 {
+            let p = curves[0].curve.eval(TAU * k as f64 / 16.0);
+            let uv = ext.project(p);
+            assert!((p.z + 5.0).abs() < 1e-12 && ext.eval(uv.x, uv.y).dist(p) < 1e-12);
+        }
     }
 
     #[test]

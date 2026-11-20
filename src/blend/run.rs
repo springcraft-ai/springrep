@@ -37,6 +37,8 @@ pub(super) struct Beyond {
     /// piece stops on the end face beneath it, and the vertex where they meet stays, so `gone`
     /// does not say what sewing would need.
     pub overhung: bool,
+    /// Whether a contact curve ends on a vertex past the edge, which sewing cannot place.
+    pub on_vertex: bool,
 }
 
 /// Whether the edge from `near` to `far` of `curve` leaves `v` onto the outer side of the end face
@@ -252,17 +254,17 @@ pub(super) fn beyond(
                 .map(|i| f(near + (far - near) * i as f64 / SAMPLES as f64))
                 .any(|x| x > tol::LINEAR);
             walked.push(c);
+            // A contact that ends on the edge's far vertex leaves that vertex where it is, on the
+            // contact; the trims are the same, but sewing has no point to cut the edge back to.
+            if f_far.abs() <= tol::LINEAR {
+                out.on_vertex = true;
+                break;
+            }
             if crosses {
-                if f_far.abs() <= tol::LINEAR {
-                    return Err("a blend whose contact ends on a vertex past its edge".into());
-                }
                 break;
             }
             if spills_over(body, s, c, step) {
                 break;
-            }
-            if f_far >= -tol::LINEAR {
-                return Err("a blend whose contact ends on a vertex past its edge".into());
             }
             let w = if forward {
                 body.coedge_end(c)
@@ -298,7 +300,7 @@ pub(super) fn beyond(
             }
         }
     }
-    if out.gone.is_empty() {
+    if out.gone.is_empty() && !out.on_vertex {
         return Ok(Beyond::default());
     }
     for &c in &joints {

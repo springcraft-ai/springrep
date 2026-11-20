@@ -22,6 +22,8 @@ pub mod primitive;
 pub mod probe;
 pub mod profile;
 pub mod rays;
+pub mod sew;
+pub mod sheet;
 pub mod step;
 pub mod sweep;
 pub mod tol;

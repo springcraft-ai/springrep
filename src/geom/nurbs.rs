@@ -1762,6 +1762,7 @@ impl NurbsSurface {
                 None => return (self.wrapped(uv), at[0].dist(p), true),
             }
         }
+        let mut settled = false;
         for _ in 0..60 {
             let [q, su, sv, suu, suv, svv] = at;
             let r = q - p;
@@ -1788,16 +1789,30 @@ impl NurbsSurface {
                 (false, false) => (ha > 0.0 && ha * hd - hb * hb > 0.0)
                     .then(|| solve2(ha, hb, hb, hd, -g0, -g1))
                     .flatten()
-                    .or_else(|| solve2(a, b, b, d, -g0, -g1)),
+                    .or_else(|| solve2(a, b, b, d, -g0, -g1))
+                    .or_else(|| {
+                        (pole_of(&at).is_none())
+                            .then(|| eigen_step(ha, hb, hd, g0, g1))
+                            .flatten()
+                    }),
             };
             let Some((du, dv)) = step else {
                 break;
             };
             // A step this short moves the point by rounding alone: take it and stop, rather than
-            // evaluate the surface again to confirm it.
+            // evaluate the surface again to confirm it. Where the two tangents lie along one line,
+            // at a cusp, a step that moves the point by nothing still moves the parameters, and
+            // the foot is found by going on: the distance there falls only with a power of the
+            // step, so Newton nears it by a constant fraction each time.
             if (su * du + sv * dv).norm() <= 1e-6 * tol::LINEAR {
+                let size = 1.0 + (u1 - u0) + (v1 - v0);
                 uv = clamp(Vec2::new(uv.x + du, uv.y + dv));
-                return (self.wrapped(uv), self.eval(uv.x, uv.y).dist(p), true);
+                if du.abs() + dv.abs() <= 1e-12 * size || pole_of(&at).is_some() {
+                    return (self.wrapped(uv), self.eval(uv.x, uv.y).dist(p), true);
+                }
+                at = self.d2(uv.x, uv.y);
+                settled = true;
+                continue;
             }
             // A full step from far off can overshoot on a strongly curved or twisted patch; halve
             // it until it gets nearer, or stop where no fraction of it does.
@@ -1823,7 +1838,7 @@ impl NurbsSurface {
                 break;
             }
         }
-        (self.wrapped(uv), at[0].dist(p), false)
+        (self.wrapped(uv), at[0].dist(p), settled)
     }
 
     /// Where a search from the pole at `uv` starts: a point a way down the line out of the pole
@@ -2006,6 +2021,34 @@ impl NurbsSurface {
             local
         }
     }
+}
+
+/// The Newton step `−H⁻¹g` for the symmetric `H = [[a, b], [b, d]]`, solved in the frame of its
+/// eigenvectors, where both eigenvalues are positive: at a cusp, where the surface's two tangents
+/// lie along one line, `H` is too near singular for a determinant to tell, yet the step along the
+/// line the surface barely moves on is still the one that nears the foot.
+fn eigen_step(a: f64, b: f64, d: f64, g0: f64, g1: f64) -> Option<(f64, f64)> {
+    let mean = 0.5 * (a + d);
+    let half = (0.5 * (a - d)).hypot(b);
+    let (big, small) = (mean + half, mean - half);
+    if small.is_nan() || small <= 0.0 {
+        return None;
+    }
+    // The eigenvector of the larger eigenvalue, from whichever row of `H − big·I` is longer.
+    let e = if (a - big).abs() >= (d - big).abs() {
+        Vec2::new(b, big - a)
+    } else {
+        Vec2::new(big - d, b)
+    };
+    let e = if e.norm() > 0.0 {
+        e * (1.0 / e.norm())
+    } else {
+        Vec2::new(1.0, 0.0)
+    };
+    let f = Vec2::new(-e.y, e.x);
+    let g = Vec2::new(g0, g1);
+    let step = e * (-g.dot(e) / big) + f * (-g.dot(f) / small);
+    Some((step.x, step.y))
 }
 
 /// The parameter that moves nothing at a point with these derivatives, 0 for u and 1 for v: a

@@ -271,6 +271,95 @@ fn full_revolve_of_an_off_axis_circle_is_a_torus() {
     assert_solid(&b, v, a, [-12.0, -12.0, -2.0], [12.0, 12.0, 2.0], 1e-11);
 }
 
+/// The lemon: the segment of the disk of radius `r` about (−d, 0) cut off by the axis x = 0, its
+/// arc's circle across the axis from the arc, turned through `angle`.
+fn lemon(r: f64, d: f64, angle: f64) -> Brep {
+    let reach = (d / r).acos();
+    let top = (r * r - d * d).sqrt();
+    let p = Profile::outline(vec![
+        NamedSegment::arc(Vec2::new(-d, 0.0), r, -reach, 2.0 * reach, "skin"),
+        NamedSegment::line(Vec2::new(0.0, top), Vec2::new(0.0, -top), "axis"),
+    ]);
+    revolve(&p, &xz_frame(), Vec3::ZERO, Vec3::Z, angle, "lemon").unwrap()
+}
+
+#[test]
+fn an_arc_whose_circle_lies_across_the_axis_turns_into_a_lemon() {
+    let (r, d): (f64, f64) = (50.0, 30.0);
+    let theta = (d / r).acos();
+    let top = (r * r - d * d).sqrt();
+    // The segment's area, and its first moment about its chord: 2π times that is the volume.
+    let segment = r * r * theta - d * top;
+    let moment = 2.0 / 3.0 * top.powi(3) - d * segment;
+    let skin = 4.0 * PI * r * (r * theta.sin() - d * theta);
+    let b = lemon(r, d, 2.0 * PI);
+    assert_eq!(b.face_count(), 1);
+    let w = r - d;
+    assert_solid(
+        &b,
+        2.0 * PI * moment,
+        skin,
+        [-w, -w, -top],
+        [w, w, top],
+        1e-11,
+    );
+    // half a turn has the segment as its two flat ends
+    let b = lemon(r, d, PI);
+    assert_eq!(b.face_count(), 3);
+    let (lo, hi) = ([-w, 0.0, -top], [w, w, top]);
+    assert_solid(&b, PI * moment, skin / 2.0 + 2.0 * segment, lo, hi, 1e-11);
+}
+
+/// The closed uniform quadratic on the square of half-side `h` about `(cx, cy)`: four parabolic
+/// arcs, each from the middle of one side to the middle of the next.
+fn rounded_square(cx: f64, cy: f64, h: f64) -> Profile {
+    let corners = [(h, h), (-h, h), (-h, -h), (h, -h)];
+    let polygon: Vec<Vec3> = corners
+        .iter()
+        .map(|&(x, y)| Vec3::new(cx + x, cy + y, 0.0))
+        .collect();
+    let curve = springrep::geom::BSpline::periodic_uniform(2, &polygon).unwrap();
+    let side = Segment::Spline {
+        curve,
+        reversed: false,
+    };
+    Profile::outline(vec![NamedSegment::new(side, "side")])
+}
+
+/// The area of [`rounded_square`] (the square less a third of each corner's triangle the arc cuts
+/// off) and the length of its outline, four arcs h(1 + ln(1 + √2)/√2) long.
+fn rounded_square_measures(h: f64) -> (f64, f64) {
+    let area = 4.0 * h * h - 4.0 * (h * h / 2.0) / 3.0;
+    let arc = h * (1.0 + (1.0 + 2f64.sqrt()).ln() / 2f64.sqrt());
+    (area, 4.0 * arc)
+}
+
+#[test]
+fn a_periodic_quadratic_profile_extrudes_and_turns_into_closed_sides() {
+    let h = 10.0;
+    let (section, outline) = rounded_square_measures(h);
+    let b = extrude(&rounded_square(0.0, 0.0, h), &Frame::WORLD, 10.0, "prism").unwrap();
+    let (lo, hi) = ([-h, -h, 0.0], [h, h, 10.0]);
+    assert_solid(
+        &b,
+        10.0 * section,
+        2.0 * section + 10.0 * outline,
+        lo,
+        hi,
+        1e-9,
+    );
+    assert_eq!(b.face_count(), 3);
+    // The section of half-side 3 about (10, 0), turned whole: Pappus on both.
+    let h = 3.0;
+    let (section, outline) = rounded_square_measures(h);
+    let ring = rounded_square(10.0, 0.0, h);
+    let b = revolve(&ring, &xz_frame(), Vec3::ZERO, Vec3::Z, 2.0 * PI, "ring").unwrap();
+    let (lo, hi) = ([-13.0, -13.0, -h], [13.0, 13.0, h]);
+    let path = 2.0 * PI * 10.0;
+    assert_solid(&b, path * section, path * outline, lo, hi, 1e-9);
+    assert_eq!(b.face_count(), 1);
+}
+
 #[test]
 fn turned_stack_with_a_cone() {
     let pts = [

@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::f64::consts::TAU;
 
 use crate::{
-    Error, Result,
+    Result,
     error::invalid,
     geom::{BSpline, Circle, Curve, Ellipse, Line},
     math::{Frame, Vec2, Vec3},
@@ -101,7 +101,7 @@ impl Segment {
     /// The conic arc from `a` to `b` whose tangents there meet at `apex`, with weight `w` at the
     /// apex: the rational quadratic Bézier on those three points. Below a weight of 1 it is an
     /// arc of an ellipse, and is returned as that arc; a parabola (1) and a hyperbola (above) are
-    /// not built yet.
+    /// returned as the Bézier itself, their exact form.
     ///
     /// With `m` the chord's middle, the centre lies on the line from `m` through the apex at
     /// `m − w²/(1 − w²)·(apex − m)`; the shoulder and the half chord are conjugate semi-diameters,
@@ -110,10 +110,14 @@ impl Segment {
         if w.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
             return invalid(format!("a conic of weight {w}: a weight is above 0"));
         }
+        if !w.is_finite() {
+            return invalid(format!("a conic of weight {w}: a weight is finite"));
+        }
         if w >= 1.0 {
-            return Err(Error::Unsupported(format!(
-                "a conic of weight {w}: only an ellipse's (below 1)"
-            )));
+            return Ok(Segment::Bezier {
+                ctrl: vec![a, apex, b],
+                weights: vec![1.0, w, 1.0],
+            });
         }
         let m = (a + b) * 0.5;
         let c = m - (apex - m) * (w * w / (1.0 - w * w));

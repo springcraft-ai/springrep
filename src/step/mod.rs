@@ -13,7 +13,7 @@ mod write;
 
 pub use heal::{Healed, MAX_HEAL};
 pub use read::{Body, Crossed, Healing, Import, Tolerant, read, read_part};
-pub(crate) use topology::{PartFace, Parts, parts_of, rebuilt, solid_of};
+pub(crate) use topology::{PartFace, Parts, parts_of, rebuilt, sewn, solid_of};
 pub use write::{Instance, Part, write, write_assembly, write_faces};
 
 /// The faces of a STEP file, each its own with its own vertices and edges, sewn into one solid

@@ -69,11 +69,14 @@ fn curve(c: &Curve, a: &Affine) -> Result<Curve> {
         }),
         Curve::Circle(ci) => ellipse(&ci.frame, ci.radius, ci.radius, a)?,
         Curve::Ellipse(e) => ellipse(&e.frame, e.major, e.minor, a)?,
-        Curve::BSpline(s) => Curve::BSpline(BSpline::new(
-            s.degree(),
-            s.knots().to_vec(),
-            s.control_points().iter().map(|&p| a.point(p)).collect(),
-        )?),
+        Curve::BSpline(s) => {
+            let ctrl = s.control_points().iter().map(|&p| a.point(p)).collect();
+            Curve::BSpline(if s.is_periodic() {
+                BSpline::periodic(s.degree(), s.knots().to_vec(), ctrl)?
+            } else {
+                BSpline::new(s.degree(), s.knots().to_vec(), ctrl)?
+            })
+        }
         Curve::Nurbs(n) => Curve::Nurbs(Box::new(NurbsCurve::new(
             n.degree(),
             n.knots().to_vec(),

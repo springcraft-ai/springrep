@@ -8,7 +8,7 @@ use crate::{
     boolean::{
         classify,
         csi::{curve_surface, signed_distance},
-        domain::Domain,
+        domain::{Domain, Where},
         face_domain,
     },
     geom::{Curve, Surface, distance_to},
@@ -208,7 +208,24 @@ fn vertex_shells(b: &Brep) -> HashMap<VertexId, ShellId> {
     out
 }
 
+/// Checks a sheet: open shells of faces in no solid (doc/design.md, "Sheets"). Every edge is used
+/// once, on the sheet's boundary, or twice, by coedges that run opposite ways in faces of one shell;
+/// everything else [`check`] finds of faces, loops, edges and vertices holds as for a solid.
+pub fn check_sheet(b: &Brep) -> Vec<Issue> {
+    checked(b, false, None, true, true)
+}
+
 fn check_with(b: &Brep, each: bool, sides: Option<&[Option<usize>]>, crossing: bool) -> Vec<Issue> {
+    checked(b, each, sides, crossing, false)
+}
+
+fn checked(
+    b: &Brep,
+    each: bool,
+    sides: Option<&[Option<usize>]>,
+    crossing: bool,
+    sheet: bool,
+) -> Vec<Issue> {
     let mut out = Vec::new();
     let found = std::cell::Cell::new(0usize);
     let mut issue = |m: String| {
@@ -296,6 +313,18 @@ fn check_with(b: &Brep, each: bool, sides: Option<&[Option<usize>]>, crossing: b
             }
             continue;
         }
+        // A sheet's boundary edge has one use, and its other edges two.
+        if sheet && u.len() == 1 {
+            continue;
+        }
+        if sheet && u.len() > 2 {
+            issue(format!(
+                "edge {} is used by {} coedges, not 1 or 2",
+                e.index(),
+                u.len()
+            ));
+            continue;
+        }
         // Two uses, or pairs of them where pieces touch along the edge: each coedge and its
         // partner run opposite ways and bound one sheet.
         if u.len() < 2 || !u.len().is_multiple_of(2) {
@@ -331,6 +360,16 @@ fn check_with(b: &Brep, each: bool, sides: Option<&[Option<usize>]>, crossing: b
                 ));
             }
         }
+        if u.len() > 2
+            && let Some((f, g)) = lying_on_each_other(b, u)
+        {
+            issue(format!(
+                "faces {} and {} lie on each other from edge {}",
+                f.index(),
+                g.index(),
+                e.index()
+            ));
+        }
     }
 
     for f in b.face_ids() {
@@ -340,8 +379,11 @@ fn check_with(b: &Brep, each: bool, sides: Option<&[Option<usize>]>, crossing: b
         }
         match face.shell {
             None => issue(format!("face {} is in no shell", f.index())),
-            Some(s) if b.shell(s).solid.is_none() => {
+            Some(s) if !sheet && b.shell(s).solid.is_none() => {
                 issue(format!("shell {} is in no solid", s.index()))
+            }
+            Some(s) if sheet && b.shell(s).solid.is_some() => {
+                issue(format!("shell {} of a sheet is in a solid", s.index()))
             }
             _ => {}
         }
@@ -552,6 +594,28 @@ fn check_with(b: &Brep, each: bool, sides: Option<&[Option<usize>]>, crossing: b
         }
     }
     out
+}
+
+/// Two faces beside each other across an empty wedge round an edge more than two faces use, where
+/// every interior point of one lies on the other's surface inside it: the wedge has no width, and
+/// the faces lie inside the solid, as a union that kept both of two coincident faces leaves them.
+/// Faces that touch along the edge part away from it; partners lying on each other bound a sliver.
+fn lying_on_each_other(b: &Brep, uses: &[CoedgeId]) -> Option<(FaceId, FaceId)> {
+    let on = |f: FaceId, g: FaceId| {
+        let (d, o) = (face_domain(b, f), face_domain(b, g));
+        let pts = d.interior_points();
+        !pts.is_empty()
+            && pts.iter().all(|uv| {
+                let p = d.surface.eval(uv.x, uv.y);
+                signed_distance(&o.surface, p).abs() <= tol::LINEAR
+                    && matches!(o.locate(p), Where::Inside(_))
+            })
+    };
+    uses.iter().find_map(|&c| {
+        let n = b.beside(c)?;
+        let (f, g) = (b.coedge_face(c), b.coedge_face(n));
+        (c < n && f != g && (on(f, g) || on(g, f))).then_some((f, g))
+    })
 }
 
 /// The first inner loop of face `f` that the region bounded by its other loops does not hold,
@@ -884,6 +948,14 @@ fn crossings(b: &Brep, sides: Option<&[Option<usize>]>, each: bool) -> Vec<Cross
                     }
                 }
             }
+            if hit.is_none() {
+                hit = crossing_from_shared_vertex(
+                    b,
+                    (fa, fb),
+                    (&verts[&fa], &verts[&fb]),
+                    &mut cache,
+                );
+            }
             match hit {
                 Some(at) => out.push(Crossing { a: fa, b: fb, at }),
                 None => apart(ma, mb),
@@ -1052,6 +1124,63 @@ fn edge_meets_face(
     found
         .into_iter()
         .find(|&p| dom.on_boundary(p) || dom.exact_side(p).is_some())
+}
+
+/// Where two faces that share a vertex but no edge cross each other along a curve out of it: their
+/// surfaces cut across each other there, and a step along the line where their tangent planes
+/// meet, either way, lands inside both faces. No edge of either need meet the other's inside, as
+/// where two balls turned apart overlap between the two points where the turn's axis pierces both.
+fn crossing_from_shared_vertex(
+    b: &Brep,
+    (fa, fb): (FaceId, FaceId),
+    (va, vb): (&[VertexId], &[VertexId]),
+    cache: &mut PairCache,
+) -> Option<Point3> {
+    let (sa, sb) = (&b.face(fa).surface, &b.face(fb).surface);
+    let size = cache
+        .face_box(b, fa)
+        .diagonal()
+        .min(cache.face_box(b, fb).diagonal());
+    let mut seen: Vec<VertexId> = Vec::new();
+    for &v in va.iter().filter(|v| vb.contains(v)) {
+        if seen.contains(&v) {
+            continue;
+        }
+        seen.push(v);
+        let p = b.vertex(v).point;
+        let normal = |s: &Surface| {
+            let uv = s.project(p);
+            s.normal(uv.x, uv.y)
+        };
+        let Some(line) = normal(sa).cross(normal(sb)).unit() else {
+            continue;
+        };
+        if normal(sa).cross(normal(sb)).norm() <= tol::TANGENT {
+            continue;
+        }
+        let step = 1e-3 * size;
+        for sign in [1.0, -1.0] {
+            // A point of both surfaces a step out along the line, by alternating projections.
+            let mut q = p + line * (sign * step);
+            for _ in 0..8 {
+                let on_a = sa.project(q);
+                q = sa.eval(on_a.x, on_a.y);
+                let on_b = sb.project(q);
+                q = sb.eval(on_b.x, on_b.y);
+            }
+            if signed_distance(sa, q).abs() > tol::LINEAR || q.dist(p) < 0.5 * step {
+                continue;
+            }
+            let inside = |f: FaceId, cache: &mut PairCache| {
+                let dom = cache.domains.entry(f).or_insert_with(|| face_domain(b, f));
+                matches!(dom.locate(q), Where::Inside(_))
+            };
+            if inside(fa, cache) && inside(fb, cache) {
+                return Some(q);
+            }
+        }
+    }
+    None
 }
 
 /// Pairs of distinct vertices closer than the linear tolerance.

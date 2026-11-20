@@ -7,7 +7,7 @@ use springrep::{
     Error, check,
     math::{Frame, Vec3},
     measure,
-    primitive::{block, cone, cylinder, sphere, torus},
+    primitive::{block, cone, cylinder, ellipsoid, sphere, torus},
     topo::Brep,
 };
 
@@ -74,6 +74,70 @@ fn a_torus_rings_its_frames_z_axis() {
 }
 
 #[test]
+fn an_ellipsoid_stretches_the_ball_along_its_frames_axes() {
+    let f = tilted();
+    let (a, b, c) = (3.0, 2.0, 1.5);
+    let e = ellipsoid(&f, Vec3::new(a, b, c), "ell").unwrap();
+    assert!(check::check(&e).is_empty());
+    let v = measure::volume(&e);
+    let want = 4.0 / 3.0 * PI * a * b * c;
+    assert!((v - want).abs() <= 1e-9 * want, "volume {v} vs {want}");
+    assert_at(local_centroid(&e, &f), [0.0; 3]);
+    assert_eq!(e.face_count(), 1);
+    // The box's half-extent along a world axis w is √Σ (rₖ eₖ·w)², eₖ the frame's axes.
+    let bb = measure::bbox(&e);
+    for (k, w) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
+        let half = [(a, f.x), (b, f.y), (c, f.z)]
+            .iter()
+            .map(|&(r, e)| (r * e.dot(w)).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let mid = f.origin.to_array()[k];
+        assert!((bb.min.to_array()[k] - (mid - half)).abs() < 1e-9, "{bb:?}");
+        assert!((bb.max.to_array()[k] - (mid + half)).abs() < 1e-9, "{bb:?}");
+    }
+    // A prolate spheroid's area: 2πa²(1 + c·asin(ε)/(a·ε)), ε² = 1 − a²/c².
+    let s = ellipsoid(&f, Vec3::new(2.0, 2.0, 3.0), "sph").unwrap();
+    let eps = (1.0 - 4.0 / 9.0f64).sqrt();
+    let area = 2.0 * PI * 4.0 * (1.0 + 3.0 * eps.asin() / (2.0 * eps));
+    let got = measure::area(&s);
+    assert!((got - area).abs() <= 1e-9 * area, "area {got} vs {area}");
+    // Equal radii are the sphere.
+    let ball = ellipsoid(&f, Vec3::new(2.0, 2.0, 2.0), "sph").unwrap();
+    assert_solid(&ball, 4.0 / 3.0 * PI * 8.0, 4.0 * PI * 4.0);
+    assert!(ellipsoid(&f, Vec3::new(2.0, 0.0, 2.0), "sph").is_err());
+}
+
+#[test]
+fn a_horn_torus_pinches_to_a_point_at_its_frames_origin() {
+    let f = tilted();
+    let b = torus(&f, 1.5, 1.5, "tor").unwrap();
+    // Pappus: the disk's area and perimeter times the path of its centre, 2π·1.5
+    assert_solid(&b, PI * 2.25 * 3.0 * PI, 3.0 * PI * 3.0 * PI);
+    assert_at(local_centroid(&b, &f), [0.0; 3]);
+    assert_eq!(b.face_count(), 1);
+}
+
+#[test]
+fn a_spindle_torus_is_its_tubes_outer_arc_turned() {
+    let f = tilted();
+    let (big, small) = (1.5, 2.5);
+    let b = torus(&f, big, small, "tor").unwrap();
+    // The axis cuts a segment off the disk, its chord subtending 2θ at the tube's centre,
+    // cos θ = R/r. The volume is 2π times the first moment about the axis of the rest of the disk,
+    // and the area is the outer arc turned, 4πr(Rφ + r sin φ), φ = π − θ.
+    let theta = (big / small).acos();
+    let chord = (small * small - big * big).sqrt();
+    let cut = small * small * theta - big * chord;
+    let moment = PI * small * small * big - big * cut + 2.0 / 3.0 * chord.powi(3);
+    let phi = PI - theta;
+    let area = 4.0 * PI * small * (big * phi + small * phi.sin());
+    assert_solid(&b, 2.0 * PI * moment, area);
+    assert_at(local_centroid(&b, &f), [0.0; 3]);
+    assert_eq!(b.face_count(), 1);
+}
+
+#[test]
 fn a_cone_is_a_frustum_or_comes_to_an_apex_at_either_end() {
     let f = tilted();
     let frustum = |r0: f64, r1: f64, h: f64| {
@@ -103,7 +167,6 @@ fn a_size_at_or_below_zero_is_invalid_input() {
     assert!(refused(sphere(&f, 0.0, "sph")));
     assert!(refused(cone(&f, 0.0, 0.0, 3.0, "con")));
     assert!(refused(cone(&f, 1.0, -0.5, 3.0, "con")));
-    // A tube as wide as its ring crosses the axis.
-    assert!(refused(torus(&f, 1.0, 1.0, "tor")));
-    assert!(refused(torus(&f, 1.0, 1.5, "tor")));
+    assert!(refused(torus(&f, 0.0, 1.0, "tor")));
+    assert!(refused(torus(&f, 1.0, 0.0, "tor")));
 }

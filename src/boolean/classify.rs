@@ -4,14 +4,16 @@
 //! decided by the contact instead, since no ray from there has a parity.
 
 use super::{
-    contact,
+    Op, contact,
     csi::{ray_surface, signed_distance},
     domain::{Domain, OnBoundary, Where},
+    face_bbox, face_domain,
 };
 use crate::{
     geom::Surface,
     math::{Aabb, Point3, Vec3},
     tol,
+    topo::Brep,
 };
 
 /// A gap between a point of one surface and another surface that is no rounding of a touch: a
@@ -218,4 +220,37 @@ pub(crate) fn contains(faces: &[(&Domain, Aabb)], p: Point3) -> Option<bool> {
     order
         .into_iter()
         .find_map(|(_, d)| crossings(faces, p, d).map(|n| n % 2 == 1))
+}
+
+/// Whether solids `a` and `b` share material that an empty result of `op` leaves out: a vertex or
+/// the middle of an edge of one lies farther than the tolerance from every surface of the other's
+/// faces, and inside it for an intersection, or a point of `a` outside `b` for a difference. A
+/// point of one solid's boundary that far inside the other has the first solid's material beside
+/// it inside the other. Only such points are read, so overlaps they miss are not found.
+pub(crate) fn material_lost(a: &Brep, b: &Brep, op: Op) -> bool {
+    let points = |x: &Brep| -> Vec<Point3> {
+        let mids = x.edge_ids().filter_map(|e| {
+            let e = x.edge(e);
+            let c = e.curve.as_ref()?;
+            Some(c.eval(0.5 * (e.range.0 + e.range.1)))
+        });
+        x.vertex_ids()
+            .map(|v| x.vertex(v).point)
+            .chain(mids)
+            .collect()
+    };
+    let deep = |from: &Brep, of: &Brep, inside: bool| {
+        let doms: Vec<Domain> = of.face_ids().map(|f| face_domain(of, f)).collect();
+        let faces: Vec<(&Domain, Aabb)> = doms.iter().map(|d| (d, face_bbox(d))).collect();
+        points(from).into_iter().any(|p| {
+            doms.iter()
+                .all(|d| signed_distance(&d.surface, p).abs() > tol::LINEAR)
+                && contains(&faces, p) == Some(inside)
+        })
+    };
+    match op {
+        Op::Union => false,
+        Op::Intersection => deep(a, b, true) || deep(b, a, true),
+        Op::Difference => deep(a, b, false),
+    }
 }

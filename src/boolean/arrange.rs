@@ -40,7 +40,9 @@ impl Graph<'_> {
     fn departure(&self, tr: &Trim, reach: f64, node: Vec2) -> Departure {
         let chord_uv = match tr.map {
             UvMap::Affine { .. } => tr.uv1,
-            UvMap::Projected => tr.uv(self.surface, tr.param(fraction_at(tr, reach)), tr.uv0),
+            UvMap::Projected | UvMap::Spline(_) => {
+                tr.uv(self.surface, tr.param(fraction_at(tr, reach)), tr.uv0)
+            }
         };
         let chord = direction_angle(self.oriented(chord_uv - tr.uv0)).unwrap_or(0.0);
         let tangent =
@@ -54,29 +56,54 @@ impl Graph<'_> {
 
     /// What the trim adds to its loop's signed area, ½∫(u dv − v du) in the oriented plane: by
     /// Gauss–Legendre along the curve with the exact parameter-plane rate. Chords would sag from a
-    /// curved trim by more than a sliver between two such trims is wide, and turn its sign.
+    /// curved trim by more than a sliver between two such trims is wide, and turn its sign. The
+    /// rule is applied on halves of the range until halving no longer changes the sum: beside a
+    /// pole the angle about it turns half round over a short stretch of the trim, which one rule
+    /// over the whole trim does not resolve.
     fn swept_area(&self, tr: &Trim) -> f64 {
         let chord = |a: Vec2, b: Vec2| {
             let (p, q) = (self.oriented(a), self.oriented(b));
             0.5 * (p.x * q.y - p.y * q.x)
         };
-        let (UvMap::Projected, Some(c)) = (&tr.map, &tr.curve) else {
+        if matches!(tr.map, UvMap::Affine { .. }) || tr.curve.is_none() {
             return chord(tr.uv0, tr.uv1);
-        };
+        }
         let mut nodes: Vec<(f64, f64)> = crate::numeric::gauss(24).to_vec();
         nodes.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let (m, h) = (0.5 * (tr.t0 + tr.t1), 0.5 * (tr.t1 - tr.t0));
-        let mut hint = tr.uv0;
-        let mut sum = 0.0;
-        for (x, w) in nodes {
-            let t = m + h * x;
-            let uv = tr.uv(self.surface, t, hint);
-            hint = uv;
-            let rate = super::domain::uv_rate(self.surface, uv, c.d1(t).1);
-            let (p, d) = (self.oriented(uv), self.oriented(rate));
-            sum += w * (p.x * d.y - p.y * d.x);
+        // The rule over [a, b], each point's parameters found from the one before, from `hint` at
+        // `a`; and the parameters at `b`, which the next piece starts from.
+        let rule = |a: f64, b: f64, mut hint: Vec2| -> (f64, Vec2) {
+            let (m, h) = (0.5 * (a + b), 0.5 * (b - a));
+            let mut sum = 0.0;
+            for &(x, w) in &nodes {
+                let t = m + h * x;
+                let uv = tr.uv(self.surface, t, hint);
+                hint = uv;
+                let rate = tr.uv_rate_at(self.surface, t, uv);
+                let (p, d) = (self.oriented(uv), self.oriented(rate));
+                sum += w * (p.x * d.y - p.y * d.x);
+            }
+            (0.5 * sum * h, tr.uv(self.surface, b, hint))
+        };
+        fn adapt(
+            rule: &dyn Fn(f64, f64, Vec2) -> (f64, Vec2),
+            (a, b): (f64, f64),
+            hint: Vec2,
+            whole: f64,
+            depth: usize,
+        ) -> (f64, Vec2) {
+            let m = 0.5 * (a + b);
+            let (left, at_m) = rule(a, m, hint);
+            let (right, at_b) = rule(m, b, at_m);
+            if depth == 0 || (left + right - whole).abs() <= 1e-13 * (1.0 + whole.abs()) {
+                return (left + right, at_b);
+            }
+            let (left, at_m) = adapt(rule, (a, m), hint, left, depth - 1);
+            let (right, at_b) = adapt(rule, (m, b), at_m, right, depth - 1);
+            (left + right, at_b)
         }
-        0.5 * sum * h
+        let (whole, _) = rule(tr.t0, tr.t1, tr.uv0);
+        adapt(&rule, (tr.t0, tr.t1), tr.uv0, whole, 20).0
     }
 
     fn metric(&self, a: Vec2, b: Vec2) -> f64 {
@@ -162,10 +189,10 @@ fn bend(x: Departure) -> f64 {
 /// `ka` and `kb`. Two whose turns are closer than they bend over their chords are ordered by the
 /// chords of `ab`, both taken at one reach.
 fn turn_order(ka: f64, kb: f64, ab: impl Fn() -> (Departure, Departure)) -> std::cmp::Ordering {
-    if (ka - kb).abs() > 1e-6 {
+    let (a, b) = ab();
+    if (ka - kb).abs() > 1e-6_f64.max(bend(a) + bend(b)) {
         return ka.total_cmp(&kb);
     }
-    let (a, b) = ab();
     let same = |x: f64, y: f64| signed_angle(x - y).abs() <= 1e-13;
     if same(ka, kb) && same(a.tangent, b.tangent) && same(a.chord, b.chord) {
         // Of two leaving along one line to the last bit, the further counter-clockwise is met
@@ -310,7 +337,7 @@ pub(crate) fn split(
     let lengths: Vec<f64> = hs
         .iter()
         .map(|h| match h.map {
-            UvMap::Projected => trim_length(h),
+            UvMap::Projected | UvMap::Spline(_) => trim_length(h),
             UvMap::Affine { .. } => f64::INFINITY,
         })
         .collect();
@@ -339,13 +366,18 @@ pub(crate) fn split(
         let at = nodes[end[h]].1;
         let dep = |t: &Trim, r: f64| g.departure(t, r.min(1e300), at);
         let turn = |c: usize, r: f64| clockwise_turn(dep(&hs[h].reversed(), r), dep(&hs[c], r));
-        let own: Vec<(usize, f64)> = pool
+        let own: Vec<(usize, f64, f64)> = pool
             .into_iter()
-            .map(|c| (c, turn(c, 0.05 * lengths[h].min(lengths[c]))))
+            .map(|c| {
+                let r = 0.05 * lengths[h].min(lengths[c]);
+                (c, turn(c, r), bend(dep(&hs[c], r)))
+            })
             .collect();
         own.into_iter()
-            .min_by(|&(a, ka), &(b, kb)| {
-                if (ka - kb).abs() > 1e-6 {
+            .min_by(|&(a, ka, ba), &(b, kb, bb)| {
+                // A fitted cut's tangent is good only to its fit, so turns closer than the two
+                // departures bend over their chords are read again by the chords.
+                if (ka - kb).abs() > 1e-6_f64.max(ba + bb) {
                     return ka.total_cmp(&kb);
                 }
                 // Two turning well away from the arrival are ordered between themselves; the
@@ -403,7 +435,7 @@ pub(crate) fn split(
         for &h in cyc {
             let n = match hs[h].map {
                 UvMap::Affine { .. } => 1,
-                UvMap::Projected => 16,
+                UvMap::Projected | UvMap::Spline(_) => 16,
             };
             let pl = hs[h].polyline(surface, n);
             for (k, &p) in pl[..pl.len() - 1].iter().enumerate() {
@@ -474,6 +506,62 @@ mod tests {
 
     use super::*;
 
+    // A great circle of the unit sphere from (0, −1, 0) to (0, 1, 0) that passes 0.01 rad from the
+    // south pole: its longitude turns half round within a few hundredths of its length there. What
+    // it adds to a loop's area, ½∫(u dv − v du), is the sum of the chords of 2·10⁵ points read in
+    // closed form, u = atan2(y, x) followed round and v = asin z.
+    #[test]
+    fn a_trim_passing_beside_a_pole_adds_its_area_exactly() {
+        use crate::geom::{Circle, Curve, Sphere};
+        use crate::math::{Frame, Vec3};
+        let eps: f64 = 0.01;
+        let surface = Surface::Sphere(Sphere {
+            frame: Frame::WORLD,
+            radius: 1.0,
+        });
+        let frame = Frame::new(
+            Vec3::ZERO,
+            Vec3::new(eps.cos(), 0.0, eps.sin()),
+            Vec3::new(eps.sin(), 0.0, -eps.cos()),
+        )
+        .unwrap();
+        let curve = Curve::Circle(Circle { frame, radius: 1.0 });
+        let (t0, t1) = (-PI / 2.0, PI / 2.0);
+        let lon_lat = |t: f64| {
+            let p = curve.eval(t);
+            Vec2::new(p.y.atan2(p.x), p.z.clamp(-1.0, 1.0).asin())
+        };
+        let n = 200_000;
+        let mut want = 0.0;
+        let mut last = lon_lat(t0);
+        for k in 1..=n {
+            let mut uv = lon_lat(t0 + (t1 - t0) * k as f64 / n as f64);
+            uv.x += ((last.x - uv.x) / TAU).round() * TAU;
+            want += 0.5 * (last.x * uv.y - last.y * uv.x);
+            last = uv;
+        }
+        let tr = Trim {
+            piece: 0,
+            forward: true,
+            curve: Some(std::rc::Rc::new(curve.clone())),
+            pole: Vec3::ZERO,
+            t0,
+            t1,
+            map: UvMap::Projected,
+            uv0: lon_lat(t0),
+            uv1: last,
+            v0: 0,
+            v1: 1,
+        };
+        let g = Graph {
+            surface: &surface,
+            sigma: 1.0,
+            scale: Vec2::new(1.0, 1.0),
+        };
+        let got = g.swept_area(&tr);
+        assert!((got - want).abs() < 1e-6, "{got} {want}");
+    }
+
     fn order(back: Departure, a: Departure, b: Departure) -> Ordering {
         turn_order(clockwise_turn(back, a), clockwise_turn(back, b), || (a, b))
     }
@@ -503,5 +591,17 @@ mod tests {
         let back = dep(0.0, 0.0);
         let along = dep(7e-7, -0.04);
         assert!(clockwise_turn(back, along) < 1e-6);
+    }
+
+    #[test]
+    fn a_fitted_tangent_off_by_more_than_a_micro_radian_yields_to_its_chord() {
+        // A cut leaving a corner tangent to the boundary edge it bends away from (a handle's end
+        // touching a body at one point): its fitted tangent lies 1.6e-6 rad on the wrong side of
+        // the edge, but its chord bends 9e-3 rad inside the face, so it is met first.
+        let back = dep(PI, PI);
+        let edge = dep(0.5 * PI, 0.5 * PI);
+        let cut = dep(0.5 * PI - 1.6e-6, 0.5 * PI + 9e-3);
+        assert_eq!(order(back, cut, edge), Ordering::Less);
+        assert_eq!(order(back, edge, cut), Ordering::Greater);
     }
 }

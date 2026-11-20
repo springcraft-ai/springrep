@@ -6,12 +6,15 @@
 //! The faces move along paths from their old surfaces to their new ones. The furthest the solid can
 //! go with its topology kept is found by bisection; there each edge that has shrunk to nothing is
 //! collapsed to a vertex, and each face left a strip between two edges that now run together is
-//! taken out, the two edges one. The move then goes on from there. An event that needs more, as an
-//! edge that would turn through a vertex of four faces, ends it with the error the move gave.
+//! taken out, the two edges one; a corner carried onto an edge splits it first, and a corner of
+//! four faces that the move cannot carry on pulls apart into two joined by a new edge. The move
+//! then goes on from there. An event that needs more ends it with the error the move gave.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use super::{move_faces_pinned, near_uv};
+mod splits;
+
+use super::{move_faces_pinned, near_uv, pole_v};
 use crate::{
     Result,
     boolean::unify,
@@ -49,30 +52,36 @@ pub(crate) fn opening(to: &Cone, s: f64) -> Surface {
 const CLOSED: f64 = 10.0 * tol::LINEAR;
 
 /// `b` with the faces of `paths` moved to the ends of their paths, its topology changed where a
-/// face closes on the way.
-pub(crate) fn through(b: &Brep, paths: &HashMap<FaceId, Path>) -> Result<Brep> {
+/// face closes on the way, and the faces of `b` that closed.
+pub(crate) fn through(b: &Brep, paths: &HashMap<FaceId, Path>) -> Result<(Brep, Vec<FaceId>)> {
     let mut cur = b.clone();
     // The face of `b` each face of `cur` comes from.
     let mut from: HashMap<FaceId, FaceId> = b.face_ids().map(|f| (f, f)).collect();
     let mut s0 = 0.0;
     let mut changed = false;
-    loop {
-        let at = |s: f64| -> Result<Brep> {
-            let mut moved = HashMap::new();
-            for f in cur.face_ids() {
-                if let Some(p) = paths.get(&from[&f]) {
-                    moved.insert(f, p(s)?);
-                } else if changed {
-                    // After a collapse every vertex settles again where its faces meet, those the
-                    // closed faces carried as well.
-                    moved.insert(f, cur.face(f).surface.clone());
-                }
+    // `on` with its faces a share `s` of the way along their paths.
+    let moved = |on: &Brep, from: &HashMap<FaceId, FaceId>, changed: bool, s: f64| {
+        let mut moved = HashMap::new();
+        for f in on.face_ids() {
+            if let Some(p) = paths.get(&from[&f]) {
+                moved.insert(f, p(s)?);
+            } else if changed {
+                // After a collapse every vertex settles again where its faces meet, those the
+                // closed faces carried as well.
+                moved.insert(f, on.face(f).surface.clone());
             }
-            move_faces_pinned(&cur, &moved, &HashMap::new())
-        };
+        }
+        move_faces_pinned(on, &moved, &HashMap::new())
+    };
+    loop {
+        let at = |s: f64| moved(&cur, &from, changed, s);
         let last = match at(1.0) {
-            Ok(out) if changed => return unify(&out),
-            Ok(out) => return Ok(out),
+            Ok(out) if changed => {
+                let kept: HashSet<FaceId> = from.values().copied().collect();
+                let closed = b.face_ids().filter(|f| !kept.contains(f)).collect();
+                return Ok((unify(&out)?, closed));
+            }
+            Ok(out) => return Ok((out, Vec::new())),
             Err(e) => e,
         };
         let (mut lo, mut hi) = (s0, 1.0);
@@ -87,12 +96,36 @@ pub(crate) fn through(b: &Brep, paths: &HashMap<FaceId, Path>) -> Result<Brep> {
                 hi = mid;
             }
         }
-        let Ok(near) = at(lo) else {
-            return Err(last);
+        let closing = at(lo).ok().and_then(|near| {
+            // A corner carried onto an edge it did not touch splits the edge there.
+            if let Some(split) = splits::split_at_vertices(&near, CLOSED) {
+                return collapse(&split, CLOSED, &HashSet::new());
+            }
+            let shrunk = if collapse(&near, CLOSED, &HashSet::new()).is_none() {
+                at(s0)
+                    .map(|start| shrinking(&start, &near))
+                    .unwrap_or_default()
+            } else {
+                HashSet::new()
+            };
+            collapse(&near, CLOSED, &shrunk)
+        });
+        let Some((next, kept)) = closing else {
+            // Nothing closed, and the move cannot go on from where it is: a corner of four faces
+            // that the move pulls apart into two.
+            let Some((split, s)) = pulled_apart(&cur, |on, s| moved(on, &from, changed, s), s0)
+            else {
+                return Err(last);
+            };
+            cur = split;
+            s0 = s;
+            changed = true;
+            continue;
         };
-        let Some((next, kept)) = collapse(&near, CLOSED) else {
-            return Err(last);
-        };
+        // Every face closed: the solid has shrunk to nothing.
+        if next.face_count() == 0 {
+            return Ok((Brep::new(), b.face_ids().collect()));
+        }
         // Faces of `near` are `cur`'s in order; each kept one maps on to its face of `next`.
         let next_from = cur
             .face_ids()
@@ -106,6 +139,73 @@ pub(crate) fn through(b: &Brep, paths: &HashMap<FaceId, Path>) -> Result<Brep> {
     }
 }
 
+/// The most corners of four faces [`pulled_apart`] tries every way to pull apart together.
+const MOST_CORNERS: usize = 4;
+
+/// `cur` with corners of four faces pulled apart, each into two vertices joined by a new edge, and
+/// the first share of the move past `s0` at which `at` moves it: tried at steps growing four times
+/// from a billionth of what is left of the move, so each new edge is longer than the tolerance.
+/// Fewer corners pulled apart are tried first. `None` where no way moves.
+fn pulled_apart(
+    cur: &Brep,
+    at: impl Fn(&Brep, f64) -> Result<Brep>,
+    s0: f64,
+) -> Option<(Brep, f64)> {
+    let corners: Vec<VertexId> = cur
+        .vertex_ids()
+        .filter(|&v| !splits::corner_splits(cur, v).is_empty())
+        .collect();
+    if corners.is_empty() || corners.len() > MOST_CORNERS {
+        return None;
+    }
+    // Each corner kept (0) or pulled apart one of its four ways (1 to 4).
+    let mut ways: Vec<Vec<usize>> = (0..5usize.pow(corners.len() as u32))
+        .map(|mut k| {
+            (0..corners.len())
+                .map(|_| {
+                    let w = k % 5;
+                    k /= 5;
+                    w
+                })
+                .collect()
+        })
+        .filter(|w: &Vec<usize>| w.iter().any(|&x| x > 0))
+        .collect();
+    ways.sort_by_key(|w| w.iter().filter(|&&x| x > 0).count());
+    for way in ways {
+        let mut split = Some(cur.clone());
+        for (&v, &w) in corners.iter().zip(&way) {
+            if w > 0 {
+                split = split.and_then(|b| splits::corner_splits(&b, v).into_iter().nth(w - 1));
+            }
+        }
+        let Some(split) = split else { continue };
+        let mut step = 1e-9 * (1.0 - s0);
+        while step < 1e-2 * (1.0 - s0) {
+            if at(&split, s0 + step).is_ok() {
+                return Some((split, s0 + step));
+            }
+            step *= 4.0;
+        }
+    }
+    None
+}
+
+/// The closed edges of `near` that have shrunk to under a thousandth of their length in `start`,
+/// the same solid earlier on the move: a ball's cap shrinking through a plane reads as touching it
+/// while its rim is still far longer than [`CLOSED`], and the move cannot be followed closer.
+fn shrinking(start: &Brep, near: &Brep) -> HashSet<EdgeId> {
+    near.edge_ids()
+        .filter(|&e| {
+            let (x, y) = (near.edge(e), start.edge(e));
+            let (Some(c), Some(d)) = (&x.curve, &y.curve) else {
+                return false;
+            };
+            x.start == x.end && radial::length(c, x.range) <= 1e-3 * radial::length(d, y.range)
+        })
+        .collect()
+}
+
 fn root(p: &mut [usize], mut i: usize) -> usize {
     while p[i] != i {
         p[i] = p[p[i]];
@@ -115,11 +215,12 @@ fn root(p: &mut [usize], mut i: usize) -> usize {
 }
 
 /// `b` with what has closed taken out: vertices within `eps` of each other made one, edges then
-/// running together made one, and edges shorter than `eps` gone; faces left a strip along one edge,
-/// or lying on each other face to face, taken out; and a face left running along an edge and back
-/// that nothing else uses rid of it. With, for each face of `b`, its face in the result. `None`
-/// where nothing has closed.
-fn collapse(b: &Brep, eps: f64) -> Option<(Brep, Vec<Option<FaceId>>)> {
+/// running together made one, and edges shorter than `eps` gone, or a pole where a closed one
+/// shrank round its face's; faces left a strip along one edge, poles alone, or lying on each other
+/// face to face, taken out; and a face left running along an edge and back that nothing else uses
+/// rid of it. The edges of `shrunk` are closed whatever their length. With, for each face of `b`,
+/// its face in the result. `None` where nothing has closed.
+fn collapse(b: &Brep, eps: f64, shrunk: &HashSet<EdgeId>) -> Option<(Brep, Vec<Option<FaceId>>)> {
     let eids: Vec<EdgeId> = b.edge_ids().collect();
     let vids: Vec<VertexId> = b.vertex_ids().collect();
     let nv = vids.len();
@@ -156,7 +257,7 @@ fn collapse(b: &Brep, eps: f64) -> Option<(Brep, Vec<Option<FaceId>>)> {
                 .map(|c| c.d1(0.5 * (x.range.0 + x.range.1))),
         );
         if let Some(c) = &x.curve
-            && radial::length(c, x.range) <= eps
+            && (radial::length(c, x.range) <= eps || shrunk.contains(&e))
         {
             into[e.index()] = None;
             changed = true;
@@ -198,7 +299,40 @@ fn collapse(b: &Brep, eps: f64) -> Option<(Brep, Vec<Option<FaceId>>)> {
     if !changed {
         return None;
     }
-    // Each face's loops as (edge, reversed) after the merges, closed edges left out.
+    // A closed edge shrunk round a pole of a face's surface (a cone's apex) becomes that pole there,
+    // a degenerate edge numbered from `ne` on.
+    let mut poles: Vec<(VertexId, PCurve)> = Vec::new();
+    let mut pole_of = |c: crate::topo::CoedgeId| -> Option<usize> {
+        let x = b.edge(b.coedge(c).edge);
+        if x.start != x.end {
+            return None;
+        }
+        let surface = &b.face(b.coedge_face(c)).surface;
+        let period = surface.u_period()?;
+        let uvs = b.coedge_uvs(c, &crate::check::coedge_params(b, c, 32));
+        let (a, z) = (uvs[0], uvs[uvs.len() - 1]);
+        let v = pole_v(surface, a.y)?;
+        let reach = match &x.curve {
+            Some(cv) if shrunk.contains(&b.coedge(c).edge) => radial::length(cv, x.range),
+            _ => eps,
+        };
+        if ((z.x - a.x).abs() - period).abs() > 1e-6 * period
+            || surface.eval(a.x, v).dist(b.vertex(x.start).point) > reach
+        {
+            return None;
+        }
+        poles.push((
+            x.start,
+            PCurve::Affine {
+                origin: Vec2::new(a.x, v),
+                dir: Vec2::new(z.x - a.x, 0.0),
+            },
+        ));
+        Some(ne + poles.len() - 1)
+    };
+    // Each face's loops as (edge, reversed) after the merges, closed edges left out, and whether
+    // the face lost an edge so.
+    let mut lost = vec![false; b.face_ids().count()];
     let mut loops: Vec<Vec<Vec<(usize, bool, crate::topo::CoedgeId)>>> = b
         .face_ids()
         .map(|f| {
@@ -211,7 +345,14 @@ fn collapse(b: &Brep, eps: f64) -> Option<(Brep, Vec<Option<FaceId>>)> {
                         .iter()
                         .filter_map(|&c| {
                             let co = b.coedge(c);
-                            into[co.edge.index()].map(|(e, flip)| (e, co.reversed != flip, c))
+                            match into[co.edge.index()] {
+                                Some((e, flip)) => Some((e, co.reversed != flip, c)),
+                                None => {
+                                    let pole = pole_of(c);
+                                    lost[f.index()] |= pole.is_none();
+                                    pole.map(|e| (e, false, c))
+                                }
+                            }
                         })
                         .collect::<Vec<_>>()
                 })
@@ -226,10 +367,15 @@ fn collapse(b: &Brep, eps: f64) -> Option<(Brep, Vec<Option<FaceId>>)> {
         s.sort_unstable();
         s
     };
+    let curved = |e: usize| e < ne && b.edge(eids[e]).curve.is_some();
     for f in 0..nf {
         let es = edge_set(&loops[f]);
-        // No boundary, or a strip along one edge.
-        if es.is_empty() || (es.len() == 2 && es[0] == es[1] && loops[f].len() == 1) {
+        // No boundary, or a strip along one edge (in one loop, or an annulus in two), or poles
+        // alone left where an edge closed: a ball's cap shrunk onto its pole.
+        if es.is_empty()
+            || (es.len() == 2 && es[0] == es[1])
+            || (lost[f] && !es.iter().any(|&e| curved(e)))
+        {
             gone[f] = true;
         }
     }
@@ -252,7 +398,9 @@ fn collapse(b: &Brep, eps: f64) -> Option<(Brep, Vec<Option<FaceId>>)> {
             }
         }
     }
-    // A face running along an edge and back that no other face uses: a slit, which is no edge.
+    // A face running along an edge and back: a slit, which is no edge of the face. The edge goes
+    // where no other face uses it, and stays a ridge where two others do (a top closed between two
+    // walls drafted until they meet).
     let mut uses: HashMap<usize, usize> = HashMap::new();
     for f in (0..nf).filter(|&f| !gone[f]) {
         for &(e, _, _) in loops[f].iter().flatten() {
@@ -266,9 +414,10 @@ fn collapse(b: &Brep, eps: f64) -> Option<(Brep, Vec<Option<FaceId>>)> {
                 let n = l.len();
                 let found = (0..n).find(|&k| {
                     let (a, c) = (l[k], l[(k + 1) % n]);
-                    n >= 2 && a.0 == c.0 && a.1 != c.1 && uses[&a.0] == 2
+                    n >= 2 && a.0 == c.0 && a.1 != c.1 && matches!(uses[&a.0], 2 | 4)
                 });
                 let Some(k) = found else { break };
+                *uses.get_mut(&l[k].0).expect("counted") -= 2;
                 let j = (k + 1) % n;
                 let (hi, lo) = (k.max(j), k.min(j));
                 l.remove(hi);
@@ -294,6 +443,11 @@ fn collapse(b: &Brep, eps: f64) -> Option<(Brep, Vec<Option<FaceId>>)> {
     };
     let mut edges: HashMap<usize, EdgeId> = HashMap::new();
     for &i in &used {
+        if i >= ne {
+            let s = vertex(&mut out, &mut parent, poles[i - ne].0);
+            edges.insert(i, out.add_degenerate_edge(s, (0.0, 1.0)));
+            continue;
+        }
         let x = b.edge(eids[i]);
         let s = vertex(&mut out, &mut parent, x.start);
         let t = vertex(&mut out, &mut parent, x.end);
@@ -319,6 +473,7 @@ fn collapse(b: &Brep, eps: f64) -> Option<(Brep, Vec<Option<FaceId>>)> {
                 let edge = edges[&e];
                 let x = out.edge(edge);
                 let pcurve = match &x.curve {
+                    None if e >= ne => poles[e - ne].1.clone(),
                     None => b.coedge(c).pcurve.clone(),
                     Some(cv) => {
                         let from = if reversed { x.end } else { x.start };

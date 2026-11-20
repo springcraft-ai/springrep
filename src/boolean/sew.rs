@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use super::{
     classify,
-    domain::{Domain, Trim, UvMap, polygon_area},
+    domain::{Domain, Trim, polygon_area},
     ssi::{same_domain, same_domain_faces},
 };
 use crate::{
@@ -17,7 +17,7 @@ use crate::{
     geom::{Curve, Surface},
     math::{Aabb, Point3, Vec2},
     measure, tol,
-    topo::{Brep, CoedgeId, CoedgeSpec, EdgeId, FaceMemo, FaceName, PCurve, VertexId, radial},
+    topo::{Brep, CoedgeId, CoedgeSpec, EdgeId, FaceMemo, FaceName, VertexId, radial},
 };
 
 /// An edge piece's geometry, by piece id.
@@ -46,7 +46,7 @@ pub(crate) struct OutFace {
 
 impl OutFace {
     /// Turns the face inside out: the material moves to the other side.
-    pub(super) fn flip(&mut self) {
+    pub(crate) fn flip(&mut self) {
         self.memo = None;
         self.reversed = !self.reversed;
         for l in &mut self.loops {
@@ -230,20 +230,11 @@ impl UvAffine {
         self.cu * p.x + self.cv * p.y + self.c
     }
 
-    fn dir(&self, d: Vec2) -> Vec2 {
-        self.cu * d.x + self.cv * d.y
-    }
-
     fn trim(&self, t: &Trim) -> Trim {
         let mut out = t.clone();
         out.uv0 = self.point(t.uv0);
         out.uv1 = self.point(t.uv1);
-        if let UvMap::Affine { origin, dir } = t.map {
-            out.map = UvMap::Affine {
-                origin: self.point(origin),
-                dir: self.dir(dir),
-            };
-        }
+        out.map = t.map.mapped(&|p| self.point(p));
         out
     }
 }
@@ -336,12 +327,7 @@ fn merge_group(
             let mut t = t.clone();
             t.uv0 = t.uv0 + d;
             t.uv1 = t.uv1 + d;
-            if let UvMap::Affine { origin, dir } = t.map {
-                t.map = UvMap::Affine {
-                    origin: origin + d,
-                    dir,
-                };
-            }
+            t.map = t.map.mapped(&|p| p + d);
             trims.push(t);
         }
     }
@@ -567,6 +553,26 @@ fn check_uses(faces: &[OutFace], pieces: &[PieceGeom], partners: &HashMap<Use, U
 /// outer.
 type SolidPlan = (Vec<Vec<usize>>, usize);
 
+/// The solid one closed sheet of `faces` bounds, each face kept as it is: neighbours on one
+/// surface stay apart, as a face cut along a curve another operation needs as an edge.
+pub(crate) fn assemble_as_cut(
+    faces: Vec<OutFace>,
+    pool: &[Point3],
+    vtol: &[f64],
+    pieces: &[PieceGeom],
+) -> Result<Brep> {
+    let plan: Vec<SolidPlan> = vec![(vec![(0..faces.len()).collect()], 1)];
+    let (b, _, _) = build(&faces, &plan, pool, vtol, pieces, true);
+    let issues = check::check(&b);
+    if issues.is_empty() {
+        Ok(b)
+    } else {
+        Err(Error::InvalidResult(
+            issues.into_iter().map(|i| i.to_string()).collect(),
+        ))
+    }
+}
+
 /// An arena holding `faces`, grouped into solids of sheets, with each face use's coedge. With
 /// `share`, a solid's sheets share the vertices and edges where they touch; without, each sheet
 /// has its own, as a trial of each sheet alone needs.
@@ -619,13 +625,7 @@ fn build(
                                 e
                             }
                         };
-                        let pcurve = match &t.map {
-                            UvMap::Affine { origin, dir } => PCurve::Affine {
-                                origin: *origin,
-                                dir: *dir,
-                            },
-                            UvMap::Projected => PCurve::Projected { seed: t.uv0 },
-                        };
+                        let pcurve = t.map.pcurve(t.uv0);
                         specs.push(CoedgeSpec {
                             edge: e,
                             reversed: !t.forward,

@@ -59,6 +59,10 @@ impl Codec for PCurve {
                 1u8.put(w);
                 seed.put(w);
             }
+            PCurve::Spline { uv } => {
+                2u8.put(w);
+                uv.put(w);
+            }
         }
     }
     fn get(r: &mut Reader) -> Option<PCurve> {
@@ -70,6 +74,7 @@ impl Codec for PCurve {
             1 => PCurve::Projected {
                 seed: Codec::get(r)?,
             },
+            2 => PCurve::Spline { uv: Codec::get(r)? },
             _ => return None,
         })
     }

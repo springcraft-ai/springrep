@@ -620,3 +620,354 @@ fn a_chamfer_of_two_distances_sets_the_first_back_on_the_face_named() {
     let (bottom, _) = face_at(&b, Vec3::new(5.0, 4.0, 0.0)).unwrap();
     assert!(chamfer_two_edges(&b, edge, bottom, 2.0, 1.0, "cha").is_err());
 }
+
+#[test]
+fn a_chamfer_sets_back_along_a_ball_by_the_chord() {
+    use springrep::{
+        blend::chamfer_two_edges,
+        measure::{edge_at, face_at},
+        primitive,
+    };
+    // The upper half of the ball of radius 5, its rim set back 2 on the flat and 1 on the ball. The
+    // chord 1 from the rim turns 2·asin(1/10) about the centre, to the circle of radius 4.9 at
+    // height h = 3√11/10; the cone runs from there to the circle of radius 3 on the flat.
+    let ball = primitive::sphere(&Frame::WORLD, 5.0, "ball").unwrap();
+    let corner = Frame::new(Vec3::new(-6.0, -6.0, -6.0), Vec3::Z, Vec3::X).unwrap();
+    let below = primitive::block(&corner, Vec3::new(12.0, 12.0, 6.0), "cut").unwrap();
+    let half = difference(&ball, &below).unwrap();
+    let (edge, _) = edge_at(&half, Vec3::new(5.0, 0.0, 0.0)).unwrap();
+    let (flat, _) = face_at(&half, Vec3::new(1.0, 1.0, 0.0)).unwrap();
+    let b = chamfer_two_edges(&half, edge, flat, 2.0, 1.0, "cha").unwrap();
+    let h = 3.0 * 11f64.sqrt() / 10.0;
+    let (r0, r1) = (3.0, 4.9);
+    let volume = 250.0 * PI / 3.0 - PI * (25.0 * h - h.powi(3) / 3.0)
+        + PI * h * (r0 * r0 + r0 * r1 + r1 * r1) / 3.0;
+    let slant = ((r1 - r0).powi(2) + h * h).sqrt();
+    let area = PI * r0 * r0 + 2.0 * PI * 5.0 * (5.0 - h) + PI * (r0 + r1) * slant;
+    assert_solid(&b, volume, area);
+    assert_eq!(kinds(&b, "cone"), 1);
+}
+
+#[test]
+fn a_chamfer_by_a_distance_and_an_angle_runs_to_where_its_bevel_meets_the_other_face() {
+    use springrep::{
+        blend::chamfer_distance_angle,
+        measure::{edge_at, face_at},
+        primitive,
+    };
+    // The upper half of the ball of radius 5, its rim set back 1 on the flat at 45° to it: the
+    // bevel z = ρ − 4 meets the ball where (4 + u)² + u² = 25, u = (√34 − 4)/2. The ring it takes
+    // has, at height z below u, the radii from z + 4 out to √(25 − z²).
+    let ball = primitive::sphere(&Frame::WORLD, 5.0, "ball").unwrap();
+    let corner = Frame::new(Vec3::new(-6.0, -6.0, -6.0), Vec3::Z, Vec3::X).unwrap();
+    let below = primitive::block(&corner, Vec3::new(12.0, 12.0, 6.0), "cut").unwrap();
+    let half = difference(&ball, &below).unwrap();
+    let (edge, _) = edge_at(&half, Vec3::new(5.0, 0.0, 0.0)).unwrap();
+    let (flat, _) = face_at(&half, Vec3::new(1.0, 1.0, 0.0)).unwrap();
+    let b = chamfer_distance_angle(&half, edge, flat, 1.0, PI / 4.0, "cha").unwrap();
+    let u = (34f64.sqrt() - 4.0) / 2.0;
+    let ring = PI * (9.0 * u - 4.0 * u * u - 2.0 * u.powi(3) / 3.0);
+    let area = 16.0 * PI + 50.0 * PI - 10.0 * PI * u + PI * (8.0 + u) * 2f64.sqrt() * u;
+    assert_solid(&b, 250.0 * PI / 3.0 - ring, area);
+    // An angle of a half turn or more leaves no bevel.
+    assert!(chamfer_distance_angle(&half, edge, flat, 1.0, PI, "cha").is_err());
+}
+
+#[test]
+fn a_chamfer_of_one_rim_of_a_bore_leaves_the_other_sharp() {
+    use springrep::{
+        blend::chamfer_two_edges,
+        measure::{edge_at, face_at},
+        primitive,
+    };
+    // A ball of radius 5 bored through by radius 2; its rims are circles of radius 2 at
+    // z = ±√21, both between the same two faces. Only the upper one is set back, 2 down the bore
+    // and 1 on the ball, to the circle of radius ρ₁ at z₁ that the chord 1 reaches.
+    let ball = primitive::sphere(&Frame::WORLD, 5.0, "ball").unwrap();
+    let bore = primitive::cylinder(&at_z(-6.0), 2.0, 12.0, "bore").unwrap();
+    let body = difference(&ball, &bore).unwrap();
+    let top = 21f64.sqrt();
+    let (edge, _) = edge_at(&body, Vec3::new(2.0, 0.0, top)).unwrap();
+    let (wall, _) = face_at(&body, Vec3::new(2.0, 0.0, 0.0)).unwrap();
+    let b = chamfer_two_edges(&body, edge, wall, 2.0, 1.0, "cha").unwrap();
+    // The rim (2, √21) turned by 2·asin(1/10) away from the bore, about the ball's centre.
+    let turn = 2.0 * (0.1f64).asin();
+    let (rho1, z1) = (
+        2.0 * turn.cos() + top * turn.sin(),
+        top * turn.cos() - 2.0 * turn.sin(),
+    );
+    // The bored ball, πH³/6 for its bore's length H = 2√21, less the ring between the bore, the
+    // ball and the cone: the ball's zone over the frustum's and the bore's cylinder.
+    let zone = |a: f64, b: f64| PI * (25.0 * (b - a) - (b.powi(3) - a.powi(3)) / 3.0);
+    let (za, zb) = (top - 2.0, z1);
+    let frustum = PI * (zb - za) * (4.0 + 2.0 * rho1 + rho1 * rho1) / 3.0;
+    let ring = zone(za, top) - PI * 4.0 * (top - za) - (zone(za, zb) - frustum);
+    let volume = PI * (2.0 * top).powi(3) / 6.0 - ring;
+    let slant = ((rho1 - 2.0).powi(2) + (zb - za).powi(2)).sqrt();
+    let area = 2.0 * PI * 5.0 * (2.0 * top) + 2.0 * PI * 2.0 * (2.0 * top)
+        - 2.0 * PI * 5.0 * (top - z1)
+        - 2.0 * PI * 2.0 * 2.0
+        + PI * (2.0 + rho1) * slant;
+    assert_solid(&b, volume, area);
+    assert_eq!(kinds(&b, "cone"), 1);
+}
+
+#[test]
+fn a_blend_that_takes_a_whole_end_closes_it_to_a_point_on_the_axis() {
+    use springrep::primitive;
+    // A cylinder of radius 5 and height 10. A chamfer of 5 takes the whole top: a cone of height 5
+    // stands on the cylinder's lower half, its apex the top's centre. A fillet of 5 rolls a ball
+    // centred on the axis: a hemisphere stands there instead.
+    let c = primitive::cylinder(&Frame::WORLD, 5.0, 10.0, "cyl").unwrap();
+    let base = (125.0 * PI, 25.0 * PI + 50.0 * PI);
+    let b = chamfer(&c, &[("cyl.end", "cyl.side")], 5.0, "c").unwrap();
+    let cone = (125.0 * PI / 3.0, 25.0 * 2f64.sqrt() * PI);
+    assert_solid(&b, base.0 + cone.0, base.1 + cone.1);
+    assert_eq!((b.face_count(), kinds(&b, "cone")), (3, 1));
+    let b = fillet(&c, &[("cyl.end", "cyl.side")], 5.0, "f").unwrap();
+    let dome = (2.0 * PI * 125.0 / 3.0, 50.0 * PI);
+    assert_solid(&b, base.0 + dome.0, base.1 + dome.1);
+    assert_eq!((b.face_count(), kinds(&b, "sphere")), (3, 1));
+}
+
+/// The octahedron |x| + |y| + |z| ≤ `a`, its eight faces planes.
+fn octahedron(a: f64) -> Brep {
+    let p = [
+        Vec3::new(a, 0.0, 0.0),
+        Vec3::new(-a, 0.0, 0.0),
+        Vec3::new(0.0, a, 0.0),
+        Vec3::new(0.0, -a, 0.0),
+        Vec3::new(0.0, 0.0, a),
+        Vec3::new(0.0, 0.0, -a),
+    ];
+    let mut tris = Vec::new();
+    for (x, y, z) in [(0, 2, 4), (1, 3, 4), (0, 3, 5), (1, 2, 5)] {
+        tris.push([x, y, z]);
+    }
+    for (x, y, z) in [(1, 2, 4), (0, 3, 4), (0, 2, 5), (1, 3, 5)] {
+        tris.push([y, x, z]);
+    }
+    mesh::solid(&p, &tris).unwrap()
+}
+
+#[test]
+fn edges_chamfered_one_after_another_meet_at_each_corner_in_a_point() {
+    use springrep::{blend::chamfer_edges, measure::edge_at, primitive};
+    // A cube of side 10, its edges chamfered 2 one at a time: each later chamfer ends on the
+    // earlier ones' faces. Twelve prisms of section 2 along the edges, and in each corner's cube
+    // of side 2 all but the points whose distances from the faces pair up to at least 2, which
+    // fill a quarter of it: 1000 − 12·2·(10 − 4) − 8·3·8/4. Each face keeps its 6 × 6 square and
+    // each chamfer is a rectangle 6 by 2√2 with a triangle of base 2√2 and height 1 at each end.
+    let cube = primitive::block(&Frame::WORLD, Vec3::new(10.0, 10.0, 10.0), "cube").unwrap();
+    let sides = ["cube.v_min", "cube.u_max", "cube.v_max", "cube.u_min"];
+    let mut b = cube;
+    for (i, side) in sides.iter().enumerate() {
+        for pair in [
+            (*side, sides[(i + 1) % 4]),
+            ("cube.start", *side),
+            ("cube.end", *side),
+        ] {
+            b = chamfer(&b, &[pair], 2.0, "c").unwrap();
+        }
+    }
+    let sqrt2 = 2f64.sqrt();
+    assert_solid(&b, 1000.0 - 144.0 - 48.0, 216.0 + 12.0 * 14.0 * sqrt2);
+    assert_eq!(b.face_count(), 18);
+    // The octahedron |x| + |y| + |z| ≤ 10, its edges chamfered √6 across each face one at a time:
+    // four faces meet at each corner. In each octant the three wedges past the chamfers
+    // x + y ≤ 8, ..., each ∫ s(10 − s) ds over 8 ≤ s ≤ 10 = 52/3, less the three regions two of
+    // them share, each 8/3. Each face keeps the triangle of side 4√2 and each chamfer is a
+    // rectangle 4√2 by 4 with a triangle of base 4 and height 2√2 at each end.
+    let mut b = octahedron(10.0);
+    let mids = [
+        (5.0, 5.0, 0.0),
+        (5.0, -5.0, 0.0),
+        (-5.0, 5.0, 0.0),
+        (-5.0, -5.0, 0.0),
+        (5.0, 0.0, 5.0),
+        (5.0, 0.0, -5.0),
+        (-5.0, 0.0, 5.0),
+        (-5.0, 0.0, -5.0),
+        (0.0, 5.0, 5.0),
+        (0.0, 5.0, -5.0),
+        (0.0, -5.0, 5.0),
+        (0.0, -5.0, -5.0),
+    ];
+    for (x, y, z) in mids {
+        let (e, _) = edge_at(&b, Vec3::new(x, y, z)).unwrap();
+        b = chamfer_edges(&b, &[e], 6f64.sqrt(), "c").unwrap();
+    }
+    let volume = 4000.0 / 3.0 - 8.0 * (3.0 * 52.0 / 3.0 - 8.0);
+    let area = 8.0 * 3f64.sqrt() / 4.0 * 32.0 + 12.0 * (4.0 * sqrt2 * 4.0 + 4.0 * 2.0 * sqrt2);
+    assert_solid(&b, volume, area);
+    assert_eq!(b.face_count(), 20);
+}
+
+#[test]
+fn chamfers_meeting_at_a_corner_close_it_with_the_plane_of_their_contacts() {
+    use springrep::{blend::chamfer_edges, primitive, topo::EdgeId};
+    // A cube of side 10, all edges chamfered 2 at once. The contact lines on each face cross 2 in
+    // from the corner, and the plane through the three crossings cuts it: in each corner's cube of
+    // side 2 the tetrahedron (2, 2, 2), (2, 2, 0), (2, 0, 2), (0, 2, 2) stays, 1/6 of it. Each
+    // corner face is the equilateral triangle of side 2√2.
+    let cube = primitive::block(&Frame::WORLD, Vec3::new(10.0, 10.0, 10.0), "cube").unwrap();
+    let edges: Vec<EdgeId> = cube.edge_ids().collect();
+    let b = chamfer_edges(&cube, &edges, 2.0, "c").unwrap();
+    let (sqrt2, sqrt3) = (2f64.sqrt(), 3f64.sqrt());
+    assert_solid(
+        &b,
+        1000.0 - 144.0 - 8.0 * (8.0 - 8.0 / 6.0),
+        216.0 + 144.0 * sqrt2 + 8.0 * sqrt3 / 4.0 * 8.0,
+    );
+    assert_eq!((b.face_count(), names(&b, "c.corner")), (26, 8));
+    // The octahedron |x| + |y| + |z| ≤ 10, all edges chamfered √6 at once: four chamfers at each
+    // corner, whose contact crossings lie on the plane 4 in from it, |x| = 6. Past the mitred
+    // corners (as chamfered one at a time) each corner loses the square pyramid of height 2 on
+    // the square of side 4.
+    let o = octahedron(10.0);
+    let edges: Vec<EdgeId> = o.edge_ids().collect();
+    let b = chamfer_edges(&o, &edges, 6f64.sqrt(), "c").unwrap();
+    let mitred = 4000.0 / 3.0 - 8.0 * (3.0 * 52.0 / 3.0 - 8.0);
+    let area = 8.0 * sqrt3 / 4.0 * 32.0 + 12.0 * 4.0 * sqrt2 * 4.0 + 6.0 * 16.0;
+    assert_solid(&b, mitred - 6.0 * 16.0 * 2.0 / 3.0, area);
+    assert_eq!((b.face_count(), names(&b, "c.corner")), (26, 6));
+}
+
+#[test]
+fn fillets_at_a_corner_of_more_planes_or_concave_close_with_their_ball() {
+    use springrep::{blend::fillet_edges, primitive, topo::EdgeId};
+    // The octahedron |x| + |y| + |z| ≤ 10, every edge rounded 2: four planes meet at each corner,
+    // and the planes 2 in from them meet in one point, so one ball touches all four. The result is
+    // the octahedron shrunk by 2, |x| + |y| + |z| ≤ s = 10 − 2√3, grown by 2 (Steiner): its edges
+    // s√2 long each turn through arccos(1/3).
+    let o = octahedron(10.0);
+    let edges: Vec<EdgeId> = o.edge_ids().collect();
+    let b = fillet_edges(&o, &edges, 2.0, "f").unwrap();
+    let s = 10.0 - 2.0 * 3f64.sqrt();
+    let (v_in, s_in) = (4.0 * s.powi(3) / 3.0, 4.0 * 3f64.sqrt() * s * s);
+    let m_in = 12.0 * 2f64.sqrt() * s * (1.0f64 / 3.0).acos() / 2.0;
+    assert_solid(
+        &b,
+        v_in + 2.0 * s_in + 4.0 * m_in + 32.0 * PI / 3.0,
+        s_in + 4.0 * m_in + 16.0 * PI,
+    );
+    assert_eq!(kinds(&b, "sphere"), 6);
+    // A cube of side 20 with the cube of side 10 cut from one corner; the notch's three concave
+    // edges rounded 3. Along each edge a strip of section (1 − π/4)·9, and at the inside corner
+    // the cube of side 3 less an eighth of the ball of radius 3.
+    let cube = primitive::block(&Frame::WORLD, Vec3::new(20.0, 20.0, 20.0), "cube").unwrap();
+    let at = Frame::new(Vec3::new(10.0, 10.0, 10.0), Vec3::Z, Vec3::X).unwrap();
+    let notch = primitive::block(&at, Vec3::new(10.0, 10.0, 10.0), "notch").unwrap();
+    let body = difference(&cube, &notch).unwrap();
+    let pairs = [
+        ("notch.u_min", "notch.v_min"),
+        ("notch.v_min", "notch.start"),
+        ("notch.start", "notch.u_min"),
+    ];
+    let b = fillet(&body, &pairs, 3.0, "f").unwrap();
+    let r: f64 = 3.0;
+    let spandrel = (1.0 - PI / 4.0) * r * r;
+    let volume = 7000.0 + r.powi(3) * (1.0 - PI / 6.0) + 3.0 * spandrel * (10.0 - r);
+    let area = 2400.0 - 300.0
+        + 3.0 * (10.0 - r).powi(2)
+        + 1.5 * PI * r * (10.0 - r)
+        + PI * r * r / 2.0
+        + 3.0 * spandrel;
+    assert_solid(&b, volume, area);
+    assert_eq!(kinds(&b, "sphere"), 1);
+}
+
+#[test]
+fn fillets_at_an_apex_no_ball_fits_split_it_along_a_ridge() {
+    use springrep::{blend::fillet_edges, boolean::unify, topo::EdgeId};
+    // The pyramid on the rectangle (±10, ±6, 0) with its apex at (0, 0, 12), every edge rounded
+    // 3/2. No ball touches all four planes at the apex: the long sides' planes 3/2 in meet lower
+    // than the short ends'. The result is the pyramid shrunk by 3/2, a hip roof on the rectangle
+    // 2a × 2b at z = 3/2 with its ridge along x from −x' to x' at H above that, grown by 3/2
+    // (Steiner): V' + S'r + M'r² + 4πr³/3, M' each edge's length times half the angle between its
+    // faces' normals.
+    let p = [
+        Vec3::new(-10.0, -6.0, 0.0),
+        Vec3::new(10.0, -6.0, 0.0),
+        Vec3::new(10.0, 6.0, 0.0),
+        Vec3::new(-10.0, 6.0, 0.0),
+        Vec3::new(0.0, 0.0, 12.0),
+    ];
+    let tris = [
+        [0, 2, 1],
+        [0, 3, 2],
+        [0, 1, 4],
+        [1, 2, 4],
+        [2, 3, 4],
+        [3, 0, 4],
+    ];
+    let pyramid = unify(&mesh::solid(&p, &tris).unwrap()).unwrap();
+    assert_eq!(pyramid.face_count(), 5);
+    let edges: Vec<EdgeId> = pyramid.edge_ids().collect();
+    let r = 1.5;
+    let b = fillet_edges(&pyramid, &edges, r, "f").unwrap();
+    let (s5, s61) = (5f64.sqrt(), 61f64.sqrt());
+    let (a, bb, x) = (
+        (35.0 - s61) / 4.0,
+        (21.0 - 3.0 * s5) / 4.0,
+        (5.0 * s5 - s61) / 4.0,
+    );
+    let h = (21.0 - 3.0 * s5) / 2.0;
+    let v_in = 2.0 / 3.0 * h * bb * (2.0 * a + x);
+    let s_in = 4.0 * a * bb
+        + 2.0 * bb * ((a - x).powi(2) + h * h).sqrt()
+        + 2.0 * (a + x) * (bb * bb + h * h).sqrt();
+    let hip = ((a - x).powi(2) + bb * bb + h * h).sqrt();
+    let m_in = 0.5
+        * (2.0 * 2.0 * a * (-1.0 / s5).acos()
+            + 2.0 * 2.0 * bb * (-5.0 / s61).acos()
+            + 4.0 * hip * (5.0 / 305f64.sqrt()).acos()
+            + 2.0 * x * (-0.6f64).acos());
+    let volume = v_in + s_in * r + m_in * r * r + 4.0 * PI * r.powi(3) / 3.0;
+    let area = s_in + 2.0 * m_in * r + 4.0 * PI * r * r;
+    assert_solid(&b, volume, area);
+    assert_eq!(kinds(&b, "sphere"), 6);
+}
+
+#[test]
+fn a_straight_edge_between_a_plane_and_a_bore_takes_a_chamfer_by_the_chord() {
+    // The key standing in a bore, as above, the root of each side chamfered 1 on both faces: 1
+    // along the side, and a chord 1 long on the bore's wall, which turns 2·asin(1/40) about its
+    // axis.
+    let plate = extrude(
+        &Profile::rect(Vec2::ZERO, 60.0, 60.0),
+        &at_z(0.0),
+        10.0,
+        "plate",
+    );
+    let bore = extrude(&Profile::circle(Vec2::ZERO, 40.0), &at_z(0.0), 10.0, "bore");
+    let key = extrude(
+        &Profile::rect(Vec2::new(18.0, 0.0), 6.0, 6.0),
+        &at_z(0.0),
+        10.0,
+        "key",
+    );
+    let body = union(
+        &difference(&plate.unwrap(), &bore.unwrap()).unwrap(),
+        &key.unwrap(),
+    )
+    .unwrap();
+    let pairs = [("key.v_max", "bore.side"), ("key.v_min", "bore.side")];
+    let b = chamfer(&body, &pairs, 1.0, "c").unwrap();
+    let p = Vec2::new(391f64.sqrt(), 3.0);
+    let t0 = Vec2::new(p.x - 1.0, 3.0);
+    let turn = 2.0 * (1.0f64 / 40.0).asin();
+    let t1 = Vec2::new(
+        p.x * turn.cos() - p.y * turn.sin(),
+        p.x * turn.sin() + p.y * turn.cos(),
+    );
+    let (g_bore, bore_len) = arc_green(Vec2::ZERO, 20.0, t1, p);
+    let spandrel = (0.5 * (p.cross(t0) + t0.cross(t1)) + g_bore).abs();
+    let in_bore = |y: f64| y / 2.0 * (400.0 - y * y).sqrt() + 200.0 * (y / 20.0).asin();
+    let key_in_bore = in_bore(3.0) - in_bore(-3.0) - 15.0 * 6.0;
+    let volume = 10.0 * (3600.0 - 400.0 * PI + key_in_bore + 2.0 * spandrel);
+    let area = measure::area(&body) + 4.0 * spandrel + 20.0 * ((t1 - t0).norm() - 1.0 - bore_len);
+    assert_solid(&b, volume, area);
+    assert_eq!(names(&b, "c.bevel_0"), 1);
+    assert_eq!(names(&b, "c.bevel_1"), 1);
+}

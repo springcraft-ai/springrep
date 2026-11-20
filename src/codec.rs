@@ -297,8 +297,7 @@ impl Codec for BSpline {
         let knots = Vec::get(r)?;
         let ctrl = Vec::get(r)?;
         if bool::get(r)? {
-            (degree == 3).then_some(())?;
-            BSpline::periodic_cubic(knots, ctrl).ok()
+            BSpline::periodic(degree, knots, ctrl).ok()
         } else {
             BSpline::new(degree, knots, ctrl).ok()
         }

@@ -1724,7 +1724,11 @@ pub(super) fn sew(geo: &mut Geometry, tolerance: f64) -> Result<Brep> {
             "STEP: the file holds no faces to sew".into(),
         ));
     }
-    let mut raw = without_split(rd.raw, &rd.splits);
+    sew_raw(without_split(rd.raw, &rd.splits), tolerance)
+}
+
+/// The faces of `raw`, each with its own vertices and edges, sewn into one solid as [`sew`] does.
+fn sew_raw(mut raw: Raw, tolerance: f64) -> Result<Brep> {
     // Points within the tolerance of each other are one, at their mean.
     let n = raw.points.len();
     let mut rep: Vec<usize> = (0..n).collect();
@@ -1768,19 +1772,32 @@ pub(super) fn sew(geo: &mut Geometry, tolerance: f64) -> Result<Brep> {
             continue;
         }
         let (a, b) = ends(&raw.edges[i], &mut rep);
-        let mid = |e: &RawEdge| {
+        // Points a quarter, half and three quarters along an edge: two curves between one pair of
+        // points can both pass nearest the middle of their chord at one of its ends.
+        let inside = |e: &RawEdge, closed: bool| -> Vec<Point3> {
             let (s, z) = (raw.points[e.start], raw.points[e.end]);
-            let t = param_of(&e.curve, s.lerp(z, 0.5));
-            e.curve.eval(t)
+            match edge_range(&e.curve, s, z, closed) {
+                Some((t0, t1)) => [0.25, 0.5, 0.75]
+                    .map(|f| e.curve.eval(t0 + (t1 - t0) * f))
+                    .to_vec(),
+                None => vec![e.curve.eval(param_of(&e.curve, s.lerp(z, 0.5)))],
+            }
         };
-        let mi = mid(&raw.edges[i]);
+        let on = |ps: &[Point3], e: &RawEdge| {
+            ps.iter()
+                .all(|&p| e.curve.eval(param_of(&e.curve, p)).dist(p) <= tolerance)
+        };
+        let mi = inside(&raw.edges[i], a == b);
         for j in i + 1..raw.edges.len() {
             if keep[j] != j {
                 continue;
             }
             let (c, d) = ends(&raw.edges[j], &mut rep);
             let same = (a, b) == (c, d);
-            if !(same || (a, b) == (d, c)) || mid(&raw.edges[j]).dist(mi) > tolerance {
+            if !(same || (a, b) == (d, c))
+                || !on(&mi, &raw.edges[j])
+                || !on(&inside(&raw.edges[j], c == d), &raw.edges[i])
+            {
                 continue;
             }
             keep[j] = i;
@@ -2062,6 +2079,32 @@ pub(crate) fn parts_of(b: &Brep) -> Result<Parts> {
 /// The solid `parts` describe, its pcurves and parameter ranges found as a file's are. Points and
 /// edges no face uses are left out.
 pub(crate) fn solid_of(parts: &Parts) -> Result<Brep> {
+    let (mut raw, order) = raw_of(parts);
+    let (ranges, _) = heal::heal(&mut raw)?;
+    let mut out = assemble(&raw, &ranges, None)?;
+    named(&mut out, parts, &order);
+    Ok(out)
+}
+
+/// The faces `parts` describe, each with its own points and edges, sewn into one solid as a STEP
+/// file's open shells are ([`sew`]): points within `tolerance` become one, and so do the edges
+/// that then lie together.
+pub(crate) fn sewn(parts: &Parts, tolerance: f64) -> Result<Brep> {
+    let (raw, order) = raw_of(parts);
+    let mut out = sew_raw(raw, tolerance)?;
+    named(&mut out, parts, &order);
+    Ok(out)
+}
+
+/// Gives each face of `out`, built in `order` from `parts`, its part's names.
+fn named(out: &mut Brep, parts: &Parts, order: &[usize]) {
+    for (g, &at) in out.face_ids().collect::<Vec<_>>().into_iter().zip(order) {
+        out.set_face_names(g, parts.faces[at].names.clone());
+    }
+}
+
+/// `parts` as a read solid's topology, its faces in shell order, and the part each face came from.
+fn raw_of(parts: &Parts) -> (Raw, Vec<usize>) {
     let mut raw = Raw::default();
     let mut edge_at = vec![usize::MAX; parts.edges.len()];
     let mut point_at = vec![usize::MAX; parts.points.len()];
@@ -2114,10 +2157,5 @@ pub(crate) fn solid_of(parts: &Parts) -> Result<Brep> {
         }
         raw.shells[f.shell].push(fi);
     }
-    let (ranges, _) = heal::heal(&mut raw)?;
-    let mut out = assemble(&raw, &ranges, None)?;
-    for (g, &at) in out.face_ids().collect::<Vec<_>>().into_iter().zip(&order) {
-        out.set_face_names(g, parts.faces[at].names.clone());
-    }
-    Ok(out)
+    (raw, order)
 }

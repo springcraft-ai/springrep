@@ -2,35 +2,41 @@
 //! across them (a plane where a ruled side is flat). Faces are `start` and `end` on the first and
 //! last sections and `side` for the rest.
 //!
-//! Sections are matched by one rule: outer
+//! Sections are matched by one rule, each loop with the loop at its place in every other section:
 //! loops turned to run the same way about the loft, edge `i` to edge `i` when every section has as
 //! many, otherwise every section split at the polar angles of every other's vertices. Each column
 //! of matched edges is brought to one degree and knot vector, and its control points are carried
 //! across the sections: linearly when ruled or with two sections, otherwise by the lowest-degree
 //! Bézier through the first and last sections that fits the others within the linear tolerance.
 
+mod developable;
+mod guide;
 pub(crate) mod rail;
+mod skin;
 #[cfg(test)]
 mod tests;
 
 use std::f64::consts::TAU;
 
+pub use developable::loft_developable;
+pub use guide::{Guide, loft_guided};
 use rail::{Across, Hom, Rail, point};
+use skin::{Band, CapEdge};
 
 use crate::{
     Error, Result, check,
     error::invalid,
-    geom::{Curve, Line, NurbsCurve, NurbsSurface, Plane, Surface},
+    geom::{Curve, Line, NurbsSurface, Plane, Surface},
     math::{Frame, Point3, Vec2, Vec3},
     profile::{Names, Profile, ProfileLoop},
     tol,
-    topo::{Brep, CoedgeSpec, EdgeId, FaceName, PCurve, VertexId},
+    topo::{Brep, CoedgeSpec, EdgeId, FaceId, FaceName, PCurve},
 };
 
 /// The highest degree a smooth loft takes across its sections.
 const MAX_ACROSS_DEGREE: usize = 8;
 
-/// One section: a profile on a plane. Only its outer loop is lofted.
+/// One section: a profile on a plane, its outer loop and each hole lofted.
 #[derive(Clone, Debug)]
 pub struct Section {
     pub profile: Profile,
@@ -44,11 +50,28 @@ struct Piece {
     t0: f64,
     t1: f64,
     straight: bool,
+    /// A vertex standing for an edge of another section: `curve` is a line through it and
+    /// `t0 = t1 = 0`.
+    point: bool,
     /// The names of the profile edge this is, or is a part of.
     names: Names,
 }
 
 impl Piece {
+    fn point(p: Point3) -> Piece {
+        Piece {
+            curve: Curve::Line(Line {
+                origin: p,
+                dir: Vec3::X,
+            }),
+            t0: 0.0,
+            t1: 0.0,
+            straight: false,
+            point: true,
+            names: Names::new(),
+        }
+    }
+
     fn param(&self, s: f64) -> f64 {
         self.t0 + (self.t1 - self.t0) * s
     }
@@ -93,14 +116,6 @@ fn centroid(lp: &ProfileLoop) -> Vec2 {
     Vec2::new(cx / (3.0 * a), cy / (3.0 * a))
 }
 
-fn outer(s: &Section) -> Result<ProfileLoop> {
-    let p = s.profile.normalized()?;
-    Ok(p.loops
-        .into_iter()
-        .next()
-        .expect("a normalized profile has a loop"))
-}
-
 fn ring(s: &Section, lp: &ProfileLoop, along: Vec3) -> Result<Ring> {
     let mut lp = lp.clone();
     let c = centroid(&lp);
@@ -121,6 +136,7 @@ fn ring(s: &Section, lp: &ProfileLoop, along: Vec3) -> Result<Ring> {
             };
             Piece {
                 straight: matches!(placed.curve, Curve::Line(_)),
+                point: false,
                 names: seg.names.clone(),
                 curve: placed.curve,
                 t0,
@@ -335,77 +351,56 @@ fn across(columns: &[Vec<Rail>], n: usize) -> Result<Across> {
     rail::interpolation(&params)
 }
 
-fn affine(origin: Vec2, dir: Vec2) -> PCurve {
-    PCurve::Affine { origin, dir }
-}
-
-fn projected(frame: &Frame, p: Point3) -> PCurve {
-    let l = frame.to_local(p);
-    PCurve::Projected {
-        seed: Vec2::new(l.x, l.y),
-    }
-}
-
-fn coedge(edge: EdgeId, reversed: bool, pcurve: PCurve) -> CoedgeSpec {
-    CoedgeSpec {
-        edge,
-        reversed,
-        pcurve,
-    }
-}
-
-/// How an edge's parameter maps onto a side face's `u` or `v`: `scale · t`.
-#[derive(Clone, Copy)]
-struct EdgeParam {
-    id: EdgeId,
-    scale: f64,
-}
-
-/// The plane through two matched straight edges, `x` along the loop and `z` outward, when they
-/// are coplanar.
-fn flat_side(a0: Point3, b0: Point3, a1: Point3, b1: Point3) -> Option<Frame> {
-    let x = (b0 - a0).unit()?;
-    let w = a1 - a0;
-    let y = (w - x * w.dot(x)).unit()?;
-    let z = x.cross(y);
-    let off = (b1 - a0).dot(z).abs().max((b1 - a1).dot(z).abs());
-    (off <= tol::LINEAR).then_some(Frame {
-        origin: a0,
-        x,
-        y,
-        z,
-    })
-}
-
-/// A side face's names: `side`, and the names of the first section's edge it grows from.
-fn side_names(feature: &str, edge: &Names) -> Vec<FaceName> {
-    let mut names = vec![FaceName::new(feature, FaceName::SIDE)];
-    names.extend(FaceName::all(
-        feature,
-        edge.iter().filter(|n| !n.is_empty()),
-    ));
-    names
-}
-
 /// Lofts through `sections` in order, ruled (straight between consecutive sections) or smooth. The
 /// first section's outline is the `start` face and the last one's the `end` face. Every face
 /// between is `side`, and also carries the name of the first section's edge it grows from; where
-/// sections with different edge counts split that edge, each part carries its name.
+/// sections with different edge counts split that edge, each part carries its name. Every section
+/// has as many holes, and each hole is lofted with the one at its place in the next section.
 pub fn loft(sections: &[Section], ruled: bool, feature: &str) -> Result<Brep> {
+    lofted(sections, None, ruled, feature)
+}
+
+/// Lofts through `sections` in order and on to the point `apex`, which lies beyond the last
+/// section, ruled or smooth as [`loft`] does. Every side face meets the apex in a point: a flat
+/// face there is a triangle, and a curved one has a pole. The sections have no holes; the first
+/// one's outline is the `start` face, and there is no `end` face.
+pub fn loft_to_point(
+    sections: &[Section],
+    apex: Point3,
+    ruled: bool,
+    feature: &str,
+) -> Result<Brep> {
+    lofted(sections, Some(apex), ruled, feature)
+}
+
+/// The profiles of `sections`, normalized, each with as many loops; and the direction from the
+/// first section's centre to the last's, or to `apex`, checked against the sections' planes.
+fn prepare(sections: &[Section], apex: Option<Point3>) -> Result<(Vec<Profile>, Vec3)> {
     let n = sections.len();
-    if n < 2 {
-        return invalid("a loft needs at least two sections");
+    if n == 0 || n + usize::from(apex.is_some()) < 2 {
+        return invalid("a loft needs at least two sections, or a section and an apex");
     }
-    let loops: Vec<ProfileLoop> = sections.iter().map(outer).collect::<Result<_>>()?;
+    let profiles: Vec<Profile> = sections
+        .iter()
+        .map(|s| s.profile.normalized())
+        .collect::<Result<_>>()?;
+    let loops = profiles[0].loops.len();
+    if profiles.iter().any(|p| p.loops.len() != loops) {
+        return invalid("a loft's sections must all have as many holes");
+    }
+    if apex.is_some() && loops > 1 {
+        return invalid("a loft to a point takes sections without holes");
+    }
     let centers: Vec<Point3> = sections
         .iter()
-        .zip(&loops)
-        .map(|(s, l)| {
-            let c = centroid(l);
+        .zip(&profiles)
+        .map(|(s, p)| {
+            let c = centroid(&p.loops[0]);
             s.frame.at(c.x, c.y)
         })
         .collect();
-    let Some(along) = (centers[n - 1] - centers[0]).unit() else {
+    let far = apex.unwrap_or(centers[n - 1]);
+    let Some(along) = (far - centers[0]).unit() else {
         return invalid("a loft's first and last sections share a centre");
     };
     if sections
@@ -415,197 +410,149 @@ pub fn loft(sections: &[Section], ruled: bool, feature: &str) -> Result<Brep> {
         return invalid("a loft section's plane contains the loft direction");
     }
     // Sections on parallel planes must come in order across them: one that steps back, or sits on
-    // its neighbour's plane, folds the sides over and covers part of the solid twice.
+    // its neighbour's plane, folds the sides over and covers part of the solid twice. An apex
+    // comes after the last.
     let normal = sections[0].frame.z;
     if sections
         .iter()
         .all(|s| s.frame.z.cross(normal).norm() <= tol::ANGULAR)
     {
-        let offsets: Vec<f64> = sections
+        let mut offsets: Vec<f64> = sections
             .iter()
             .map(|s| (s.frame.origin - sections[0].frame.origin).dot(normal))
             .collect();
+        offsets.extend(apex.map(|a| (a - sections[0].frame.origin).dot(normal)));
         let rises = offsets.windows(2).all(|w| w[1] - w[0] > tol::LINEAR);
         let falls = offsets.windows(2).all(|w| w[0] - w[1] > tol::LINEAR);
         if !rises && !falls {
             return invalid("a loft's parallel sections do not come in order across their planes");
         }
     }
-    let mut rings: Vec<Ring> = sections
-        .iter()
-        .zip(&loops)
-        .map(|(s, l)| ring(s, l, along))
-        .collect::<Result<_>>()?;
-    match_rings(&mut rings)?;
-    let k = rings[0].pieces.len();
+    Ok((profiles, along))
+}
 
-    let mut columns: Vec<Vec<Rail>> = Vec::with_capacity(k);
-    for j in 0..k {
-        let mut col: Vec<Rail> = rings
-            .iter()
-            .map(|r| {
-                let p = &r.pieces[j];
-                Rail::of_curve(&p.curve, p.t0, p.t1)
+/// Each column's rails down its rows, at one degree on one knot vector.
+fn columns_of(pieces: &[Vec<Piece>]) -> Result<Vec<Vec<Rail>>> {
+    let k = pieces[0].len();
+    (0..k)
+        .map(|j| {
+            let mut col: Vec<Rail> = pieces
+                .iter()
+                .map(|row| {
+                    let p = &row[j];
+                    Rail::of_curve(&p.curve, p.t0, p.t1)
+                })
+                .collect::<Result<_>>()?;
+            rail::make_compatible(&mut col);
+            Ok(col)
+        })
+        .collect()
+}
+
+/// The ruled bands between consecutive rows: a side that joins straight pieces (or a point and a
+/// straight piece) in one plane is that plane.
+fn ruled_bands(pieces: &[Vec<Piece>], columns: &[Vec<Rail>]) -> Result<Vec<Band>> {
+    let lin = rail::bezier_fit(&[0.0, 1.0], 1)?;
+    let k = columns.len();
+    (0..pieces.len() - 1)
+        .map(|lo| {
+            let hi = lo + 1;
+            let sides = (0..k)
+                .map(|j| Rail {
+                    degree: 1,
+                    knots: vec![0.0, 0.0, 1.0, 1.0],
+                    pw: vec![columns[j][lo].pw[0], columns[j][hi].pw[0]],
+                })
+                .collect();
+            let surfaces = (0..k)
+                .map(|j| {
+                    let (pl, ph) = (&pieces[lo][j], &pieces[hi][j]);
+                    let (rl, rh) = (&columns[j][lo], &columns[j][hi]);
+                    let flat = (pl.straight || pl.point)
+                        && (ph.straight || ph.point)
+                        && skin::flat_side([rl.start(), rl.end()], [rh.start(), rh.end()])
+                            .is_some();
+                    if flat {
+                        Ok(None)
+                    } else {
+                        skin(&columns[j], &[lo, hi], &lin).map(Some)
+                    }
+                })
+                .collect::<Result<_>>()?;
+            Ok(Band {
+                lo,
+                hi,
+                sides,
+                surfaces,
             })
-            .collect::<Result<_>>()?;
-        rail::make_compatible(&mut col);
-        columns.push(col);
-    }
+        })
+        .collect()
+}
 
-    // The sections that bound bands of side faces, and how each band runs across its sections.
-    let bands: Vec<(usize, usize, Across)> = if ruled || n == 2 {
-        let lin = rail::bezier_fit(&[0.0, 1.0], 1)?;
-        (0..n - 1).map(|s| (s, s + 1, lin.clone())).collect()
-    } else {
-        vec![(0, n - 1, across(&columns, n)?)]
-    };
-    let rows: Vec<usize> = if ruled || n == 2 {
-        (0..n).collect()
-    } else {
-        vec![0, n - 1]
-    };
+/// One smooth band through every row.
+fn smooth_band(columns: &[Vec<Rail>], rows: usize) -> Result<Band> {
+    let acr = across(columns, rows)?;
+    let picked: Vec<usize> = (0..rows).collect();
+    let sides = columns
+        .iter()
+        .map(|col| {
+            let data: Vec<Hom> = col.iter().map(|r| r.pw[0]).collect();
+            Rail {
+                degree: acr.degree,
+                knots: acr.knots.clone(),
+                pw: acr.apply(&data),
+            }
+        })
+        .collect();
+    let surfaces = columns
+        .iter()
+        .map(|col| skin(col, &picked, &acr).map(Some))
+        .collect::<Result<_>>()?;
+    Ok(Band {
+        lo: 0,
+        hi: rows - 1,
+        sides,
+        surfaces,
+    })
+}
 
-    let mut b = Brep::new();
-    let mut verts: Vec<Vec<VertexId>> = vec![Vec::new(); n];
-    for &r in &rows {
-        verts[r] = rings[r]
-            .starts()
-            .into_iter()
-            .map(|p| b.add_vertex(p))
-            .collect();
-    }
-    // Section edges, each with how its parameter maps onto its column's `u`.
-    let mut sec_edges: Vec<Vec<Option<EdgeParam>>> = vec![vec![None; k]; n];
-    for &r in &rows {
-        for j in 0..k {
-            let rl = &columns[j][r];
-            let (va, vb) = (verts[r][j], verts[r][(j + 1) % k]);
-            let ep = if rings[r].pieces[j].straight {
-                let (line, len) = Line::through(rl.start(), rl.end()).ok_or_else(|| {
-                    Error::InvalidInput("a loft section has a zero-length edge".into())
-                })?;
-                EdgeParam {
-                    id: b.add_edge(Curve::Line(line), (0.0, len), va, vb),
-                    scale: 1.0 / len,
-                }
-            } else {
-                let c = nurbs_curve(rl.degree, rl.knots.clone(), &rl.pw)?;
-                EdgeParam {
-                    id: b.add_edge(Curve::Nurbs(Box::new(c)), (0.0, 1.0), va, vb),
-                    scale: 1.0,
-                }
-            };
-            sec_edges[r][j] = Some(ep);
+/// The `start` face on `first`'s edges and the `end` face on `last`'s (none where the loft ends in
+/// a point), one loop for each of the loft's loops, and the solid they close with `faces`.
+fn close(
+    mut b: Brep,
+    mut faces: Vec<FaceId>,
+    frames: [Frame; 2],
+    first: &[Vec<CapEdge>],
+    last: &[Vec<CapEdge>],
+    feature: &str,
+) -> Result<Brep> {
+    for (loops, fr, name, reversed) in [
+        (first, frames[0], FaceName::START, true),
+        (last, frames[1], FaceName::END, false),
+    ] {
+        if loops.iter().all(|l| l.is_empty()) {
+            continue;
         }
-    }
-
-    let mut faces = Vec::new();
-    for (lo, hi, acr) in &bands {
-        let (lo, hi) = (*lo, *hi);
-        let picked: Vec<usize> = (lo..=hi).collect();
-        let linear = acr.degree == 1;
-        // Side edges at each vertex, running from section `lo` to section `hi`.
-        let mut sides: Vec<EdgeParam> = Vec::with_capacity(k);
-        for j in 0..k {
-            let (va, vb) = (verts[lo][j], verts[hi][j]);
-            let ep = if linear {
-                let (p0, p1) = (columns[j][lo].start(), columns[j][hi].start());
-                let (line, len) = Line::through(p0, p1)
-                    .ok_or_else(|| Error::InvalidInput("loft sections share a vertex".into()))?;
-                EdgeParam {
-                    id: b.add_edge(Curve::Line(line), (0.0, len), va, vb),
-                    scale: 1.0 / len,
-                }
-            } else {
-                let data: Vec<Hom> = picked.iter().map(|&s| columns[j][s].pw[0]).collect();
-                let c = nurbs_curve(acr.degree, acr.knots.clone(), &acr.apply(&data))?;
-                EdgeParam {
-                    id: b.add_edge(Curve::Nurbs(Box::new(c)), (0.0, 1.0), va, vb),
-                    scale: 1.0,
-                }
-            };
-            sides.push(ep);
-        }
-        for j in 0..k {
-            let (bottom, top) = (
-                sec_edges[lo][j].expect("band rows have edges"),
-                sec_edges[hi][j].expect("band rows have edges"),
-            );
-            let (left, right) = (sides[j], sides[(j + 1) % k]);
-            let (rl, rh) = (&columns[j][lo], &columns[j][hi]);
-            let flat = (linear && rings[lo].pieces[j].straight && rings[hi].pieces[j].straight)
-                .then(|| flat_side(rl.start(), rl.end(), rh.start(), rh.end()))
-                .flatten();
-            let face = if let Some(fr) = flat {
-                let names = side_names(feature, &rings[0].pieces[j].names);
-                let face = b.add_face(Surface::Plane(Plane { frame: fr }), false, names);
-                b.add_loop(
-                    face,
-                    vec![
-                        coedge(bottom.id, false, projected(&fr, rl.start())),
-                        coedge(right.id, false, projected(&fr, rl.end())),
-                        coedge(top.id, true, projected(&fr, rh.end())),
-                        coedge(left.id, true, projected(&fr, rh.start())),
-                    ],
-                );
-                face
-            } else {
-                let surface = skin(&columns[j], &picked, acr)?;
-                let names = side_names(feature, &rings[0].pieces[j].names);
-                let face = b.add_face(surface, false, names);
-                b.add_loop(
-                    face,
-                    vec![
-                        coedge(
-                            bottom.id,
-                            false,
-                            affine(Vec2::ZERO, Vec2::new(bottom.scale, 0.0)),
-                        ),
-                        coedge(
-                            right.id,
-                            false,
-                            affine(Vec2::new(1.0, 0.0), Vec2::new(0.0, right.scale)),
-                        ),
-                        coedge(
-                            top.id,
-                            true,
-                            affine(Vec2::new(0.0, 1.0), Vec2::new(top.scale, 0.0)),
-                        ),
-                        coedge(
-                            left.id,
-                            true,
-                            affine(Vec2::ZERO, Vec2::new(0.0, left.scale)),
-                        ),
-                    ],
-                );
-                face
-            };
-            faces.push(face);
-        }
-    }
-
-    for (r, name, reversed) in [(0, FaceName::START, true), (n - 1, FaceName::END, false)] {
-        let fr = rings[r].frame;
         let face = b.add_face(
             Surface::Plane(Plane { frame: fr }),
             reversed,
             [FaceName::new(feature, name)],
         );
-        let order: Vec<usize> = if reversed {
-            (0..k).rev().collect()
-        } else {
-            (0..k).collect()
-        };
-        let lp = order
-            .into_iter()
-            .map(|j| {
-                let rl = &columns[j][r];
-                let at = if reversed { rl.end() } else { rl.start() };
-                let e = sec_edges[r][j].expect("cap rows have edges");
-                coedge(e.id, reversed, projected(&fr, at))
-            })
-            .collect();
-        b.add_loop(face, lp);
+        for edges in loops {
+            let lp: Vec<CoedgeSpec> = if reversed {
+                edges
+                    .iter()
+                    .rev()
+                    .map(|e| coedge(e.id, true, skin::projected(&fr, e.end)))
+                    .collect()
+            } else {
+                edges
+                    .iter()
+                    .map(|e| coedge(e.id, false, skin::projected(&fr, e.start)))
+                    .collect()
+            };
+            b.add_loop(face, lp);
+        }
         faces.push(face);
     }
     let shell = b.add_shell(faces);
@@ -620,21 +567,56 @@ pub fn loft(sections: &[Section], ruled: bool, feature: &str) -> Result<Brep> {
     }
 }
 
+fn coedge(edge: EdgeId, reversed: bool, pcurve: PCurve) -> CoedgeSpec {
+    CoedgeSpec {
+        edge,
+        reversed,
+        pcurve,
+    }
+}
+
+fn lofted(sections: &[Section], apex: Option<Point3>, ruled: bool, feature: &str) -> Result<Brep> {
+    let (profiles, along) = prepare(sections, apex)?;
+    let mut b = Brep::new();
+    let mut faces = Vec::new();
+    let (mut first, mut last) = (Vec::new(), Vec::new());
+    let mut frames = None;
+    for li in 0..profiles[0].loops.len() {
+        let mut rings: Vec<Ring> = sections
+            .iter()
+            .zip(&profiles)
+            .map(|(s, p)| ring(s, &p.loops[li], along))
+            .collect::<Result<_>>()?;
+        match_rings(&mut rings)?;
+        if frames.is_none() {
+            frames = Some([rings[0].frame, rings[rings.len() - 1].frame]);
+        }
+        let mut pieces: Vec<Vec<Piece>> = rings.into_iter().map(|r| r.pieces).collect();
+        if let Some(a) = apex {
+            pieces.push(vec![Piece::point(a); pieces[0].len()]);
+        }
+        let rows = pieces.len();
+        let columns = columns_of(&pieces)?;
+        let bands = if ruled || rows == 2 {
+            ruled_bands(&pieces, &columns)?
+        } else {
+            vec![smooth_band(&columns, rows)?]
+        };
+        let names: Vec<Names> = pieces[0].iter().map(|p| p.names.clone()).collect();
+        let s = skin::add_sides(&mut b, &pieces, &columns, &bands, &names, feature)?;
+        faces.extend(s.faces);
+        first.push(s.first);
+        last.push(s.last);
+    }
+    let frames = frames.expect("a profile has a loop");
+    close(b, faces, frames, &first, &last, feature)
+}
+
 fn split_hom(pw: &[Hom]) -> (Vec<Point3>, Option<Vec<f64>>) {
     let pts = pw.iter().map(|&h| point(h)).collect();
     let w: Vec<f64> = pw.iter().map(|h| h[3]).collect();
     let rational = w.iter().any(|&x| (x - 1.0).abs() > 1e-15);
     (pts, rational.then_some(w))
-}
-
-fn nurbs_curve(degree: usize, knots: Vec<f64>, pw: &[Hom]) -> Result<NurbsCurve> {
-    if pw.iter().any(|h| h[3].is_nan() || h[3] <= 0.0) {
-        return Err(Error::Numerical(
-            "a loft edge came out with a weight that is not positive".into(),
-        ));
-    }
-    let (pts, w) = split_hom(pw);
-    NurbsCurve::new(degree, knots, pts, w)
 }
 
 /// How far a loft face's surface runs on past each of its edges, as a fraction of its parameter
@@ -675,5 +657,32 @@ fn skin(col: &[Rail], picked: &[usize], acr: &Across) -> Result<Surface> {
     }
     let (pts, w) = split_hom(&net);
     let s = NurbsSurface::new((col[0].degree, acr.degree), (ku, kv), (nu, nv), pts, w)?;
+    Ok(Surface::Nurbs(Box::new(s)))
+}
+
+/// The surface of the net `net[m][i]`, `i` along `u` and `m` along `v`, carried on past its four
+/// edges by [`RUN_ON`].
+fn extended_surface(
+    degrees: (usize, usize),
+    knots: (&[f64], &[f64]),
+    net: &[Vec<Hom>],
+) -> Result<Surface> {
+    let rows: Vec<(Vec<f64>, Vec<Hom>)> = net
+        .iter()
+        .map(|row| rail::extended(degrees.0, knots.0, row, RUN_ON))
+        .collect();
+    let ku = rows[0].0.clone();
+    let nu = rows[0].1.len();
+    let mut kv = Vec::new();
+    let mut pw: Vec<Hom> = Vec::new();
+    for i in 0..nu {
+        let data: Vec<Hom> = rows.iter().map(|r| r.1[i]).collect();
+        let (k, ctrl) = rail::extended(degrees.1, knots.1, &data, RUN_ON);
+        kv = k;
+        pw.extend(ctrl);
+    }
+    let nv = pw.len() / nu;
+    let (pts, w) = split_hom(&pw);
+    let s = NurbsSurface::new(degrees, (ku, kv), (nu, nv), pts, w)?;
     Ok(Surface::Nurbs(Box::new(s)))
 }

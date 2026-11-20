@@ -40,7 +40,7 @@ pub(crate) struct Rail {
 }
 
 impl Rail {
-    /// The curve from `t0` to `t1` (either order) of a line, conic or polynomial spline.
+    /// The curve from `t0` to `t1` (either order) of a line, conic, spline or fitted intersection.
     pub(crate) fn of_curve(curve: &Curve, t0: f64, t1: f64) -> Result<Rail> {
         let r = match curve {
             Curve::Line(_) => Rail {
@@ -59,11 +59,24 @@ impl Rail {
                 let sub = whole.sub(t0.min(t1), t0.max(t1))?;
                 if t0 > t1 { sub.reversed() } else { sub }
             }
-            other => {
-                return Err(Error::Unsupported(format!(
-                    "a loft section made of a {} curve",
-                    other.kind()
-                )));
+            // A fitted intersection curve is its spline.
+            Curve::Intersection(c) => {
+                return Rail::of_curve(&Curve::BSpline(c.approx.clone()), t0, t1);
+            }
+            Curve::Nurbs(n) => {
+                let w = n.weights().map(|w| w.to_vec());
+                let whole = Rail {
+                    degree: n.degree(),
+                    knots: n.knots().to_vec(),
+                    pw: n
+                        .control_points()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &p)| hom(p, w.as_ref().map_or(1.0, |w| w[i])))
+                        .collect(),
+                };
+                let sub = whole.sub(t0.min(t1), t0.max(t1))?;
+                if t0 > t1 { sub.reversed() } else { sub }
             }
         };
         Ok(r.normalized())
@@ -215,6 +228,36 @@ impl Rail {
             degree: q,
             knots,
             pw,
+        }
+    }
+
+    /// The point at `t`.
+    pub(crate) fn at(&self, t: f64) -> Point3 {
+        let mut h = [0.0; 4];
+        for (b, p) in basis(self.degree, &self.knots, t).iter().zip(&self.pw) {
+            for i in 0..4 {
+                h[i] += b * p[i];
+            }
+        }
+        point(h)
+    }
+
+    /// The same curve with its parameter mapped piecewise linearly, `from[i]` onto `to[i]`, both
+    /// rising and spanning the domain: each `from[i]` becomes a knot of full multiplicity first,
+    /// so every piece is a polynomial of its own and the map changes no point.
+    pub(crate) fn reparameterized(&self, from: &[f64], to: &[f64]) -> Rail {
+        let r = self.refined(&from[1..from.len() - 1]);
+        let map = |t: f64| {
+            let i = from
+                .windows(2)
+                .position(|w| t <= w[1])
+                .unwrap_or(from.len() - 2);
+            let s = (t - from[i]) / (from[i + 1] - from[i]);
+            to[i] + (to[i + 1] - to[i]) * s.clamp(0.0, 1.0)
+        };
+        Rail {
+            knots: r.knots.iter().map(|&k| map(k)).collect(),
+            ..r
         }
     }
 
