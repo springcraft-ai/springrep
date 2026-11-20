@@ -128,6 +128,36 @@ fn a_twisted_extrusion_holds_its_section_s_area_all_the_way_up() {
     assert!(rel(measure::volume(&b), PI * rise) < 1e-7);
 }
 
+// A tooth 18 out whose side bends off a long edge through six steps of 0.04, as a gear's flank
+// runs through narrow conic pieces, risen 10 while turning as a 15° helical gear does there. Faces
+// two steps apart run side by side 0.04 apart all the way up; the solid still checks clean, and
+// as a twisted extrusion its volume is its section's area times the rise.
+#[test]
+fn a_twisted_tooth_with_narrow_faces_side_by_side_checks_clean() {
+    let mut pts = vec![Vec2::new(16.0, -1.0)];
+    pts.extend((0..=6).map(|k| {
+        let a = 0.04 / 3.0 * k as f64;
+        Vec2::new(19.0 + 3.0 * a.sin(), 2.0 - 3.0 * a.cos())
+    }));
+    pts.extend([Vec2::new(19.5, 1.5), Vec2::new(16.0, 1.5)]);
+    let area = 0.5
+        * (0..pts.len())
+            .map(|i| pts[i].cross(pts[(i + 1) % pts.len()]))
+            .sum::<f64>();
+    let (rise, twist) = (10.0, 10.0 * 15f64.to_radians().tan() / 18.0);
+    let p = Profile::polygon(&pts, &["side"]);
+    let b = helix(
+        &p,
+        &Frame::WORLD,
+        &about_z(rise / twist * TAU, 1.0),
+        twist,
+        "tooth",
+    )
+    .unwrap();
+    assert!(check::check(&b).is_empty());
+    assert!(rel(measure::volume(&b), area * rise) < 1e-7);
+}
+
 // A screw is rigid, so a region it carries across its own plane at the rate `v·n` sweeps
 // `v·n dA dt`; `v·n` is affine over the plane, so the volume is the angle times the area times
 // the rate at the centroid. A disc 10 out on a plane leaning toward the axis and a quarter turn:

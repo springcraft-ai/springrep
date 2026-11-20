@@ -11,7 +11,7 @@ use crate::{
         domain::{Domain, Where},
         face_domain,
     },
-    geom::{Curve, Surface, distance_to},
+    geom::{Curve, NurbsSurface, Surface, distance_to},
     math::{Aabb, Point3, Vec2, Vec3},
     measure, tol,
     topo::{Brep, CoedgeId, EdgeId, FaceId, FaceMemo, ShellId, SolidId, VertexId},
@@ -1033,7 +1033,8 @@ fn clear_of(bb: &Aabb, s: &Surface) -> bool {
 
 /// The stretches of `range` along which `curve`, whose box over all of it is `whole`, may come
 /// within the tolerance of `s`, inside the box `bound`. A stretch is dropped where its box misses
-/// `bound` or is [`clear_of`] the surface. Kept stretches are halved, so a curve that only passes
+/// `bound` or is [`clear_of`] the surface, or where it lies [`apart_along`] the line from the
+/// surface to an enclosing stretch's middle. Kept stretches are halved, so a curve that only passes
 /// near the surface costs a few distances, not the sampling a crossing is found by.
 fn near_ranges(
     curve: &Curve,
@@ -1042,6 +1043,19 @@ fn near_ranges(
     s: &Surface,
     bound: &Aabb,
 ) -> Vec<(f64, f64)> {
+    near_ranges_by(curve, range, whole, s, bound, true)
+}
+
+/// [`near_ranges`], with the test [`apart_along`] left out unless `along`.
+fn near_ranges_by(
+    curve: &Curve,
+    range: (f64, f64),
+    whole: Aabb,
+    s: &Surface,
+    bound: &Aabb,
+    along: bool,
+) -> Vec<(f64, f64)> {
+    #[allow(clippy::too_many_arguments)]
     fn halve(
         c: &Curve,
         (t0, t1): (f64, f64),
@@ -1049,14 +1063,28 @@ fn near_ranges(
         depth: u32,
         s: &Surface,
         bound: &Aabb,
+        along: bool,
+        away: Option<Vec3>,
         out: &mut Vec<(f64, f64)>,
     ) {
         if !boxes_meet(&bb, bound) || (analytic(s) && clear_of(&bb, s)) {
             return;
         }
+        if let (Surface::Nurbs(n), Some(d)) = (s, away)
+            && apart_along(c, (t0, t1), &bb, n, d)
+        {
+            return;
+        }
         let m = 0.5 * (t0 + t1);
         let p = c.eval(m);
-        let g = gap(s, p);
+        let (g, away) = match s {
+            Surface::Nurbs(_) => {
+                let uv = s.project(p);
+                let foot = s.eval(uv.x, uv.y);
+                (foot.dist(p), (p - foot).unit().filter(|_| along))
+            }
+            _ => (gap(s, p), None),
+        };
         // Off the analytic surfaces a distance costs a projection: the one from the curve's middle
         // also bounds the stretch, which lies within the box's farthest corner of it.
         if !analytic(s) {
@@ -1084,12 +1112,39 @@ fn near_ranges(
         }
         for r in [(t0, m), (m, t1)] {
             let bb = padded_box(c.bbox(r.0, r.1));
-            halve(c, r, bb, depth - 1, s, bound, out);
+            halve(c, r, bb, depth - 1, s, bound, along, away, out);
         }
     }
     let mut out = Vec::new();
-    halve(curve, range, whole, 8, s, bound, &mut out);
+    halve(curve, range, whole, 8, s, bound, along, None, &mut out);
     out
+}
+
+/// Whether the stretch `t0`–`t1` of `c`, whose padded box is `bb`, lies farther than the tolerance
+/// from `n` along the unit `d`: each Bézier patch of the surface whose box meets `bb` has every
+/// control point, and so its convex hull and the patch, short of the stretch's least reach along
+/// `d` by more than the tolerance. A curve running beside a narrow face, as a gear's flanks do, is
+/// told apart by one such test where the ball about its middle needs its length halved to the gap.
+fn apart_along(c: &Curve, (t0, t1): (f64, f64), bb: &Aabb, n: &NurbsSurface, d: Vec3) -> bool {
+    let mut high = f64::NEG_INFINITY;
+    for z in n.beziers() {
+        if boxes_meet(bb, &z.bbox()) {
+            for q in z.points() {
+                high = high.max(d.dot(Vec3::new(q[0] / q[3], q[1] / q[3], q[2] / q[3])));
+            }
+        }
+    }
+    let ends = d.dot(c.eval(t0)).min(d.dot(c.eval(t1)));
+    if high + tol::LINEAR >= ends {
+        return false;
+    }
+    let h = (bb.max - bb.min) * 0.5;
+    let boxed =
+        d.dot((bb.min + bb.max) * 0.5) - (d.x.abs() * h.x + d.y.abs() * h.y + d.z.abs() * h.z);
+    boxed - tol::LINEAR > high
+        || c.extremes(d, t0, t1)
+            .into_iter()
+            .all(|t| d.dot(c.eval(t)) - tol::LINEAR > high)
 }
 
 /// Where edge `e` meets face `y`, whose box is `bound`, other than at the face's own vertices
@@ -1436,5 +1491,47 @@ mod tests {
             let range = (knots[0], knots[knots.len() - 1]);
             assert_eq!(fold(&c, range).is_some(), folds);
         }
+    }
+
+    // Faces two steps apart along a tooth's bent side, screwed as a helical gear's flank is, run
+    // 0.04 apart all the way up: where the line to the surface tells a stretch apart, halving down
+    // to the gap keeps nothing more of it, and both find the same stretches.
+    #[test]
+    fn a_stretch_told_apart_along_the_line_to_the_surface_is_one_halving_drops_too() {
+        let mut pts = vec![Vec2::new(16.0, -1.0)];
+        pts.extend((0..=6).map(|k| {
+            let a = 0.04 / 3.0 * k as f64;
+            Vec2::new(19.0 + 3.0 * a.sin(), 2.0 - 3.0 * a.cos())
+        }));
+        pts.extend([Vec2::new(19.5, 1.5), Vec2::new(16.0, 1.5)]);
+        let twist = 10.0 * 15f64.to_radians().tan() / 18.0;
+        let screw = crate::sweep::Helix {
+            origin: Vec3::ZERO,
+            axis: Vec3::Z,
+            rise: 10.0 / twist,
+            sign: 1.0,
+        };
+        let p = crate::profile::Profile::polygon(&pts, &["side"]);
+        let b = crate::sweep::helix(&p, &Frame::WORLD, &screw, twist, "tooth").unwrap();
+        let mut cache = PairCache::default();
+        let mut pairs = 0;
+        for e in b.edge_ids() {
+            let edge = b.edge(e);
+            let Some(curve) = edge.curve.as_ref() else {
+                continue;
+            };
+            let whole = cache.edge_box(&b, e).unwrap();
+            for y in b.face_ids() {
+                let s = &b.face(y).surface;
+                let bound = cache.face_box(&b, y);
+                if !matches!(s, Surface::Nurbs(_)) || !boxes_meet(&whole, &bound) {
+                    continue;
+                }
+                let at = |along| near_ranges_by(curve, edge.range, whole, s, &bound, along);
+                assert_eq!(at(true), at(false));
+                pairs += 1;
+            }
+        }
+        assert!(pairs > 50, "{pairs}");
     }
 }
