@@ -8,7 +8,8 @@ use crate::{
     boolean::{
         classify,
         csi::{
-            CurveBoxes, curve_surface_in, ray_surface, ray_surface_is_closed_form, signed_distance,
+            CurveBoxes, curve_surface_in, line_crossings, line_crossings_known,
+            ray_surface_is_closed_form, signed_distance,
         },
         domain::{Domain, Where},
         face_domain,
@@ -814,21 +815,21 @@ fn faces_outward(b: &Brep, domains: &Domains, cache: &mut PairCache, s: SolidId)
         order.extend((0..faces.len()).max_by(most));
     }
     order.extend(0..faces.len());
-    let mut edges: Vec<EdgeId> = Vec::new();
+    let mut tried: HashSet<EdgeId> = HashSet::new();
+    let mut rays: Vec<EdgeRay> = Vec::new();
     let coedges = order
         .iter()
         .flat_map(|&i| b.face(faces[i]).loops.iter())
         .flat_map(|&lp| b.lp(lp).coedges.iter());
     for &c in coedges {
         let e = b.coedge(c).edge;
-        if !edges.contains(&e) {
-            edges.push(e);
+        if tried.insert(e) {
+            rays.extend(ray_off_edge(b, e));
         }
-        if edges.len() == RAY_EDGES {
+        if rays.len() == RAY_EDGES {
             break;
         }
     }
-    let rays: Vec<EdgeRay> = edges.iter().filter_map(|&e| ray_off_edge(b, e)).collect();
     let seen = |ray: &EdgeRay, across| side_seen_along(b, domains, faces, &boxes, ray, across);
     rays.iter().any(|ray| seen(ray, false) == Some(true))
         || rays
@@ -838,7 +839,9 @@ fn faces_outward(b: &Brep, domains: &Domains, cache: &mut PairCache, s: SolidId)
             == Some(true)
 }
 
-/// Whether every face of `faces` is reached from the first through coedges' partners.
+/// Whether every face of `faces` is reached from the first through coedges' partners, and no
+/// edge of theirs is used by more than two coedges: a sheet that touches itself along an edge has
+/// two sheets of faces there, which the pairing alone keeps from passing through each other.
 fn one_sheet(b: &Brep, faces: &[FaceId]) -> bool {
     let Some(&first) = faces.first() else {
         return false;
@@ -848,6 +851,10 @@ fn one_sheet(b: &Brep, faces: &[FaceId]) -> bool {
     while let Some(f) = stack.pop() {
         for &lp in &b.face(f).loops {
             for &c in &b.lp(lp).coedges {
+                let e = b.coedge(c).edge;
+                if !b.edge(e).is_degenerate() && b.edge_uses(e).len() != 2 {
+                    return false;
+                }
                 if let Some(p) = b.partner(c) {
                     let g = b.coedge_face(p);
                     if seen.insert(g) {
@@ -871,8 +878,8 @@ struct EdgeRay {
 /// The ray from the middle of edge `e` along the sum of its two faces' outward normals there: it
 /// leaves on the outward side of both, so a point just along it is outside the material the two
 /// bound between them, whether the edge is convex or concave. `None` for an edge not used
-/// exactly twice, one kept with a local tolerance, one of a face whose crossings no closed form
-/// gives, and one whose faces fold back on each other so that no ray leaves both.
+/// exactly twice, one kept with a local tolerance, one of a face whose crossings with a line are
+/// not known, and one whose faces fold back on each other so that no ray leaves both.
 fn ray_off_edge(b: &Brep, e: EdgeId) -> Option<EdgeRay> {
     let edge = b.edge(e);
     let curve = edge.curve.as_ref()?;
@@ -885,7 +892,7 @@ fn ray_off_edge(b: &Brep, e: EdgeId) -> Option<EdgeRay> {
     let from = curve.eval(0.5 * (edge.range.0 + edge.range.1));
     let outward = |c: CoedgeId| -> Option<Vec3> {
         let face = b.face(b.coedge_face(c));
-        if !ray_surface_is_closed_form(&face.surface) {
+        if !line_crossings_known(&face.surface) {
             return None;
         }
         let uv = face.surface.project(from);
@@ -908,10 +915,11 @@ fn ray_off_edge(b: &Brep, e: EdgeId) -> Option<EdgeRay> {
 /// start, the sheet winds round the point once for each face the ray then leaves the material
 /// through, less once for each it enters through, and round a point outside it winds no times.
 /// `Some(false)` where it winds once the other way, so the start's normals point in, and `None`
-/// where the ray decides nothing: it passes the box of a face whose crossings no closed form
-/// gives, meets a face on its boundary or at a tangent, or a face other than the start's two
-/// lies on the start. Unless `across`, a ray that meets any face's surface inside the face's box
-/// decides nothing either, and no face's domain is built.
+/// where the ray decides nothing: it passes the box of a face whose crossings with a line are not
+/// known, crosses a surface no closed form gives the foot on, meets a face on its boundary or at
+/// a tangent, or a face other than the start's two lies on the start. Unless `across`, a ray that
+/// meets any face's surface inside the face's box decides nothing either, and no face's domain
+/// is built.
 fn side_seen_along(
     b: &Brep,
     domains: &Domains,
@@ -921,16 +929,20 @@ fn side_seen_along(
     across: bool,
 ) -> Option<bool> {
     let (p, d) = (ray.from, ray.along);
+    let passed: Vec<(FaceId, f64, f64)> = faces
+        .iter()
+        .zip(boxes)
+        .filter_map(|(&f, bb)| classify::ray_box(p, d, bb).map(|(lo, hi)| (f, lo, hi)))
+        .collect();
+    let known = |&(f, _, _): &(FaceId, f64, f64)| line_crossings_known(&b.face(f).surface);
+    if !passed.iter().all(known) {
+        return None;
+    }
     let (mut winds, mut at_start) = (0i64, 0usize);
-    for (&f, bb) in faces.iter().zip(boxes) {
-        let Some((lo, hi)) = classify::ray_box(p, d, bb) else {
-            continue;
-        };
+    for (f, lo, hi) in passed {
         let surface = &b.face(f).surface;
-        if !ray_surface_is_closed_form(surface) {
-            return None;
-        }
-        for t in ray_surface(surface, p, d, hi.max(0.0)) {
+        let range = (-10.0 * tol::LINEAR, hi.max(0.0) + tol::LINEAR);
+        for t in line_crossings(surface, p, d, range)? {
             if !t.is_finite() {
                 return None;
             }
@@ -944,7 +956,8 @@ fn side_seen_along(
             if t < 0.0 || t < lo - tol::LINEAR || t > hi + tol::LINEAR {
                 continue;
             }
-            if !across {
+            // Only a closed form's foot is certain to be the crossing's own.
+            if !across || !ray_surface_is_closed_form(surface) {
                 return None;
             }
             let dom = domains.of(f);
@@ -1083,6 +1096,7 @@ fn in_box(p: Point3, bb: &Aabb) -> bool {
 #[derive(Default)]
 struct PairCache {
     domains: HashMap<FaceId, std::rc::Rc<Domain>>,
+    face_boxes: HashMap<FaceId, Aabb>,
     edge_boxes: HashMap<EdgeId, Aabb>,
     curve_boxes: HashMap<EdgeId, CurveBoxes>,
     meetings: HashMap<(EdgeId, FaceId), Option<Point3>>,
@@ -1104,6 +1118,15 @@ impl PairCache {
     /// cheaper to find, its edges' boxes and, where the surface can bulge past them, the box of a
     /// B-spline's control points or of a whole sphere or torus.
     fn face_box(&mut self, b: &Brep, f: FaceId) -> Aabb {
+        if let Some(bb) = self.face_boxes.get(&f) {
+            return *bb;
+        }
+        let bb = self.face_box_anew(b, f);
+        self.face_boxes.insert(f, bb);
+        bb
+    }
+
+    fn face_box_anew(&mut self, b: &Brep, f: FaceId) -> Aabb {
         if let Some(bb) = b.memo(f).loose_box.get() {
             return padded_box(*bb);
         }
@@ -2109,31 +2132,119 @@ mod tests {
     }
 
     #[test]
-    fn a_ray_past_a_face_no_closed_form_crosses_decides_nothing() {
-        // A ring above a block's edge, where the ray off that edge passes through its box.
-        let mut b = block([0.0; 3], [10.0; 3]);
-        b.append(&crate::primitive::torus(&at(-3.0, 5.0, 13.0), 3.0, 1.0, "r").unwrap());
-        let under = b
-            .edge_ids()
-            .find(|&e| {
-                let edge = b.edge(e);
-                let mid = edge
-                    .curve
-                    .as_ref()
-                    .map(|c| c.eval(0.5 * (edge.range.0 + edge.range.1)));
-                mid.is_some_and(|m| m.dist(Vec3::new(0.0, 5.0, 10.0)) < 1e-9)
-            })
-            .unwrap();
-        let faces: Vec<FaceId> = b.face_ids().collect();
-        let (domains, mut cache) = (Domains::new(&b), PairCache::default());
-        let boxes: Vec<Aabb> = faces.iter().map(|&f| cache.face_box(&b, f)).collect();
-        let ray = ray_off_edge(&b, under).unwrap();
-        for across in [false, true] {
-            assert_eq!(
-                side_seen_along(&b, &domains, &faces, &boxes, &ray, across),
-                None
+    fn a_sheet_that_touches_itself_along_an_edge_is_settled_by_its_volume() {
+        // A plate less two holes that touch along a line, which four coedges use.
+        let plate = block([0.0; 3], [5.0, 3.0, 1.0]);
+        let hole = |x: f64| crate::primitive::cylinder(&at(x, 1.5, -1.0), 1.0, 3.0, "h").unwrap();
+        let one = crate::boolean::difference(&plate, &hole(1.5)).unwrap();
+        let b = crate::boolean::difference(&one, &hole(3.5)).unwrap();
+        assert!(b.edge_ids().any(|e| b.edge_uses(e).len() == 4));
+        assert_eq!(seen_outward(&b), [false]);
+        assert_eq!(cut_issues(&b), Vec::<String>::new());
+        let issues = cut_issues(&rebuilt(&b, |_| true, false));
+        assert!(
+            issues.iter().any(|m| m.starts_with("solid 0 has volume -")),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn a_ray_off_an_edge_of_spline_faces_settles_a_sheet_it_crosses_nothing_of() {
+        use crate::loft::{Section, loft};
+        let section = |w: f64, h: f64, z: f64| Section {
+            profile: crate::profile::Profile::rect(Vec2::ZERO, w, h),
+            frame: at(0.0, 0.0, z),
+        };
+        // A waisted loft through three rectangles, whole and with a slot cut into one side.
+        let sections = [
+            section(20.0, 10.0, 0.0),
+            section(10.0, 6.0, 4.0),
+            section(16.0, 8.0, 8.0),
+        ];
+        let waisted = loft(&sections, false, "lf").unwrap();
+        let splines = |b: &Brep| {
+            let spline = |f: &FaceId| matches!(b.face(*f).surface, Surface::Nurbs(_));
+            b.face_ids().filter(spline).count()
+        };
+        assert_eq!(splines(&waisted), 4);
+        let slot = block([0.0, -10.0, 2.0], [20.0, 20.0, 3.0]);
+        let slotted = crate::boolean::difference(&waisted, &slot).unwrap();
+        assert!(splines(&slotted) >= 4);
+        for b in [&waisted, &slotted] {
+            assert_eq!(seen_outward(b), [true]);
+            assert!(!seen_off_edges(b).contains(&Some(false)));
+            let t = rebuilt(b, |_| true, false);
+            assert_eq!(seen_outward(&t), [false]);
+            assert!(!seen_off_edges(&t).contains(&Some(true)));
+            let issues = cut_issues(&t);
+            assert!(
+                issues.iter().any(|m| m.starts_with("solid 0 has volume -")),
+                "{issues:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_ray_decides_nothing_past_a_face_whose_crossings_are_not_known() {
+        use crate::profile::{NamedSegment, Profile, ProfileLoop, Segment};
+        let under = |b: &Brep| {
+            let mid = |e: &EdgeId| {
+                let edge = b.edge(*e);
+                let c = edge.curve.as_ref().unwrap();
+                c.eval(0.5 * (edge.range.0 + edge.range.1))
+            };
+            let e = b
+                .edge_ids()
+                .find(|e| mid(e).dist(Vec3::new(0.0, 5.0, 10.0)) < 1e-9);
+            ray_off_edge(b, e.unwrap()).unwrap()
+        };
+        let seen = |b: &Brep, across: bool| {
+            let faces: Vec<FaceId> = b.face_ids().collect();
+            let (domains, mut cache) = (Domains::new(b), PairCache::default());
+            let boxes: Vec<Aabb> = faces.iter().map(|&f| cache.face_box(b, f)).collect();
+            side_seen_along(b, &domains, &faces, &boxes, &under(b), across)
+        };
+        // An elliptic post above a block's edge, where the ray off that edge passes through it.
+        let half = |start: f64, name: &str| {
+            let arc = Segment::Ellipse {
+                center: Vec2::ZERO,
+                rotation: 0.0,
+                major: 3.0,
+                minor: 1.0,
+                start,
+                sweep: std::f64::consts::PI,
+            };
+            NamedSegment::new(arc, name)
+        };
+        let outline = Profile {
+            loops: vec![ProfileLoop {
+                segments: vec![half(0.0, "a"), half(std::f64::consts::PI, "b")],
+            }],
+        };
+        let post = crate::sweep::extrude(&outline, &at(-3.0, 5.0, 12.0), 2.0, "p").unwrap();
+        assert!(
+            post.face_ids()
+                .any(|f| !line_crossings_known(&post.face(f).surface))
+        );
+        let mut b = block([0.0; 3], [10.0; 3]);
+        b.append(&post);
+        assert_eq!(seen(&b, false), None);
+        assert_eq!(seen(&b, true), None);
+        // A ring there instead, through whose hole the ray passes: its quartic has no root.
+        let mut b = block([0.0; 3], [10.0; 3]);
+        b.append(&crate::primitive::torus(&at(-3.0, 5.0, 13.0), 3.0, 1.0, "r").unwrap());
+        assert_eq!(seen(&b, false), Some(true));
+        // The ring moved so that the ray passes through its tube: a crossing no closed form
+        // gives is not followed.
+        let mut b = block([0.0; 3], [10.0; 3]);
+        b.append(&crate::primitive::torus(&at(-6.0, 5.0, 13.0), 3.0, 1.0, "r").unwrap());
+        assert_eq!(seen(&b, false), None);
+        assert_eq!(seen(&b, true), None);
+        // A ball there is crossed in and out, each crossing located in its face.
+        let mut b = block([0.0; 3], [10.0; 3]);
+        b.append(&crate::primitive::sphere(&at(-3.0, 5.2, 13.1), 1.0, "s").unwrap());
+        assert_eq!(seen(&b, false), None);
+        assert_eq!(seen(&b, true), Some(true));
         // A ring half sunk in a plate's top: the plate's edges look away from it, and the sheet
         // turned inside out is still refused.
         let plate = block([0.0; 3], [10.0, 10.0, 2.0]);
