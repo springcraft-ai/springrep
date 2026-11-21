@@ -24,7 +24,7 @@ use crate::{
     boolean::{same_domain, ssi},
     check,
     edit::{
-        local::{Rim, Side, Splice, Spliced, Use, Wall, sides},
+        local::{Rim, Side, Splice, Spliced, Use, Wall, clear_of, sides},
         tweak::meet,
     },
     geom::{Circle, Curve, Line, Surface},
@@ -67,6 +67,14 @@ enum Plan {
     },
     /// Two rings run on to the circle their surfaces meet in.
     Circle(Circle, [Ring; 2], [usize; 2]),
+}
+
+/// What a piece's closing adds or cuts: its box, the rims round it, and its curved faces, each
+/// with whether a rim is a meridian of it.
+struct Region {
+    bbox: Aabb,
+    rims: Vec<Rim>,
+    round: Vec<(Surface, bool)>,
 }
 
 struct Around<'a> {
@@ -818,7 +826,11 @@ impl<'a> Around<'a> {
             {
                 return None;
             }
-            regions.push(region);
+            regions.push(Region {
+                bbox: region,
+                rims,
+                round,
+            });
         }
         self.as_the_general_way(&lie)?;
         let built = sp.finish()?;
@@ -867,9 +879,10 @@ impl<'a> Around<'a> {
 
     /// `None` where a face that keeps its loops may reach a region in a way the checker does not
     /// search: from another shell, or beside a face run on into the region, whose pair it skips.
-    /// Beside a planar one, a face of straight and circular edges is clear when no edge of it
-    /// but those the two share comes to that plane.
-    fn unseen(&self, built: &Spliced, regions: &[Aabb]) -> Option<()> {
+    /// A face of a changed face's shell whose box meets a region's is clear of it when the region
+    /// lies strictly to one side of the face's surface: a face inside the region joins the changed
+    /// faces through faces that cross the region's boundary, which fail this.
+    fn unseen(&self, built: &Spliced, regions: &[Region]) -> Option<()> {
         let out = &built.out;
         let pad = Vec3::new(tol::LINEAR, tol::LINEAR, tol::LINEAR);
         let meets = |a: &Aabb, b: &Aabb| {
@@ -878,68 +891,13 @@ impl<'a> Around<'a> {
         let shells: Vec<_> = built.changed.iter().map(|&f| out.face(f).shell).collect();
         for f in out.face_ids().filter(|f| !built.changed.contains(f)) {
             let bb = measure::face_bbox(out, f);
-            if !regions.iter().any(|r| meets(r, &bb)) {
-                continue;
-            }
-            if !shells.contains(&out.face(f).shell) {
-                return None;
-            }
-            let face = out.face(f);
-            let mut beside: Vec<FaceId> = Vec::new();
-            for &lp in &face.loops {
-                for &c in &out.lp(lp).coedges {
-                    for &o in out.edge_uses(out.coedge(c).edge) {
-                        let g = out.coedge_face(o);
-                        if built.changed.contains(&g) && !beside.contains(&g) {
-                            beside.push(g);
-                        }
-                    }
-                }
-            }
-            for g in beside {
-                let other = out.face(g);
-                let wall = Wall {
-                    surface: other.surface.clone(),
-                    reversed: other.reversed,
-                };
-                let (Surface::Plane(plane), true) = (
-                    &other.surface,
-                    matches!(
-                        face.surface,
-                        Surface::Plane(_) | Surface::Cylinder(_) | Surface::Cone(_)
-                    ),
-                ) else {
+            for region in regions.iter().filter(|r| meets(&r.bbox, &bb)) {
+                let faces: Vec<(&Surface, bool)> =
+                    region.round.iter().map(|(s, m)| (s, *m)).collect();
+                if !shells.contains(&out.face(f).shell)
+                    || !clear_of(&out.face(f).surface, &region.rims, &faces)
+                {
                     return None;
-                };
-                let mut theirs: Vec<VertexId> = Vec::new();
-                for &lp in &other.loops {
-                    for &c in &out.lp(lp).coedges {
-                        theirs.push(out.coedge_start(c));
-                    }
-                }
-                for &lp in &face.loops {
-                    for &c in &out.lp(lp).coedges {
-                        let e = out.coedge(c).edge;
-                        if out.edge_uses(e).iter().any(|&o| out.coedge_face(o) == g) {
-                            continue;
-                        }
-                        let x = out.edge(e);
-                        let Some(curve @ (Curve::Line(_) | Curve::Circle(_))) = &x.curve else {
-                            return None;
-                        };
-                        let off = |t: f64| wall.out(curve.eval(t)).abs() > tol::LINEAR;
-                        let (t0, t1) = x.range;
-                        if !(off(t0) || theirs.contains(&x.start))
-                            || !(off(t1) || theirs.contains(&x.end))
-                            || !off(0.5 * (t0 + t1))
-                            || curve
-                                .extremes(plane.frame.z, t0, t1)
-                                .into_iter()
-                                .any(|t| !off(t))
-                        {
-                            return None;
-                        }
-                    }
                 }
             }
         }
@@ -956,7 +914,8 @@ fn sector(s: &Brep, n: FaceId, gone: &[bool]) -> bool {
     face.loops.iter().any(|&lp| {
         s.lp(lp).coedges.iter().any(|&co| {
             let e = s.coedge(co).edge;
-            matches!(&s.edge(e).curve, Some(Curve::Line(l)) if l.dir.cross(c.frame.z).norm() <= 1e-9)
+            let along = |l: &Line| l.dir.cross(c.frame.z).norm() <= 1e-9;
+            matches!(&s.edge(e).curve, Some(Curve::Line(l)) if along(l))
                 && s.edge_uses(e).iter().any(|&o| s.coedge_face(o) != n)
                 && !s
                     .edge_uses(e)

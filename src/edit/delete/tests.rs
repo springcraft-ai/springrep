@@ -5,7 +5,7 @@ use crate::{
     blend,
     boolean::{self, half_space, same_domain},
     check,
-    math::{Frame, Point3, Vec2, Vec3},
+    math::{Frame, Point3, Transform, Vec2, Vec3},
     measure, primitive,
     profile::Profile,
     sweep::{extrude, revolve},
@@ -119,6 +119,19 @@ fn a_chamfer_closes_at_the_edge_its_two_walls_meet_in() {
     let out = both(&b, &named(&b, &["e2"]));
     close(measure::volume(&out), 96.0);
     assert_eq!(out.edge_ids().count(), 12);
+}
+
+#[test]
+fn a_chamfer_under_a_sloping_top_closes_the_one_way_that_holds() {
+    // The top slopes, so top and bottom meet in a line too, and the chamfer's four neighbours
+    // could close in two corners on either pair's line: only the walls' line is reached.
+    let b = chamfered();
+    let n = Vec3::new(0.2, 0.0, 1.0);
+    let cut = half_space(&b, Point3::new(0.0, 0.0, 1.8), n).unwrap();
+    let b = boolean::difference(&b, &cut).unwrap();
+    let out = both(&b, &named(&b, &["e2"]));
+    // The box 8 × 6 under z = 1.8 − 0.2·x.
+    close(measure::volume(&out), 48.0 * 1.8 - 0.2 * 6.0 * 32.0);
 }
 
 #[test]
@@ -350,4 +363,34 @@ fn a_plane_that_cuts_the_plug_leaves_a_bore_to_the_general_way() {
     let bore = named(&b, &["bore"]);
     assert!(direct(&b, &bore).is_none());
     assert_eq!(delete_faces(&b, &bore).is_ok(), general(&b, &bore).is_ok());
+}
+
+#[test]
+fn a_part_turned_askew_closes_the_same_way() {
+    // Askew, the boxes of the groove and of the shaft's ends meet; the ends' planes still clear
+    // the groove.
+    let mut b = turned(&[
+        [0.0, 0.0],
+        [3.0, 0.0],
+        [3.0, 3.0],
+        [2.0, 3.0],
+        [2.0, 6.0],
+        [3.0, 6.0],
+        [3.0, 10.0],
+        [0.0, 10.0],
+    ]);
+    b.transform(&Transform::rotation(
+        Point3::new(1.0, 2.0, 3.0),
+        Vec3::new(1.0, 2.0, 0.5),
+        0.7,
+    ));
+    let out = both(&b, &named(&b, &["m2", "m3", "m4"]));
+    close(measure::volume(&out), 90.0 * PI);
+    let mut b = chamfered();
+    b.transform(&Transform::rotation(
+        Point3::ZERO,
+        Vec3::new(1.0, 1.0, 1.0),
+        1.1,
+    ));
+    close(measure::volume(&both(&b, &named(&b, &["e2"]))), 96.0);
 }

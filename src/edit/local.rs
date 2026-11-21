@@ -844,56 +844,77 @@ fn turning_points(wall: &Wall, rim: &Rim) -> Option<Vec<f64>> {
 /// an axis, every face must be turned about that axis too, and the distance is then a function on
 /// the half plane through the axis, where each face is a curve the rims hold.
 pub(crate) fn sides(walls: &[Wall], rims: &[Rim], faces: &[(&Surface, bool)]) -> Option<Vec<Side>> {
-    let mut out = Vec::with_capacity(walls.len());
-    for (k, wall) in walls.iter().enumerate() {
-        for &(s, meridian) in faces {
-            let ok = match (&wall.surface, s) {
-                (
-                    Surface::Plane(_),
-                    Surface::Plane(_) | Surface::Cylinder(_) | Surface::Cone(_),
-                ) => true,
-                (Surface::Plane(p), Surface::Sphere(_) | Surface::Torus(_)) => {
-                    let (_, z) = axis(s)?;
-                    meridian && z.cross(p.frame.z).norm() <= 1e-9
-                }
-                (w, _) => {
-                    let (o, z) = axis(w)?;
-                    let round = matches!(s, Surface::Sphere(_) | Surface::Torus(_));
-                    turned_about(s, o, z) && (meridian || !round)
-                }
+    (0..walls.len())
+        .map(|k| {
+            side(
+                &walls[k],
+                rims.iter().filter(|r| !r.on.contains(&k)),
+                faces,
+                false,
+            )
+        })
+        .collect()
+}
+
+/// Whether the region `rims` bound lies strictly to one side of `surface`, touching it nowhere:
+/// no face on that surface then reaches the region, unless it lies wholly inside it.
+pub(crate) fn clear_of(surface: &Surface, rims: &[Rim], faces: &[(&Surface, bool)]) -> bool {
+    let wall = Wall {
+        surface: surface.clone(),
+        reversed: false,
+    };
+    side(&wall, rims.iter(), faces, true).is_some()
+}
+
+/// [`sides`] for one wall and the rims that do not lie on it; with `apart`, a rim may not touch
+/// the wall even at its ends.
+fn side<'a>(
+    wall: &Wall,
+    rims: impl Iterator<Item = &'a Rim>,
+    faces: &[(&Surface, bool)],
+    apart: bool,
+) -> Option<Side> {
+    for &(s, meridian) in faces {
+        let ok = match (&wall.surface, s) {
+            (Surface::Plane(_), Surface::Plane(_) | Surface::Cylinder(_) | Surface::Cone(_)) => {
+                true
+            }
+            (Surface::Plane(p), Surface::Sphere(_) | Surface::Torus(_)) => {
+                let (_, z) = axis(s)?;
+                meridian && z.cross(p.frame.z).norm() <= 1e-9
+            }
+            (w, _) => {
+                let (o, z) = axis(w)?;
+                let round = matches!(s, Surface::Sphere(_) | Surface::Torus(_));
+                turned_about(s, o, z) && (meridian || !round)
+            }
+        };
+        if !ok {
+            return None;
+        }
+    }
+    let mut found: Option<Side> = None;
+    for rim in rims {
+        let ts = turning_points(wall, rim)?;
+        let ends = [rim.curve.eval(ts[0]), rim.curve.eval(ts[1])];
+        for (i, &t) in ts.iter().enumerate() {
+            let p = rim.curve.eval(t);
+            let d = wall.out(p);
+            // A rim tangent to the wall at an end turns there: that is the end, not a touch.
+            let at_end = i < 2 || (i > 2 && ends.iter().any(|e| e.dist(p) <= tol::LINEAR));
+            let here = if d < -tol::LINEAR {
+                Side::Within
+            } else if d > tol::LINEAR {
+                Side::Beyond
+            } else if at_end && !apart {
+                continue;
+            } else {
+                return None;
             };
-            if !ok {
+            if *found.get_or_insert(here) != here {
                 return None;
             }
         }
-        let mut found: Option<Side> = None;
-        for rim in rims.iter().filter(|r| !r.on.contains(&k)) {
-            let ts = turning_points(wall, rim)?;
-            let ends = [rim.curve.eval(ts[0]), rim.curve.eval(ts[1])];
-            for (i, &t) in ts.iter().enumerate() {
-                let p = rim.curve.eval(t);
-                let d = wall.out(p);
-                // A rim tangent to the wall at an end turns there: that is the end, not a touch.
-                let i = if i > 2 && ends.iter().any(|e| e.dist(p) <= tol::LINEAR) {
-                    0
-                } else {
-                    i
-                };
-                let here = if d < -tol::LINEAR {
-                    Side::Within
-                } else if d > tol::LINEAR {
-                    Side::Beyond
-                } else if i < 2 {
-                    continue;
-                } else {
-                    return None;
-                };
-                if *found.get_or_insert(here) != here {
-                    return None;
-                }
-            }
-        }
-        out.push(found?);
     }
-    Some(out)
+    found
 }
