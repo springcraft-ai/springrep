@@ -12,7 +12,7 @@ use springrep::{
     measure, primitive,
     profile::Profile,
     step,
-    sweep::extrude,
+    sweep::{extrude, revolve},
     topo::Brep,
 };
 
@@ -270,4 +270,48 @@ fn a_ball_cut_by_a_tilted_plane_leaves_a_cap_on_a_circle() {
     );
     assert!(count(&cap, "circle") > 0);
     assert_eq!(count(&cap, "intersection") + count(&cap, "nurbs"), 0);
+}
+
+/// The triangle through `pts` in the plane y = 0, each a radius and a height, turned about z.
+fn turned(pts: [[f64; 2]; 3], id: &str) -> Brep {
+    let pts = pts.map(|p| Vec2::new(p[0], p[1]));
+    let frame = Frame::new(Vec3::ZERO, Vec3::new(0.0, -1.0, 0.0), Vec3::X).unwrap();
+    let p = Profile::polygon(&pts, &["a", "b", "c"]);
+    revolve(&p, &frame, Vec3::ZERO, Vec3::Z, 2.0 * PI, id).unwrap()
+}
+
+#[test]
+fn a_hexagon_chamfered_at_both_ends_is_cut_in_hyperbolas_on_every_flat() {
+    // A bored hexagon 5.5 across its flats and 2.4 high, its corners cut at 30° to each end by a
+    // cone that leaves a circle of radius 2.475 there: every flat meets each cone in a hyperbola.
+    let (corner, h, land) = (5.5 / 3f64.sqrt(), 2.4, 2.475);
+    let hexagon: Vec<Vec2> = (0..6)
+        .map(|k| {
+            let a = PI / 3.0 * k as f64;
+            Vec2::new(corner * a.cos(), corner * a.sin())
+        })
+        .collect();
+    let names = ["f0", "f1", "f2", "f3", "f4", "f5"];
+    let mut outline = Profile::polygon(&hexagon, &names);
+    outline.loops.extend(Profile::circle(Vec2::ZERO, 3.0).loops);
+    let prism = extrude(&outline, &Frame::WORLD, h, "hex").unwrap();
+    let slope = (PI / 6.0).tan();
+    let (inner, out) = (land - 0.2 / slope, corner + 1.0);
+    let rise = (out - land) * slope;
+    let top = turned([[out, h - rise], [out, h + 0.2], [inner, h + 0.2]], "top");
+    let bottom = turned([[inner, -0.2], [out, -0.2], [out, rise]], "bottom");
+    let once = difference(&prism, &top).unwrap();
+    let twice = difference(&once, &bottom).unwrap();
+    for b in [&once, &twice] {
+        assert!(check::check(b).is_empty(), "{:?}", check::check(b));
+        assert!(count(b, "nurbs") >= 6 && count(b, "intersection") == 0);
+        edges_lie_on_their_faces(b, 1e-11);
+    }
+    let (v0, v1, v2) = (
+        measure::volume(&prism),
+        measure::volume(&once),
+        measure::volume(&twice),
+    );
+    assert!(v0 - v1 > 0.1 && ((v0 - v1) - (v1 - v2)).abs() <= 1e-9 * v0);
+    assert_eq!(twice.face_count(), once.face_count() + 1);
 }

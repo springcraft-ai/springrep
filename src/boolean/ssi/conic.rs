@@ -396,8 +396,13 @@ mod tests {
             }
             for t in nc.breakpoints(t0, t1) {
                 let e = 1e-9 * (t1 - t0);
-                let (before, after) = (nc.d2(t - e).1, nc.d2(t + e).1);
-                assert!(before.dist(after) <= 1e-6 * before.norm(), "a kink at {t}");
+                let ((_, before, b2), (_, after, a2)) = (nc.d2(t - e), nc.d2(t + e));
+                let turned = 2.0 * e * (b2.norm() + a2.norm());
+                assert!(
+                    before.dist(after) <= 1e-6 * before.norm() + turned,
+                    "a kink at {t}"
+                );
+                assert!((before.norm() - 1.0).abs() <= 1e-6 + turned, "speed at {t}");
             }
         }
     }
@@ -435,6 +440,36 @@ mod tests {
         };
         let p = plane([0.0, 2.0, 0.0], [0.1, 1.0, 0.0]);
         exact_conic(&p, &narrowing, &meet(&p, &narrowing).0);
+    }
+
+    #[test]
+    fn sections_of_wide_and_narrow_cones_near_and_far_from_the_apex_are_exact() {
+        let mut open = 0;
+        for half_angle in [0.05, 0.6, -0.6, 1.4] {
+            let c = Cone {
+                frame: Frame::new(Vec3::new(0.2, -0.1, 0.4), Vec3::new(0.1, 0.2, 1.0), Vec3::X)
+                    .unwrap(),
+                radius: 1.5,
+                half_angle,
+            };
+            let apex = c.frame.origin - c.frame.z * (c.radius / half_angle.tan());
+            for tilt in 0..24 {
+                let turn = PI * (tilt as f64 + 0.5) / 24.0;
+                let n = c.frame.x * turn.sin() + c.frame.z * turn.cos();
+                for h in [-5.0, -1e-3, 1e-4, 0.3, 5.0] {
+                    let p = Plane {
+                        frame: Frame::from_axis(apex + n * h, n).unwrap(),
+                    };
+                    let Some(Ssi::Curves { curves, .. }) = plane_cone(&p, &c, &region()) else {
+                        panic!("no closed form");
+                    };
+                    let arcs: Vec<SsiCurve> = curves.into_iter().filter(|cv| !cv.closed).collect();
+                    exact_conic(&p, &c, &arcs);
+                    open += arcs.len();
+                }
+            }
+        }
+        assert!(open > 200, "{open}");
     }
 
     #[test]
