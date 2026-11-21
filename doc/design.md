@@ -799,7 +799,19 @@ surfaces lie within `LINEAR` of each other is a contact, not a sliver to trace. 
 | plane–cone, axis not square to the plane                                                | exact ellipse; hyperbola or parabola along the generators; through the apex two generators, one tangent generator or the apex | the plane's distance from the apex and its angle to the nearest generator |
 | plane–torus holding the axis                                                            | the two meridian circles                                                                                                      | the plane's distance from the axis                                        |
 | cylinder–cylinder (axes not parallel), cylinder–sphere, plane–torus, sphere–torus       | branches evaluated along a sweeping family, fitted; touching points; nodes                                                    | the family's margins (below)                                              |
+| plane–rational spline, its control points on the plane or to one side of it             | nothing; one side of a one-span patch, its own iso-curve, tangent or crossing; otherwise traced by `march.rs`                 | the control points' heights over the plane (below)                        |
 | cylinder–cone, cone–cone, cylinder–torus, cone–torus, torus–torus, sphere–cone off axis | traced by `march.rs`                                                                                                          | Newton steps where the normals are parallel: sensitive near tangency      |
+
+A rational spline's weights are positive, so each of its points is a mean of its control points and
+its height over a plane the same mean of theirs. With every control point clear of the plane on one
+side by more than `LINEAR`, the surface does not meet it, whatever its spans. On a patch of one span
+with its knots at its ends, a point inside the domain has a positive share of every control point,
+and a point of a side between its corners of that side's row alone: where one side's whole row lies
+on the plane and every control point off the plane lies to one side, the patch meets the plane in
+that side and nowhere else. The contact is the side's own iso-curve, tangent where the row beside
+it lies wholly on the plane too (a blend's corner patch against the face it runs out on) and a
+crossing where none of that row does. Control points either side of the plane, a row partly on it,
+a further corner or side on it, a side drawn to a point and a patch lying in the plane are traced.
 
 The swept pairs ([`ssi/sweep.rs`](../src/boolean/ssi/sweep.rs)) take one surface as a family of
 lines or circles (a cylinder's generators, a torus's meridians), each meeting the other surface in
