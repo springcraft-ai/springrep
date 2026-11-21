@@ -35,7 +35,7 @@ fn vertex_faces(b: &Brep) -> HashMap<VertexId, BTreeSet<FaceId>> {
 }
 
 /// The point on every plane `(n, d)`, `n·p = d`, by least squares, when they pin one point.
-fn meet(planes: &[(Vec3, f64)]) -> Option<Point3> {
+pub(super) fn meet(planes: &[(Vec3, f64)]) -> Option<Point3> {
     let mut a = vec![0.0; 9];
     let mut r = vec![0.0; 3];
     for &(n, d) in planes {
@@ -68,7 +68,7 @@ fn plane_of(s: &Surface) -> Option<Frame> {
     }
 }
 
-fn affine_on(frame: &Frame, line: &Line) -> PCurve {
+pub(super) fn affine_on(frame: &Frame, line: &Line) -> PCurve {
     let l = frame.to_local(line.origin);
     PCurve::Affine {
         origin: Vec2::new(l.x, l.y),
@@ -1028,7 +1028,7 @@ fn circle_through(a: Point3, b: Point3, c: Point3) -> Option<crate::geom::Circle
 }
 
 /// The surface parameters of `p` on `s` near `last`, moved by whole periods to continue it.
-fn near_uv(s: &Surface, p: Point3, last: Option<Vec2>) -> Vec2 {
+pub(super) fn near_uv(s: &Surface, p: Point3, last: Option<Vec2>) -> Vec2 {
     let uv = s.project(p);
     let Some(to) = last else { return uv };
     let shift = |x: f64, t: f64, per: Option<f64>| per.map_or(x, |q| x + ((t - x) / q).round() * q);

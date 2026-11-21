@@ -21,6 +21,7 @@ use crate::{
 
 mod affine;
 mod delete;
+mod local;
 pub(crate) mod near;
 mod parallel;
 mod parted;

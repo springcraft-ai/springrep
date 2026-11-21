@@ -3,6 +3,8 @@
 
 use std::collections::BTreeSet;
 
+mod direct;
+
 use crate::{
     blend::shaped::plane_of,
     boolean::{self, half_space, same_domain, solids_of},
@@ -49,6 +51,15 @@ pub fn delete_faces(s: &Brep, faces: &[FaceId]) -> Result<Brep> {
     if faces.is_empty() {
         return Err(Error::InvalidInput("no faces to delete".into()));
     }
+    match direct::direct(s, faces) {
+        Some(out) => Ok(out),
+        None => general(s, faces),
+    }
+}
+
+/// [`delete_faces`] for any gap: the neighbours' material built as solids and combined, and the
+/// pieces of it at the deleted faces added to the solid or cut from it.
+fn general(s: &Brep, faces: &[FaceId]) -> Result<Brep> {
     let near = neighbours(s, faces);
     if near.is_empty() {
         return Err(Error::InvalidInput(
@@ -417,3 +428,6 @@ fn gap_pieces(x: &Brep, holders: bool) -> Result<Option<Brep>> {
     }
     Ok((!keep.is_empty()).then(|| solids_of(x, &keep)))
 }
+
+#[cfg(test)]
+mod tests;
