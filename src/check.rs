@@ -1656,7 +1656,19 @@ fn edge_meets_face(
     let near_end = |p: Point3| ends.iter().any(|&(_, q, within)| q.dist(p) <= within);
     let mut found: Vec<Point3> = Vec::new();
     let boxes = cache.curve_boxes.entry(e).or_default();
-    for range in near_ranges(curve, edge.range, whole, s, bound, boxes) {
+    // Where a closed form gives every meeting of the whole edge, finding the stretches that come
+    // near the surface costs more than the meetings; those outside the box are dropped below.
+    let closed = match curve {
+        Curve::Line(_) => ray_surface_is_closed_form(s) || matches!(s, Surface::Torus(_)),
+        Curve::Circle(_) | Curve::Ellipse(_) => matches!(s, Surface::Plane(_)),
+        _ => false,
+    };
+    let ranges = if closed && !curve_surface_in(curve, edge.range, s, boxes).on_surface {
+        vec![edge.range]
+    } else {
+        near_ranges(curve, edge.range, whole, s, bound, boxes)
+    };
+    for range in ranges {
         let hits = curve_surface_in(curve, range, s, boxes);
         if !hits.on_surface {
             found.extend(
