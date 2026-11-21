@@ -1672,7 +1672,8 @@ across the point, so `g` vanishes there and a characteristic curve passes throug
 cut there, and its two halves sweep apart from a pole at the point.
 
 A turn of a whole turn or more ends where it starts, so its two ends would be one face; it is built
-as the union of the sweeps of its two halves.
+as the union of the sweeps of its two halves. Turns about one line compose, so the second half's
+sweep is the first's turned half a turn, and only the first is swept.
 
 The faces are split along the curves by the booleans' arrangement
 ([`arrange.rs`](../src/boolean/arrange.rs)), each piece is in `W` or not by the sign of `g` at a

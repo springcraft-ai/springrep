@@ -20,7 +20,13 @@ pub use motion::Motion;
 
 use std::f64::consts::{PI, TAU};
 
-use crate::{Error, Result, boolean, error::invalid, tol, topo::Brep};
+use crate::{Error, Result, boolean, error::invalid, math::Transform, tol, topo::Brep};
+
+#[cfg(test)]
+thread_local! {
+    /// Set by a test to build a whole turn's second half as the first is built.
+    static SWEEP_BOTH_HALVES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 /// The solid `body` passes through as `motion` carries it, `τ` from 0 to 1: the union of
 /// `M(τ)·body`. The faces the body's faces are cut from keep their names; each face a curve sweeps
@@ -34,7 +40,8 @@ pub fn solid(body: &Brep, motion: &Motion, feature: &str) -> Result<Brep> {
     if body.solid(s).shells.len() != 1 {
         return Err(Error::Unsupported("a sweep of a solid with a void".into()));
     }
-    // A whole turn ends where it starts, so its two ends would be one; it is two half turns.
+    // A whole turn ends where it starts, so its two ends would be one; it is two half turns. Turns
+    // about one line compose, so the second half's sweep is the first's turned half a turn.
     if let Motion::Turn {
         origin,
         axis,
@@ -51,7 +58,17 @@ pub fn solid(body: &Brep, motion: &Motion, feature: &str) -> Result<Brep> {
             to: a + step,
         };
         let a = solid(body, &half(from), feature)?;
-        let b = solid(body, &half(from + step), feature)?;
+        #[cfg(test)]
+        let again = SWEEP_BOTH_HALVES.get();
+        #[cfg(not(test))]
+        let again = false;
+        let b = if again {
+            solid(body, &half(from + step), feature)?
+        } else {
+            let mut b = a.clone();
+            b.transform(&Transform::rotation(origin, axis, step));
+            b
+        };
         let facts = crate::blend::shared_edges(&a, &b);
         return boolean::boolean_with(&a, &b, boolean::Op::Union, &facts);
     }

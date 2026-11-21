@@ -3,13 +3,36 @@ use std::f64::consts::PI;
 use super::*;
 use crate::{
     check,
-    math::{Frame, Vec3},
+    math::{Frame, Point3, Vec3},
     measure,
     primitive::{block, cylinder, sphere},
 };
 
 fn rel(a: f64, b: f64) -> f64 {
     (a - b).abs() / b.abs()
+}
+
+/// Fails unless `a` and `b` are one solid built twice: as many faces under each name, each face
+/// of one matched by a face of the other on the same kind of surface with the same area, and the
+/// same volume, all within `tol` of their size.
+pub(super) fn assert_same_solid(a: &Brep, b: &Brep, tol: f64) {
+    assert_eq!(a.name_counts(), b.name_counts());
+    let faces = |s: &Brep| {
+        let mut out: Vec<(&'static str, f64)> = s
+            .face_ids()
+            .map(|f| (s.face(f).surface.kind(), measure::face_area(s, f)))
+            .collect();
+        out.sort_by(|x, y| x.0.cmp(y.0).then(x.1.total_cmp(&y.1)));
+        out
+    };
+    let (fa, fb) = (faces(a), faces(b));
+    assert_eq!(fa.len(), fb.len());
+    let size = measure::area(a);
+    for (x, y) in fa.iter().zip(&fb) {
+        assert!(x.0 == y.0 && (x.1 - y.1).abs() <= tol * size, "{x:?} {y:?}");
+    }
+    assert!(rel(measure::area(a), measure::area(b)) <= tol);
+    assert!(rel(measure::volume(a), measure::volume(b)) <= tol);
 }
 
 // A ball slid along a line sweeps a capsule: a cylinder of its radius along the slide, with half a
@@ -271,6 +294,45 @@ fn a_cube_turned_a_whole_turn_is_a_ring() {
         "{}",
         measure::volume(&b)
     );
+}
+
+// A whole turn's second half is the first turned half a turn: the same solid as when the second
+// half is swept as the first is, for a turn either way, started at any angle.
+#[test]
+fn a_whole_turn_built_from_one_half_is_the_one_built_from_both() {
+    let cube = block(
+        &Frame::WORLD.translated(Vec3::X),
+        Vec3::new(1.0, 1.0, 1.0),
+        "cube",
+    )
+    .unwrap();
+    let ball = sphere(&Frame::WORLD.translated(Vec3::new(3.0, 0.0, 1.0)), 1.0, "b").unwrap();
+    let drum = cylinder(
+        &Frame::new(Vec3::new(0.0, 5.0, 0.0), Vec3::Y, Vec3::X).unwrap(),
+        1.0,
+        0.5,
+        "drum",
+    )
+    .unwrap();
+    let turn = |from: f64, to: f64| Motion::Turn {
+        origin: Point3::new(0.0, 0.0, 0.5),
+        axis: Vec3::Z,
+        from,
+        to,
+    };
+    for (body, motion) in [
+        (&cube, turn(0.0, 2.0 * PI)),
+        (&cube, turn(0.7, 0.7 - 2.0 * PI)),
+        (&ball, turn(-1.0, 2.0 * PI - 1.0)),
+        (&drum, turn(0.3, 0.3 + 2.0 * PI)),
+    ] {
+        let copied = solid(body, &motion, "sw").unwrap();
+        SWEEP_BOTH_HALVES.set(true);
+        let swept = solid(body, &motion, "sw");
+        SWEEP_BOTH_HALVES.set(false);
+        assert!(check::check(&copied).is_empty());
+        assert_same_solid(&copied, &swept.unwrap(), 1e-10);
+    }
 }
 
 // A drum of radius 1 and length ½ along y, its axis 5 from the z axis, turned about it: at height z
