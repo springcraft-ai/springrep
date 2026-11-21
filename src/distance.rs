@@ -13,7 +13,7 @@
 //! before the search.
 
 use std::cell::OnceCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, OnceLock};
 
 use crate::{
@@ -689,6 +689,19 @@ fn offer(answer: &mut Option<Closest>, c: Closest) {
     }
 }
 
+/// Whether the distance between two pieces takes long enough to be worth keeping: a triangle
+/// against a triangle or a segment.
+fn is_costly(a: &Piece, b: &Piece) -> bool {
+    matches!(
+        (a, b),
+        (Piece::Tri(..), Piece::Tri(..) | Piece::Seg(..)) | (Piece::Seg(..), Piece::Tri(..))
+    )
+}
+
+/// The most pairs of pieces whose distance is kept from finding the closest pair to gathering
+/// the near ones.
+const KNOWN_PAIRS: usize = 1 << 19;
+
 /// Seeds per pair of entities kept for the exact search, spread apart: a pair can have several
 /// minima (a point on a torus's axis has a ring of them), and two large faces held parallel bring
 /// thousands of pieces all equally close.
@@ -758,6 +771,47 @@ impl<'a> Nearest<'a> {
     }
 }
 
+/// The distances of pairs of pieces, one of each side by its place, worked out once.
+type Known = HashMap<(usize, usize), (f64, Point3, Point3)>;
+
+/// A pair of pieces near each other: their distance, their entities, and their closest points.
+type Near = (f64, (Entity, Entity), Point3, Point3);
+
+/// The least distance between a piece of `a` and a piece of `b`, and what the costly pairs
+/// weighed on the way came to, `most` of them at most: they are the near ones [`near_pairs`]
+/// gathers next.
+fn closest_pieces(a: &Meshed, b: &Meshed, most: usize) -> (f64, Known) {
+    let mut known = Known::new();
+    let best = a.tree.least(&b.tree, |i, j| {
+        let found = piece_distance(&a.pieces[i], &b.pieces[j]);
+        if known.len() < most && is_costly(&a.pieces[i], &b.pieces[j]) {
+            known.insert((i, j), found);
+        }
+        found.0
+    });
+    (best, known)
+}
+
+/// Every pair of a piece of `a` and a piece of `b` within `reach` of each other, in the order of
+/// `a`'s pieces. A pair in `known` is not worked out again.
+fn near_pairs(a: &Meshed, b: &Meshed, reach: f64, known: &Known) -> Vec<Near> {
+    let boxes = a.tree.boxes();
+    let mut hits = Vec::new();
+    let mut near = Vec::new();
+    for (i, x) in a.pieces.iter().enumerate() {
+        b.tree.within(&boxes[i], reach, &mut hits);
+        for &j in &hits {
+            let y = &b.pieces[j];
+            let kept = is_costly(x, y).then(|| known.get(&(i, j))).flatten();
+            let (d, p, q) = kept.copied().unwrap_or_else(|| piece_distance(x, y));
+            if d <= reach {
+                near.push((d, (x.entity(), y.entity()), p, q));
+            }
+        }
+    }
+    near
+}
+
 /// [`closest`] between two sides already expanded and meshed, each with its solids' faces.
 fn between(side_a: &Side, side_b: &Side, [kept_a, kept_b]: [&Domains; 2]) -> Result<Closest> {
     let (a, b) = (side_a.on.b, side_b.on.b);
@@ -767,11 +821,7 @@ fn between(side_a: &Side, side_b: &Side, [kept_a, kept_b]: [&Domains; 2]) -> Res
             "a distance needs something on each side".into(),
         ));
     }
-    let (tree_a, tree) = (&side_a.mesh.tree, &side_b.mesh.tree);
-    let boxes = tree_a.boxes();
-
-    // The closest pair of pieces.
-    let best = tree_a.least(tree, |i, j| piece_distance(&pa[i], &pb[j]).0);
+    let (best, known) = closest_pieces(&side_a.mesh, &side_b.mesh, KNOWN_PAIRS);
     let (defl_a, defl_b) = (side_a.mesh.deflection, side_b.mesh.deflection);
     let margin = 2.0 * (defl_a + defl_b) + tol::LINEAR;
     // Solids that share material are no distance apart. Boundaries farther apart than the meshes
@@ -795,21 +845,11 @@ fn between(side_a: &Side, side_b: &Side, [kept_a, kept_b]: [&Domains; 2]) -> Res
         });
     }
     // Every pair the exact minimum could lie between.
-    let mut hits = Vec::new();
     let reach = best + margin;
     let spread = 4.0 * (defl_a + defl_b);
     // Nearest first, so the closest pair of pieces always seeds its entities: on parts smaller
     // than the meshes' deflection every pair lies within reach and spread of every other.
-    let mut near_pairs = Vec::new();
-    for (i, x) in pa.iter().enumerate() {
-        tree.within(&boxes[i], reach, &mut hits);
-        for &j in &hits {
-            let (d, p, q) = piece_distance(x, &pb[j]);
-            if d <= reach {
-                near_pairs.push((d, (x.entity(), pb[j].entity()), p, q));
-            }
-        }
-    }
+    let mut near_pairs = near_pairs(&side_a.mesh, &side_b.mesh, reach, &known);
     near_pairs.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
     let mut seeds: BTreeMap<(Entity, Entity), Vec<(Point3, Point3)>> = BTreeMap::new();
     for (_, pair, p, q) in near_pairs {
@@ -1008,6 +1048,44 @@ mod tests {
             assert_eq!(c.distance, searched(&a, &sel, &b, &whole).distance, "{e:?}");
             assert_eq!(c.distance == 0.0, holds(&sel), "{e:?}");
         }
+    }
+
+    #[test]
+    fn near_pieces_come_out_the_same_from_kept_distances_as_worked_out_again() {
+        // Rods along x over a block, level or tilted, apart or sunk in: curved meshes whose
+        // triangles and segments are weighed against the block's and each other's.
+        let rod = |z: f64, tilt: f64| {
+            let axis = Vec3::new(1.0, 0.0, tilt).unit().unwrap();
+            let frame = Frame::new(Vec3::new(-1.0, 1.5, z), axis, Vec3::Y).unwrap();
+            primitive::cylinder(&frame, 0.5, 6.0, "r").unwrap()
+        };
+        let a = block([0.0; 3], [4.0, 3.0, 2.0]);
+        let others = [rod(3.0, 0.0), rod(3.0, 0.1), rod(2.2, -0.05), rod(8.0, 0.3)];
+        let mut kept_in_all = 0;
+        for (k, b) in others.iter().enumerate() {
+            for (x, y) in [(&a, b), (b, &a), (b, &others[(k + 1) % 4])] {
+                let sx = Side::new(x, &Selection::body(x)).unwrap();
+                let sy = Side::new(y, &Selection::body(y)).unwrap();
+                let (best, none) = closest_pieces(&sx.mesh, &sy.mesh, 0);
+                assert!(none.is_empty());
+                let reach = best + 0.05;
+                let plain = near_pairs(&sx.mesh, &sy.mesh, reach, &none);
+                for most in [7, KNOWN_PAIRS] {
+                    let (same, known) = closest_pieces(&sx.mesh, &sy.mesh, most);
+                    assert_eq!(same, best);
+                    assert!(known.len() <= most, "rod {k}");
+                    for (&(i, j), &found) in &known {
+                        let (x, y) = (&sx.mesh.pieces[i], &sy.mesh.pieces[j]);
+                        assert!(is_costly(x, y));
+                        assert_eq!(found, piece_distance(x, y));
+                    }
+                    kept_in_all += known.values().filter(|found| found.0 <= reach).count();
+                    let kept = near_pairs(&sx.mesh, &sy.mesh, reach, &known);
+                    assert_eq!(kept, plain, "rod {k}, {most} pairs kept");
+                }
+            }
+        }
+        assert!(kept_in_all > 100);
     }
 
     #[test]
