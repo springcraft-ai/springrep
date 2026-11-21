@@ -5,6 +5,7 @@
 //! 2006): the curves where that begins are found on a grid as a contour, each one where two faces
 //! cross, shared by the two, and the faces are sewn once along them.
 
+mod brent;
 mod contour;
 mod reach;
 mod restrict;
@@ -16,6 +17,20 @@ use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
 pub(crate) use reach::Reach;
+
+#[cfg(test)]
+thread_local! {
+    /// Set by a test to search as the plain methods do: every sample of a path's depth, a peak
+    /// by golden section, a sign change by regula falsi.
+    static PLAIN_SEARCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn plain_search() -> bool {
+    #[cfg(test)]
+    return PLAIN_SEARCH.get();
+    #[cfg(not(test))]
+    false
+}
 
 use super::grazing::fit_exact;
 use super::moving::graph::{self, Link};

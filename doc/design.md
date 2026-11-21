@@ -1745,15 +1745,19 @@ it. For a body of revolution (every face a plane square to one axis, or a cylind
 torus about it) `d` is read in its meridian section, the distance from the outline of segments and
 arcs, its sign from the side of the nearest piece or, at a corner, from the outline's winding. The
 depth along the path is sampled finely enough that no point moves more than a fiftieth of the
-body's size between samples, and each peak that could top the others is searched by golden
-section.
+body's size between samples, and each peak that could top the others is climbed by Brent's search
+(Brent 1973), which steps to the top of a parabola where the depth is smooth and by golden section
+where it has a corner. The depth is a distance, so it changes no faster than the point moves, and
+under a slide, a turn or a screw the point's speed through the body's frame is the same all along
+its path: a sample is read only where that bound lets it be the highest or beside a peak that
+could be.
 
 - Each edge is cut where the body begins to reach into it, by bisection between samples.
 - Each face's plane is searched on a grid as the edges' planes are (marching squares), each grid
   line whose ends are reached differently cut by bisection; each curve found is cut where it leaves
   the face, at the vertex on the face's boundary there, and a closed one gets two vertices.
 - The curves are made exact where the grid is coarse, each point moved across the curve onto it by
-  regula falsi on the depth; each curve is cut at every vertex of the others that lies on it.
+  Brent's root finder on the depth; each curve is cut at every vertex of the others that lies on it.
 - Each curve is where two faces cross, so it has a partner between the same two vertices on another
   face, or on the same face where a sheet runs through itself. The two share one piece, fitted
   through one curve's exact points; each face's pcurve is the spline through its own points in its

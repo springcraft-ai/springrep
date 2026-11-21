@@ -165,7 +165,9 @@ pub(super) fn settle(s: &Surface, reach: &Reach, uv: Vec2, dir: Vec2, span: f64)
 }
 
 /// The point nearest `uv` across the direction `dir`, within `span` each way, where `g` of the
-/// face's point changes sign, by regula falsi (the Illinois variant), if there is one.
+/// face's point changes sign, if there is one: the sign change is bracketed within `1e-14` of the
+/// reach it was looked for in, by Brent's root finder (Brent 1973, ch. 4), which a corner of the
+/// function, where two places along the path reach equally deep, cannot stall.
 pub(super) fn settle_on(
     s: &Surface,
     g: &dyn Fn(crate::math::Point3) -> f64,
@@ -173,44 +175,57 @@ pub(super) fn settle_on(
     dir: Vec2,
     span: f64,
 ) -> Option<Vec2> {
-    let at = |x: f64| {
+    let mut at = |x: f64| {
         let q = uv + dir * x;
         g(s.eval(q.x, q.y))
     };
     let mut r = span;
     for _ in 0..4 {
-        let (mut x0, mut x1) = (-r, r);
-        let (mut g0, mut g1) = (at(x0), at(x1));
+        let (g0, g1) = (at(-r), at(r));
         if (g0 > 0.0) != (g1 > 0.0) {
-            // A step that does not halve the bracket is followed by a bisection, so a corner of
-            // the function, where two places along the path reach equally deep, cannot stall it.
-            let mut width = (x1 - x0).abs();
-            for k in 0..120 {
-                let bisect = k % 2 == 1 && (x1 - x0).abs() > 0.5 * width;
-                if k % 2 == 1 {
-                    width = (x1 - x0).abs();
-                }
-                let x = if bisect || g1 == g0 {
-                    0.5 * (x0 + x1)
-                } else {
-                    (x0 * g1 - x1 * g0) / (g1 - g0)
-                };
-                let gx = at(x);
-                if (gx > 0.0) != (g1 > 0.0) {
-                    x0 = x1;
-                    g0 = g1;
-                } else {
-                    g0 *= 0.5;
-                }
-                x1 = x;
-                g1 = gx;
-                if (x1 - x0).abs() <= 1e-14 * r || gx == 0.0 {
-                    break;
-                }
-            }
-            return Some(uv + dir * x1);
+            let x = if super::plain_search() {
+                false_position(&mut at, (-r, g0), (r, g1), 1e-14 * r)
+            } else {
+                super::brent::root(&mut at, (-r, g0), (r, g1), 1e-14 * r)
+            };
+            return Some(uv + dir * x);
         }
         r *= 2.0;
     }
     None
+}
+
+/// The sign change of `f` between two places with their values, by regula falsi (the Illinois
+/// variant) with a bisection after each step that does not halve the bracket.
+fn false_position(
+    f: &mut dyn FnMut(f64) -> f64,
+    (mut x0, mut g0): (f64, f64),
+    (mut x1, mut g1): (f64, f64),
+    tol: f64,
+) -> f64 {
+    let mut width = (x1 - x0).abs();
+    for k in 0..120 {
+        let bisect = k % 2 == 1 && (x1 - x0).abs() > 0.5 * width;
+        if k % 2 == 1 {
+            width = (x1 - x0).abs();
+        }
+        let x = if bisect || g1 == g0 {
+            0.5 * (x0 + x1)
+        } else {
+            (x0 * g1 - x1 * g0) / (g1 - g0)
+        };
+        let gx = f(x);
+        if (gx > 0.0) != (g1 > 0.0) {
+            x0 = x1;
+            g0 = g1;
+        } else {
+            g0 *= 0.5;
+        }
+        x1 = x;
+        g1 = gx;
+        if (x1 - x0).abs() <= tol || gx == 0.0 {
+            break;
+        }
+    }
+    x1
 }

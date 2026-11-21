@@ -1,4 +1,5 @@
 use super::section::Section;
+use super::{PLAIN_SEARCH, Reach};
 use crate::{
     check,
     math::{Frame, Point3, Vec3},
@@ -235,4 +236,121 @@ fn a_ball_screwed_round_a_helix_tighter_than_itself_is_trimmed_where_it_folds() 
     let volume = measure::volume(&b);
     let want = helix_tube_volume(1.5, 3.0, 2.0, 2.0, 0.1);
     assert!((volume - want).abs() <= 2e-3 * want, "{volume} {want}");
+}
+
+fn leaning_ring() -> crate::topo::Brep {
+    let lean = 65f64.to_radians();
+    let frame = Frame::new(
+        Vec3::new(0.0, 0.0, 4.0),
+        Vec3::new(lean.sin(), 0.0, lean.cos()),
+        Vec3::X,
+    )
+    .unwrap();
+    torus(&frame, 3.0, 1.0, "ring").unwrap()
+}
+
+fn two_turns_of_a_tight_screw() -> Motion {
+    Motion::Screw {
+        screw: crate::sweep::Helix {
+            origin: Point3::ZERO,
+            axis: Vec3::Z,
+            rise: 3.0 / std::f64::consts::TAU,
+            sign: 1.0,
+        },
+        from: 0.0,
+        to: 2.0 * std::f64::consts::TAU,
+    }
+}
+
+// The depth is read at fewer places along a point's path than its samples, and its peaks are
+// climbed by another method: the deepest reach of each point is the one every sample and a
+// golden-section search give, and so is whether the body reaches it. A peak at a corner of the
+// depth is as sharp as the bracket of `τ` it is climbed to, times the point's speed.
+#[test]
+fn the_deepest_reach_is_the_one_every_sample_gives() {
+    let ring = leaning_ring();
+    let ball = crate::primitive::sphere(
+        &Frame::WORLD.translated(Vec3::new(1.5, 0.0, 0.0)),
+        2.0,
+        "ball",
+    )
+    .unwrap();
+    let drum = crate::primitive::cylinder(
+        &Frame::WORLD.translated(Vec3::new(2.0, 0.0, -1.0)),
+        1.0,
+        2.0,
+        "drum",
+    )
+    .unwrap();
+    let turn = Motion::Turn {
+        origin: Point3::ZERO,
+        axis: Vec3::new(0.2, 1.0, 0.1),
+        from: 0.3,
+        to: 4.0,
+    };
+    let cases = [
+        (&ring, Motion::Slide(Vec3::new(0.0, 0.0, -8.0))),
+        (&ball, two_turns_of_a_tight_screw()),
+        (&drum, turn),
+        (&drum, Motion::Slide(Vec3::new(40.0, 3.0, 0.0))),
+    ];
+    for (body, motion) in &cases {
+        let reach = Reach::new(body, motion, (0.0, 1.0)).unwrap();
+        let (mut held, mut free) = (0, 0);
+        let bbox = measure::bbox(body);
+        let (mid, half) = ((bbox.min + bbox.max) * 0.5, bbox.max - bbox.min);
+        for k in 0..4000 {
+            let a = k as f64 * 0.917;
+            let tau = (a * 0.37).sin().abs();
+            // Points about the body where the motion has carried it.
+            let reach_out = 0.6 * (a * 0.53).sin().abs();
+            let p = motion.rate(tau).0.point(Point3::new(
+                mid.x + reach_out * half.x * (a * 1.3).sin(),
+                mid.y + reach_out * half.y * (a * 0.7).cos(),
+                mid.z + reach_out * half.z * (a * 2.1).sin(),
+            ));
+            let (got, holds) = (reach.deepest(p), reach.holds(p));
+            PLAIN_SEARCH.set(true);
+            let (want, plain) = (reach.deepest(p), reach.holds(p));
+            PLAIN_SEARCH.set(false);
+            assert!(
+                (got - want).abs() <= 1e-7 * reach.size,
+                "{got} {want} at {p:?}"
+            );
+            if (want - reach.hair).abs() > 1e-7 * reach.size {
+                assert_eq!(holds, plain, "{got} {want} at {p:?}");
+                assert_eq!(holds, want > reach.hair);
+            }
+            if holds {
+                held += 1;
+            } else {
+                free += 1;
+            }
+        }
+        assert!(held > 200 && free > 200, "{held} {free}");
+    }
+}
+
+// A trimmed sweep is the same solid whichever way the depth's peaks and the curves' points are
+// searched for.
+#[test]
+fn a_trimmed_sweep_is_the_one_the_plain_searches_trim() {
+    let ring = leaning_ring();
+    let ball = crate::primitive::sphere(
+        &Frame::WORLD.translated(Vec3::new(1.5, 0.0, 0.0)),
+        2.0,
+        "ball",
+    )
+    .unwrap();
+    for (body, motion) in [
+        (&ring, Motion::Slide(Vec3::new(0.0, 0.0, -8.0))),
+        (&ball, two_turns_of_a_tight_screw()),
+    ] {
+        let fast = solid(body, &motion, "sw").unwrap();
+        PLAIN_SEARCH.set(true);
+        let plain = solid(body, &motion, "sw");
+        PLAIN_SEARCH.set(false);
+        assert!(check::check(&fast).is_empty());
+        super::super::tests::assert_same_solid(&fast, &plain.unwrap(), 1e-9);
+    }
 }
