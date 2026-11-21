@@ -231,9 +231,10 @@ pub(crate) fn project_on(s: &Surface, curve: &Curve, t: f64, toward: f64, hint: 
     let away = dp * (toward - t).signum();
     // The way the curve bends: its second derivative less its part along the curve.
     let bend = dp.unit().map(|d| ddp - d * ddp.dot(d));
-    match pole_param(s, p, uv, away, bend, hint, false) {
+    let (_, su, sv) = s.d1(uv.x, uv.y);
+    match pole_param(s, p, uv, (su, sv), away, bend, hint, false) {
         Some(u) => Vec2::new(u, uv.y),
-        None => match pole_param(s, p, uv, away, None, hint, true) {
+        None => match pole_param(s, p, uv, (su, sv), away, None, hint, true) {
             Some(v) => Vec2::new(uv.x, v),
             None => uv,
         },
@@ -272,17 +273,18 @@ pub(crate) fn follow(s: &Surface, curve: &Curve, (t0, t1): (f64, f64), hint: Vec
 /// At a pole of `s` where `u` (or, with `in_v`, `v`) is free, the value of it at which the
 /// surface leaves the pole along `away`; `None` away from such a pole. A curve leaving along the
 /// surface's axis, as every curve through the pole of a torus whose tube touches its axis does,
-/// leaves at the angle it bends toward, `bend`.
+/// leaves at the angle it bends toward, `bend`. `su` and `sv` are the derivatives at `uv`.
+#[allow(clippy::too_many_arguments)]
 fn pole_param(
     s: &Surface,
     p: Point3,
     uv: Vec2,
+    (su, sv): (Vec3, Vec3),
     away: Vec3,
     bend: Option<Vec3>,
     hint: Vec2,
     in_v: bool,
 ) -> Option<f64> {
-    let (_, su, sv) = s.d1(uv.x, uv.y);
     let d = away.unit_or_zero();
     if (if in_v { sv } else { su }).norm() > tol::LINEAR || d.norm() == 0.0 {
         return None;
