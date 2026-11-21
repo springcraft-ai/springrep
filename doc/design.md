@@ -330,26 +330,43 @@ refuses two results the checker used to pass: a 90° revolve cut by its copy mov
 along `x` leaves the copy's corner edge 5e-8 (5e-12) mm from the original's inner wall, a face it
 shares no edge with, so the result touches itself there.
 
-A boolean's result, a sewn blend's and a swept solid's settle the sign of a solid's volume without
-the integral where a ray does.
-For a solid of one shell whose faces are all joined through partner coedges, no edge used by more
-than two, a ray leaves the middle of an edge along the sum of its two faces' outward normals: a
-point just along it lies on the outward side of both faces, whether the edge is convex or concave.
-The sheet winds round that point once for each face the ray then leaves the material through, less
-once for each it enters through, and round a point outside a closed sheet it winds no times. A
-count of zero therefore means the normals point out of the sheet, and a sheet whose faces meet only
-along the edges and at the vertices they share bounds one region, so its volume is positive. Up to
-twelve edges are tried for a ray that meets no face's surface within the face's box, which needs no
-face's trimmed domain: the crossings of a plane, cylinder, sphere or cone come from a closed form,
-a torus's from its quartic along the line, and a spline surface's from the patch search of
-[`csi.rs`](../src/boolean/csi.rs), none of which steps over a crossing. The first four rays are
-then followed through the faces they cross, each crossing located in its face; only a crossing of
-the four closed forms is followed, since its foot on the surface is certain. A ray decides nothing
-where it passes the box of a face on any other surface, meets a face on its boundary or at a
-tangent, or starts where a third face lies, and an edge kept with a local tolerance, or between
-faces that fold back on each other, starts none. What no ray settles, a solid of several shells, a
-sheet that touches itself along an edge, and every other caller of the checker take the volume
-integral.
+The checker settles the sign of a solid's volume without the integral where a ray does, and
+reports what the integral alone would. For a solid of one shell whose faces are all joined through
+partner coedges, no edge used by more than two, a ray leaves the middle of an edge along the sum of
+its two faces' outward normals: a point just along it lies on the outward side of both faces,
+whether the edge is convex or concave. The sheet winds round that point once for each face the ray
+then leaves the material through, less once for each it enters through, and round a point outside
+a closed sheet it winds no times. A count of zero therefore means the normals point out of the
+sheet, and a sheet whose faces meet only along the edges and at the vertices they share bounds one
+region, so its volume is positive. Up to twelve edges are tried for a ray that meets no face's
+surface within the face's box, which needs no face's trimmed domain: the crossings of a plane,
+cylinder, sphere or cone come from a closed form, a torus's from its quartic along the line, and a
+spline surface's from the patch search of [`csi.rs`](../src/boolean/csi.rs), none of which steps
+over a crossing. The first four rays are then followed through the faces they cross, each crossing
+located in its face; only a crossing of the four closed forms is followed, since its foot on the
+surface is certain. A ray decides nothing where it passes the box of a face on any other surface,
+meets a face on its boundary or at a tangent, or starts where a third face lies, and an edge kept
+with a local tolerance, or between faces that fold back on each other, starts none.
+
+That the faces meet only where they share an edge or a vertex is searched, not taken. Faces that
+share no edge are the pairs of the search above, which runs after. Faces that share an edge are
+searched before a ray is believed, by the same two tests: no edge of one that the other does not
+share may meet the other face, and the two may not cross along a curve out of a vertex they share.
+Where the surfaces cut across each other at an end of a shared edge they meet near it along one
+curve, the edge's own, so the faces can cross there only along the edge carried on past its end;
+that needs both faces' corners there to span a half turn or more, and the test is left out where
+either corner is convex. A pair found to meet nowhere else is recorded in both faces' memos with the
+places of the shared edges in each face, and is not searched again while both keep their geometry
+and share the same edges. An edge against a face off the analytic surfaces costs what the integral
+does, so a sheet with such a pair not yet recorded is left to the integral. Two block-shaped lobes
+joined corner to corner, one facing out and the larger facing in, whose L-shaped faces share an edge
+and pass through each other beyond it, were taken as facing outward by a ray off the first lobe
+before edge-sharing faces were searched.
+
+Whenever a check that a ray settled goes on to find any issue, it is made again by the integral
+alone, so the issues are those the integral gives first. What no ray settles, a solid of several
+shells, a sheet that touches itself along an edge, and a check without the search for crossings
+(an import's structure) take the volume integral.
 
 Every operation runs the checker on its result and returns `Error::InvalidResult` instead of a
 broken solid. Booleans and blends must keep that contract.
