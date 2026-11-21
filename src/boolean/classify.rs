@@ -34,7 +34,9 @@ pub(crate) const DIRECTIONS: [[f64; 3]; 9] = [
     [-0.3517, 0.1491, -0.9241],
 ];
 
-fn ray_box(p: Point3, d: Vec3, bb: &Aabb) -> Option<(f64, f64)> {
+/// The stretch of the line `p + t·d` inside `bb`, a little widened, where the ray from `p`
+/// reaches it.
+pub(crate) fn ray_box(p: Point3, d: Vec3, bb: &Aabb) -> Option<(f64, f64)> {
     let pad = 1e-6 * (1.0 + bb.diagonal());
     let (mut lo, mut hi) = (f64::NEG_INFINITY, f64::INFINITY);
     for k in 0..3 {

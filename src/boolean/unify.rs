@@ -47,6 +47,19 @@ pub fn unify(b: &Brep) -> Result<Brep> {
 /// on exact surfaces, so an imported solid's local tolerances only follow the edges and vertices
 /// that remain.
 fn unify_solid(b: &Brep) -> Result<Option<Brep>> {
+    let (faces, pool, vtol, pieces) = sewing_parts(b);
+    let n = faces.len();
+    let partners = sew::pair_uses(&faces, &pieces)?;
+    let merged = sew::merge_same_domain(faces, &pieces, &vtol, &partners);
+    if merged.len() == n {
+        return Ok(None);
+    }
+    sew::assemble(merged, &pool, &vtol, &pieces).map(Some)
+}
+
+/// The faces of `b` as a boolean keeps them, with the vertices, their tolerances and the edges
+/// they are sewn from: each edge is its own piece.
+fn sewing_parts(b: &Brep) -> (Vec<OutFace>, Vec<Point3>, Vec<f64>, Vec<PieceGeom>) {
     let pool: Vec<Point3> = b.vertex_ids().map(|v| b.vertex(v).point).collect();
     let vtol: Vec<f64> = b.vertex_ids().map(|v| b.vertex_tolerance(v)).collect();
     let curves: Vec<_> = b
@@ -91,13 +104,7 @@ fn unify_solid(b: &Brep) -> Result<Option<Brep>> {
             });
         }
     }
-    let n = faces.len();
-    let partners = sew::pair_uses(&faces, &pieces)?;
-    let merged = sew::merge_same_domain(faces, &pieces, &vtol, &partners);
-    if merged.len() == n {
-        return Ok(None);
-    }
-    sew::assemble(merged, &pool, &vtol, &pieces).map(Some)
+    (faces, pool, vtol, pieces)
 }
 
 /// A coedge as a whole trim of its own edge, the edge's index its piece.
@@ -173,5 +180,42 @@ mod tests {
         assert_eq!(both, 1);
         // Nothing is left to merge, so the solid comes back as it was.
         assert_eq!(unify(&u).unwrap(), u);
+    }
+
+    #[test]
+    fn faces_sewn_inside_out_are_refused() {
+        use crate::{Error, boolean, primitive};
+        let at = |x: f64| {
+            Frame::new(
+                crate::math::Vec3::new(x, x, x),
+                Frame::WORLD.z,
+                Frame::WORLD.x,
+            )
+        };
+        let size = crate::math::Vec3::new(10.0, 10.0, 10.0);
+        let cube = |x: f64| primitive::block(&at(x).unwrap(), size, "b").unwrap();
+        let bore = primitive::cylinder(&at(5.0).unwrap(), 3.0, 20.0, "h").unwrap();
+        let ball = primitive::sphere(&at(10.0).unwrap(), 4.0, "s").unwrap();
+        let results = [
+            boolean::union(&cube(0.0), &cube(5.0)).unwrap(),
+            boolean::difference(&cube(0.0), &bore).unwrap(),
+            boolean::union(&cube(0.0), &ball).unwrap(),
+        ];
+        for r in &results {
+            let (mut faces, pool, vtol, pieces) = sewing_parts(r);
+            let sewn = sew::assemble(faces.clone(), &pool, &vtol, &pieces).unwrap();
+            assert_eq!(sewn.face_count(), r.face_count());
+            // Every face turned over: the sheet still closes, each edge used twice in opposite
+            // ways, and bounds the same region from the wrong side.
+            faces.iter_mut().for_each(OutFace::flip);
+            let Err(Error::InvalidResult(issues)) = sew::assemble(faces, &pool, &vtol, &pieces)
+            else {
+                panic!("a solid turned inside out was sewn");
+            };
+            assert!(
+                issues.iter().any(|m| m.contains("has volume -")),
+                "{issues:?}"
+            );
+        }
     }
 }

@@ -7,7 +7,9 @@ use std::fmt;
 use crate::{
     boolean::{
         classify,
-        csi::{CurveBoxes, curve_surface_in, signed_distance},
+        csi::{
+            CurveBoxes, curve_surface_in, ray_surface, ray_surface_is_closed_form, signed_distance,
+        },
         domain::{Domain, Where},
         face_domain,
     },
@@ -158,7 +160,7 @@ pub(crate) fn check_structure(b: &Brep) -> Vec<Issue> {
 /// Where two faces of one solid of `b` that share no edge meet, and how far they pass through each
 /// other there: an imported mesh stitched with small folds passes through itself by microns.
 pub fn self_crossings(b: &Brep) -> Vec<SelfCrossing> {
-    crossings(b, None, true)
+    crossings(b, None, true, &mut PairCache::default())
         .into_iter()
         .map(|x| SelfCrossing {
             a: x.a,
@@ -539,8 +541,16 @@ fn checked(
             issue(format!("solid {} has no shells", s.index()));
         }
     }
+    let mut cache = PairCache::default();
+    // A boolean's result of one sheet is settled by a ray where one settles it; the volume
+    // integral settles every other solid, and any the ray leaves open.
+    let mut outward: HashSet<SolidId> = HashSet::new();
     if out.is_empty() {
         for s in b.solid_ids() {
+            if sides.is_some() && faces_outward(b, &domains, &mut cache, s) {
+                outward.insert(s);
+                continue;
+            }
             let v = measure::solid_volume_sign(b, s);
             if v.is_nan() || v <= 0.0 {
                 out.push(Issue {
@@ -550,7 +560,7 @@ fn checked(
         }
     }
     if out.is_empty() {
-        for (s, sh, outer) in turned_shells(b) {
+        for (s, sh, outer) in turned_shells_but(b, &outward) {
             let what = if outer { "an outer sheet" } else { "a void" };
             out.push(Issue {
                 message: format!(
@@ -586,7 +596,7 @@ fn checked(
                         || overlaps(x.a, x.b)
                         || overlaps(x.b, x.a)))
         };
-        for x in crossings(b, sides, each)
+        for x in crossings(b, sides, each, &mut cache)
             .into_iter()
             .filter(|x| !touching(x))
         {
@@ -741,8 +751,13 @@ fn stray_voids(b: &Brep) -> Vec<(SolidId, ShellId)> {
 /// The shells, with their solids and whether each is an outer sheet, whose faces enclose volume of
 /// the wrong sign: an outer sheet's is positive, a void's negative.
 pub(crate) fn turned_shells(b: &Brep) -> Vec<(SolidId, ShellId, bool)> {
+    turned_shells_but(b, &HashSet::new())
+}
+
+/// [`turned_shells`] of every solid but those of `settled`.
+fn turned_shells_but(b: &Brep, settled: &HashSet<SolidId>) -> Vec<(SolidId, ShellId, bool)> {
     let mut out = Vec::new();
-    for s in b.solid_ids() {
+    for s in b.solid_ids().filter(|s| !settled.contains(s)) {
         let solid = b.solid(s);
         for (k, &sh) in solid.shells.iter().enumerate() {
             let outer = k < solid.outer;
@@ -753,6 +768,161 @@ pub(crate) fn turned_shells(b: &Brep) -> Vec<(SolidId, ShellId, bool)> {
         }
     }
     out
+}
+
+/// How many faces of a sheet a ray is started from before the volume integral is left to settle
+/// which way the sheet faces.
+const RAY_STARTS: usize = 4;
+
+/// Whether solid `s` is one sheet that a ray shows facing outward. The sheet is closed and its
+/// faces are joined through partners that run opposite ways, so where its faces meet only along
+/// the edges and at the vertices they share, it has an inside and an outside and every face's
+/// normal points to the same one: the volume it encloses is positive when one normal points out.
+/// `false` wherever that is not certain, and for a solid of several shells.
+fn faces_outward(b: &Brep, domains: &Domains, cache: &mut PairCache, s: SolidId) -> bool {
+    let solid = b.solid(s);
+    let &[sh] = solid.shells.as_slice() else {
+        return false;
+    };
+    let faces = &b.shell(sh).faces;
+    if solid.outer != 1 || !one_sheet(b, faces) {
+        return false;
+    }
+    let boxes: Vec<Aabb> = faces.iter().map(|&f| cache.face_box(b, f)).collect();
+    let finite = |bb: &Aabb| (0..3).all(|k| bb.min[k].is_finite() && bb.max[k].is_finite());
+    if !boxes.iter().all(finite) {
+        return false;
+    }
+    // A face that reaches the sheet's own box is likeliest to see nothing along its normal.
+    let mut starts: Vec<usize> = Vec::new();
+    for k in 0..3 {
+        let least = |i: &usize, j: &usize| boxes[*i].min[k].total_cmp(&boxes[*j].min[k]);
+        let most = |i: &usize, j: &usize| boxes[*i].max[k].total_cmp(&boxes[*j].max[k]);
+        let reach = [
+            (0..faces.len()).min_by(least),
+            (0..faces.len()).max_by(most),
+        ];
+        for i in reach.into_iter().flatten() {
+            if !starts.contains(&i) && ray_surface_is_closed_form(&b.face(faces[i]).surface) {
+                starts.push(i);
+            }
+        }
+    }
+    starts
+        .into_iter()
+        .take(RAY_STARTS)
+        .find_map(|i| side_seen_from(b, domains, faces, &boxes, i))
+        == Some(true)
+}
+
+/// Whether every face of `faces` is reached from the first through coedges' partners.
+fn one_sheet(b: &Brep, faces: &[FaceId]) -> bool {
+    let Some(&first) = faces.first() else {
+        return false;
+    };
+    let mut seen: HashSet<FaceId> = HashSet::from([first]);
+    let mut stack = vec![first];
+    while let Some(f) = stack.pop() {
+        for &lp in &b.face(f).loops {
+            for &c in &b.lp(lp).coedges {
+                if let Some(p) = b.partner(c) {
+                    let g = b.coedge_face(p);
+                    if seen.insert(g) {
+                        stack.push(g);
+                    }
+                }
+            }
+        }
+    }
+    seen.len() == faces.len() && faces.iter().all(|f| seen.contains(f))
+}
+
+/// Whether the outward normal of face `faces[start]` points out of the closed sheet `faces`, by
+/// the ray along it from a point inside the face. Just off that point the sheet winds round the
+/// ray's foot once for each face the ray leaves the material through, less once for each it
+/// enters through, and round a point outside it winds no times. `Some(false)` where it winds once
+/// the other way, so the normal points in, and `None` where the ray decides nothing: it passes
+/// the box of a face whose crossings no closed form gives, meets a face on its boundary or at a
+/// tangent, or another face lies on the start.
+fn side_seen_from(
+    b: &Brep,
+    domains: &Domains,
+    faces: &[FaceId],
+    boxes: &[Aabb],
+    start: usize,
+) -> Option<bool> {
+    let from = domains.of(faces[start]);
+    let uv = point_inside(&from)?;
+    let (p, d) = (from.surface.eval(uv.x, uv.y), from.outward(uv));
+    let (mut winds, mut at_start) = (0i64, 0usize);
+    for (i, (&f, bb)) in faces.iter().zip(boxes).enumerate() {
+        let Some((lo, hi)) = classify::ray_box(p, d, bb) else {
+            continue;
+        };
+        let surface = &b.face(f).surface;
+        if !ray_surface_is_closed_form(surface) {
+            return None;
+        }
+        for t in ray_surface(surface, p, d, hi.max(0.0)) {
+            if !t.is_finite() {
+                return None;
+            }
+            if t.abs() <= tol::LINEAR {
+                if i != start {
+                    return None;
+                }
+                at_start += 1;
+                continue;
+            }
+            if t < 0.0 || t < lo - tol::LINEAR || t > hi + tol::LINEAR {
+                continue;
+            }
+            let dom = domains.of(f);
+            match dom.locate(p + d * t) {
+                Where::Outside => {}
+                Where::Boundary => return None,
+                Where::Inside(at) => {
+                    let across = dom.outward(at).dot(d);
+                    if across.is_nan() || across.abs() < tol::TANGENT {
+                        return None;
+                    }
+                    winds += if across > 0.0 { 1 } else { -1 };
+                }
+            }
+        }
+    }
+    match (at_start, winds) {
+        (1, 0) => Some(true),
+        (1, -1) => Some(false),
+        _ => None,
+    }
+}
+
+/// The parameters of a point inside the face of `dom`: the middle of its first loop's sampled
+/// outline or a point between that and the outline, where the exact winding number finds one of
+/// them inside, and otherwise [`Domain::interior_point`], which searches for one.
+fn point_inside(dom: &Domain) -> Option<Vec2> {
+    let outline: Vec<Vec2> = dom.samples().first()?.iter().flatten().copied().collect();
+    let n = outline.len();
+    let middle = outline.iter().fold(Vec2::ZERO, |a, &p| a + p) * (1.0 / n.max(1) as f64);
+    let towards = |k: usize, by: f64| middle + (outline[k * n / 3] - middle) * by;
+    let tries = [
+        middle,
+        towards(0, 0.5),
+        towards(1, 0.5),
+        towards(2, 0.5),
+        towards(0, 0.9),
+        towards(1, 0.9),
+        towards(2, 0.9),
+    ];
+    let inside = |uv: &Vec2| match dom.locate(dom.surface.eval(uv.x, uv.y)) {
+        Where::Inside(at) => Some(at),
+        _ => None,
+    };
+    tries
+        .iter()
+        .find_map(inside)
+        .or_else(|| dom.interior_point())
 }
 
 /// For each void shell of solid `s`, the outer sheet it lies inside, as an index into its outer
@@ -929,10 +1099,14 @@ impl PairCache {
 /// input of a boolean. With `each`, only faces of one solid are paired, as an import's parts may
 /// rest on one another. Two curved faces that meet only along a closed curve inside both are not
 /// found: no edge reaches it.
-fn crossings(b: &Brep, sides: Option<&[Option<usize>]>, each: bool) -> Vec<Crossing> {
+fn crossings(
+    b: &Brep,
+    sides: Option<&[Option<usize>]>,
+    each: bool,
+    cache: &mut PairCache,
+) -> Vec<Crossing> {
     let faces: Vec<FaceId> = b.face_ids().collect();
     let solid_of = |f: FaceId| b.face(f).shell.and_then(|s| b.shell(s).solid);
-    let mut cache = PairCache::default();
     let boxes: Vec<Aabb> = faces.iter().map(|&f| cache.face_box(b, f)).collect();
     let mut order: Vec<usize> = (0..faces.len()).collect();
     order.sort_by(|&i, &j| boxes[i].min.x.total_cmp(&boxes[j].min.x));
@@ -1005,7 +1179,7 @@ fn crossings(b: &Brep, sides: Option<&[Option<usize>]>, each: bool) -> Vec<Cross
                         hit = match cache.meetings.get(&(e, y)) {
                             Some(&m) => m,
                             None => {
-                                let m = edge_meets_face(b, e, y, ybox, &verts[&y], &mut cache);
+                                let m = edge_meets_face(b, e, y, ybox, &verts[&y], cache);
                                 cache.meetings.insert((e, y), m);
                                 m
                             }
@@ -1017,12 +1191,7 @@ fn crossings(b: &Brep, sides: Option<&[Option<usize>]>, each: bool) -> Vec<Cross
                 }
             }
             if hit.is_none() {
-                hit = crossing_from_shared_vertex(
-                    b,
-                    (fa, fb),
-                    (&verts[&fa], &verts[&fb]),
-                    &mut cache,
-                );
+                hit = crossing_from_shared_vertex(b, (fa, fb), (&verts[&fa], &verts[&fb]), cache);
             }
             match hit {
                 Some(at) => out.push(Crossing { a: fa, b: fb, at }),
@@ -1624,5 +1793,232 @@ mod tests {
             }
             assert_eq!(lying_on_each_other(&b, &Domains::new(&b), uses), None);
         }
+    }
+
+    fn at(x: f64, y: f64, z: f64) -> Frame {
+        Frame::new(Vec3::new(x, y, z), Vec3::Z, Vec3::X).unwrap()
+    }
+
+    fn block(o: [f64; 3], size: [f64; 3]) -> Brep {
+        crate::primitive::block(&at(o[0], o[1], o[2]), Vec3::from_array(size), "b").unwrap()
+    }
+
+    /// A copy of `b` with the faces of each shell `flip` picks turned inside out, as one solid of
+    /// one shell when `merged`.
+    fn rebuilt(b: &Brep, flip: impl Fn(ShellId) -> bool, merged: bool) -> Brep {
+        use crate::topo::{CoedgeSpec, PCurve};
+        let mut out = Brep::new();
+        let vs: Vec<VertexId> = b
+            .vertex_ids()
+            .map(|v| out.add_vertex(b.vertex(v).point))
+            .collect();
+        let es: Vec<EdgeId> = b
+            .edge_ids()
+            .map(|e| {
+                let x = b.edge(e);
+                let (v0, v1) = (vs[x.start.index()], vs[x.end.index()]);
+                match &x.curve {
+                    Some(c) => out.add_edge(c.clone(), x.range, v0, v1),
+                    None => out.add_degenerate_edge(v0, x.range),
+                }
+            })
+            .collect();
+        let mut all = Vec::new();
+        for s in b.solid_ids() {
+            let mut shells = Vec::new();
+            for &sh in &b.solid(s).shells {
+                let flip = flip(sh);
+                let mut faces = Vec::new();
+                for &f in &b.shell(sh).faces {
+                    let face = b.face(f);
+                    let names = face.names.iter().cloned();
+                    let g = out.add_face(face.surface.clone(), face.reversed != flip, names);
+                    for &lp in &face.loops {
+                        let mut specs: Vec<CoedgeSpec> = b
+                            .lp(lp)
+                            .coedges
+                            .iter()
+                            .map(|&c| {
+                                let co = b.coedge(c);
+                                // A projected pcurve is seeded where its coedge starts.
+                                let pcurve = match &co.pcurve {
+                                    PCurve::Projected { .. } if flip => PCurve::Projected {
+                                        seed: b.coedge_uvs(c, &coedge_params(b, c, 1))[1],
+                                    },
+                                    other => other.clone(),
+                                };
+                                CoedgeSpec {
+                                    edge: es[co.edge.index()],
+                                    reversed: co.reversed != flip,
+                                    pcurve,
+                                }
+                            })
+                            .collect();
+                        if flip {
+                            specs.reverse();
+                        }
+                        out.add_loop(g, specs);
+                    }
+                    faces.push(g);
+                }
+                if merged {
+                    all.extend(faces);
+                } else {
+                    shells.push(out.add_shell(faces));
+                }
+            }
+            if !merged {
+                out.add_solid_of(shells, b.solid(s).outer);
+            }
+        }
+        if merged {
+            let sh = out.add_shell(all);
+            out.add_solid(vec![sh]);
+        }
+        out.pair_radial();
+        out
+    }
+
+    fn seen_outward(b: &Brep) -> Vec<bool> {
+        let (domains, mut cache) = (Domains::new(b), PairCache::default());
+        b.solid_ids()
+            .map(|s| faces_outward(b, &domains, &mut cache, s))
+            .collect()
+    }
+
+    /// The issues of `b` as a boolean's result with no two faces known to come from one input.
+    fn cut_issues(b: &Brep) -> Vec<String> {
+        check_cut(b, &vec![None; b.face_count()])
+            .into_iter()
+            .map(|i| i.message)
+            .collect()
+    }
+
+    #[test]
+    fn a_ray_shows_a_boolean_s_one_sheet_facing_outward_and_one_turned_inside_out_is_refused() {
+        use crate::boolean::{difference, intersection, union};
+        use crate::primitive::{cone, cylinder, sphere};
+        let cube = || block([0.0; 3], [10.0; 3]);
+        let bore = cylinder(&at(5.0, 5.0, -1.0), 3.0, 12.0, "h").unwrap();
+        let ball = |x: f64| sphere(&at(x, 0.0, 0.0), 5.0, "s").unwrap();
+        let spike = cone(&at(5.0, 5.0, 5.0), 4.0, 1.0, 9.0, "k").unwrap();
+        let results = [
+            union(&cube(), &block([5.0; 3], [10.0; 3])).unwrap(),
+            intersection(&cube(), &bore).unwrap(),
+            difference(&cube(), &bore).unwrap(),
+            difference(&ball(0.0), &ball(4.0)).unwrap(),
+            union(&cube(), &spike).unwrap(),
+        ];
+        for r in &results {
+            assert_eq!(seen_outward(r), [true]);
+            assert_eq!(cut_issues(r), Vec::<String>::new());
+            // Inside out, every edge is still used twice in opposite ways and every loop runs its
+            // face's way: only which side the sheet faces is wrong.
+            let t = rebuilt(r, |_| true, false);
+            assert_eq!(seen_outward(&t), [false]);
+            assert!(measure::solid_volume_sign(&t, t.solid_ids().next().unwrap()) < 0.0);
+            let issues = cut_issues(&t);
+            assert_eq!(issues.len(), 1, "{issues:?}");
+            assert!(issues[0].starts_with("solid 0 has volume -"), "{issues:?}");
+            assert_eq!(
+                issues,
+                check(&t).into_iter().map(|i| i.message).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn a_ray_from_a_face_turned_inside_out_shows_it_facing_in() {
+        let r = crate::boolean::union(&block([0.0; 3], [10.0; 3]), &block([5.0; 3], [10.0; 3]));
+        let t = rebuilt(&r.unwrap(), |_| true, false);
+        let faces: Vec<FaceId> = t.face_ids().collect();
+        let (domains, mut cache) = (Domains::new(&t), PairCache::default());
+        let boxes: Vec<Aabb> = faces.iter().map(|&f| cache.face_box(&t, f)).collect();
+        // A ray that leaves through an edge decides nothing; none shows the sheet facing out.
+        let seen: Vec<Option<bool>> = (0..faces.len())
+            .map(|start| side_seen_from(&t, &domains, &faces, &boxes, start))
+            .collect();
+        assert!(seen.contains(&Some(false)), "{seen:?}");
+        assert!(!seen.contains(&Some(true)), "{seen:?}");
+    }
+
+    #[test]
+    fn a_solid_with_a_void_is_settled_by_its_volume_and_a_turned_shell_of_it_is_refused() {
+        let hollow =
+            crate::boolean::difference(&block([0.0; 3], [10.0; 3]), &block([3.0; 3], [4.0; 3]))
+                .unwrap();
+        let s = hollow.solid_ids().next().unwrap();
+        let shells = hollow.solid(s).shells.clone();
+        assert_eq!(shells.len(), 2);
+        assert_eq!(seen_outward(&hollow), [false]);
+        assert_eq!(cut_issues(&hollow), Vec::<String>::new());
+        // The void turned to face outward, then the outer shell turned to face in.
+        let void_out = rebuilt(&hollow, |sh| sh == shells[1], false);
+        let issues = cut_issues(&void_out);
+        assert!(
+            issues
+                .iter()
+                .any(|m| m.contains("is a void turned inside out")),
+            "{issues:?}"
+        );
+        let outer_in = rebuilt(&hollow, |sh| sh == shells[0], false);
+        let issues = cut_issues(&outer_in);
+        assert!(
+            issues.iter().any(|m| m.starts_with("solid 0 has volume -")),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn a_shell_of_two_sheets_is_settled_by_its_volume() {
+        // Two blocks apart in one shell: a ray from a face of one says nothing of the other.
+        let mut two = block([0.0; 3], [10.0; 3]);
+        two.append(&block([20.0, 0.0, 0.0], [2.0; 3]));
+        let small = two.shell_ids().nth(1).unwrap();
+        for flip in [false, true] {
+            let b = rebuilt(&two, |sh| flip && sh == small, true);
+            let faces: Vec<FaceId> = b.face_ids().collect();
+            assert!(!one_sheet(&b, &faces));
+            assert_eq!(seen_outward(&b), [false]);
+            assert_eq!(
+                cut_issues(&b),
+                check(&b).into_iter().map(|i| i.message).collect::<Vec<_>>()
+            );
+        }
+        // The large block alone turned in leaves the shell's volume negative.
+        let large = two.shell_ids().next().unwrap();
+        let b = rebuilt(&two, |sh| sh == large, true);
+        let issues = cut_issues(&b);
+        assert!(
+            issues.iter().any(|m| m.starts_with("solid 0 has volume -")),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn a_ray_past_a_face_no_closed_form_crosses_decides_nothing() {
+        // A ring half sunk in a plate's top: the disc of the top inside the ring looks up through
+        // the ring's box, the plate's other faces look away from it.
+        let plate = block([0.0; 3], [10.0, 10.0, 2.0]);
+        let ring = crate::primitive::torus(&at(5.0, 5.0, 2.0), 3.0, 1.0, "r").unwrap();
+        let b = crate::boolean::union(&plate, &ring).unwrap();
+        let faces: Vec<FaceId> = b.face_ids().collect();
+        let (domains, mut cache) = (Domains::new(&b), PairCache::default());
+        let boxes: Vec<Aabb> = faces.iter().map(|&f| cache.face_box(&b, f)).collect();
+        let seen: Vec<Option<bool>> = (0..faces.len())
+            .filter(|&i| ray_surface_is_closed_form(&b.face(faces[i]).surface))
+            .map(|i| side_seen_from(&b, &domains, &faces, &boxes, i))
+            .collect();
+        assert!(seen.contains(&None), "{seen:?}");
+        assert!(seen.contains(&Some(true)), "{seen:?}");
+        assert!(!seen.contains(&Some(false)), "{seen:?}");
+        assert_eq!(seen_outward(&b), [true]);
+        let t = rebuilt(&b, |_| true, false);
+        assert_eq!(seen_outward(&t), [false]);
+        let issues = cut_issues(&t);
+        assert!(
+            issues.iter().any(|m| m.starts_with("solid 0 has volume -")),
+            "{issues:?}"
+        );
     }
 }

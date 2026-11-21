@@ -216,6 +216,10 @@ fn at_z(z: f64) -> Frame {
 fn a_built_solid_reads_back_with_its_ids_names_and_memos() {
     let b = drilled_and_rounded();
     let volume = measure::volume(&b);
+    // Asking for the volume's sign leaves each face's share in its memo.
+    for s in b.solid_ids() {
+        assert!(measure::solid_volume_sign(&b, s) > 0.0);
+    }
     let back: Brep = back(&bytes(&b)).unwrap();
     assert_eq!(back, b);
     assert_eq!(bytes(&back), bytes(&b));

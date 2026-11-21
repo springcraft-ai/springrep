@@ -668,7 +668,7 @@ pub(crate) fn assemble(
     // Pair first: faces on one surface that meet only where pieces of the result touch must not
     // merge across the contact.
     let partners = pair_uses(&faces, pieces)?;
-    let faces = merge_same_domain(faces, pieces, vtol, &partners);
+    let mut faces = merge_same_domain(faces, pieces, vtol, &partners);
     let (partners, beside) = around_uses(&faces, pieces)?;
     check_uses(&faces, pieces, &partners)?;
     let n = faces.len();
@@ -714,6 +714,12 @@ pub(crate) fn assemble(
             .solid_ids()
             .map(|s| measure::solid_volume_sign(&trial, s))
             .collect();
+        // The trial's faces are the result's, laid out alike: what measuring them worked out
+        // holds for the result's.
+        let built = sheets.iter().flatten().zip(trial.face_ids());
+        for (&i, f) in built {
+            faces[i].memo.get_or_insert_with(|| trial.shared_memo(f));
+        }
         // A sheet thinner on average than a few tolerances, as between two surfaces that cross at
         // a glancing angle, holds no material the tolerance resolves: its volume's sign is
         // rounding. Its thickness is twice its volume over its area.
