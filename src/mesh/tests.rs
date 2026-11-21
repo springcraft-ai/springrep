@@ -516,6 +516,44 @@ fn a_cap_whose_corners_share_a_latitude_meshes() {
 fn par_map_gives_each_result_in_its_place() {
     // However many threads take the items, and whichever takes each.
     let want: Vec<usize> = (0..1000).map(|i| 3 * i + 1).collect();
-    assert_eq!(super::par_map(1000, |i| 3 * i + 1), want);
-    assert_eq!(super::par_map(0, |i| i), Vec::<usize>::new());
+    for threads in [1, 3, usize::MAX] {
+        assert_eq!(super::par_map(threads, 1000, |i| 3 * i + 1), want);
+        assert_eq!(super::par_map(threads, 0, |i| i), Vec::<usize>::new());
+    }
+}
+
+#[test]
+fn a_small_solid_of_flat_faces_is_meshed_alone_as_it_is_on_every_thread() {
+    let rect = |w: f64, h: f64| Profile::rect(Vec2::ZERO, w, h);
+    let block = extrude(&rect(4.0, 3.0), &Frame::WORLD, 2.0, "b").unwrap();
+    // A slot cut through the block: flat faces still, and a face with a hole in it.
+    let lifted = Frame::new(Vec3::new(0.0, 0.0, -1.0), Vec3::Z, Vec3::X).unwrap();
+    let slotted = difference(
+        &block,
+        &extrude(&rect(2.0, 1.0), &lifted, 4.0, "s").unwrap(),
+    );
+    let slotted = slotted.unwrap();
+    // A prism of 50 sides has 150 edges, and a rod's side is not flat.
+    let ring: Vec<Vec2> = (0..50)
+        .map(|i| {
+            let a = TAU * i as f64 / 50.0;
+            Vec2::new(5.0 * a.cos(), 5.0 * a.sin())
+        })
+        .collect();
+    let names: Vec<String> = (0..50).map(|i| format!("s{i}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let prism = extrude(&Profile::polygon(&ring, &names), &Frame::WORLD, 2.0, "p").unwrap();
+    let rod = extrude(&Profile::circle(Vec2::ZERO, 2.0), &Frame::WORLD, 5.0, "r").unwrap();
+    let opt = MeshOptions::within(0.05);
+    for (solid, alone) in [
+        (&block, true),
+        (&slotted, true),
+        (&prism, false),
+        (&rod, false),
+    ] {
+        assert_eq!(super::plain(solid), alone);
+        let one = super::tessellate_on(1, solid, &opt).unwrap();
+        assert_eq!(one, super::tessellate_on(usize::MAX, solid, &opt).unwrap());
+        assert_eq!(one, tessellate(solid, &opt).unwrap());
+    }
 }

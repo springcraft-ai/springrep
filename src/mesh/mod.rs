@@ -26,7 +26,7 @@ use predicates::orient;
 
 use crate::{
     Error, Result,
-    geom::Curve,
+    geom::{Curve, Surface},
     math::{Point3, Vec2, Vec3},
     threads,
     topo::{Brep, CoedgeId, EdgeId, FaceId, SolidId},
@@ -237,8 +237,27 @@ fn subdivide(c: &Curve, a: f64, b: f64, opt: &MeshOptions, depth: u32, out: &mut
     }
 }
 
+/// The most edges of a solid of flat faces and straight edges meshed on the calling thread alone.
+const PLAIN_EDGES: usize = 128;
+
+/// Whether `b` is flat faces and straight edges, and few of them: an edge is then its two ends,
+/// a face the triangles of its outline, and all of it less work than starting a thread.
+fn plain(b: &Brep) -> bool {
+    b.edge_ids().count() <= PLAIN_EDGES
+        && b.face_ids()
+            .all(|f| matches!(b.face(f).surface, Surface::Plane(_)))
+        && b.edge_ids()
+            .all(|e| matches!(b.edge(e).curve, Some(Curve::Line(_))))
+}
+
 /// Tessellates every face of `b` within `opt`.
 pub fn tessellate(b: &Brep, opt: &MeshOptions) -> Result<Mesh> {
+    let threads = if plain(b) { 1 } else { usize::MAX };
+    tessellate_on(threads, b, opt)
+}
+
+/// [`tessellate`] on at most `threads` threads: the mesh is the same on any number.
+fn tessellate_on(threads: usize, b: &Brep, opt: &MeshOptions) -> Result<Mesh> {
     let positive = |x: f64| x > 0.0 && x.is_finite();
     if !positive(opt.linear) || !positive(opt.angular) {
         return Err(Error::InvalidInput(format!(
@@ -259,7 +278,7 @@ pub fn tessellate(b: &Brep, opt: &MeshOptions) -> Result<Mesh> {
         uses[b.coedge(c).edge.index()].push(c);
     }
     let edges: Vec<EdgeId> = b.edge_ids().collect();
-    let params = par_map(edges.len(), |i| {
+    let params = par_map(threads, edges.len(), |i| {
         let edge = b.edge(edges[i]);
         let (t0, t1) = edge.range;
         match &edge.curve {
@@ -311,9 +330,9 @@ pub fn tessellate(b: &Brep, opt: &MeshOptions) -> Result<Mesh> {
             .collect();
         samples.push(s);
     }
-    uncross(b, &edges, &mut samples, &mut mesh.positions);
+    uncross(threads, b, &edges, &mut samples, &mut mesh.positions);
     drop_unresolved(b, &edges, &mut samples);
-    faces(b, opt, &samples, &mut mesh)?;
+    faces(threads, b, opt, &samples, &mut mesh)?;
     Ok(mesh)
 }
 
@@ -322,6 +341,7 @@ pub fn tessellate(b: &Brep, opt: &MeshOptions) -> Result<Mesh> {
 /// the curves do not; halving the curved one's chords near there separates them. Segments that
 /// still cross after the rounds are left for the face to refuse.
 fn uncross(
+    threads: usize,
     b: &Brep,
     edges: &[EdgeId],
     samples: &mut [Vec<(f64, u32)>],
@@ -329,7 +349,9 @@ fn uncross(
 ) {
     let faces: Vec<FaceId> = b.face_ids().collect();
     for _ in 0..32 {
-        let found = par_map(faces.len(), |i| crossing_segments(b, faces[i], samples));
+        let found = par_map(threads, faces.len(), |i| {
+            crossing_segments(b, faces[i], samples)
+        });
         let split: HashSet<(usize, usize)> = found.into_iter().flatten().collect();
         if split.is_empty() {
             return;
@@ -750,11 +772,18 @@ fn fit_faces(
     ts
 }
 
-/// Meshes every face, on as many threads as the machine offers, and appends them to `mesh`.
-fn faces(b: &Brep, opt: &MeshOptions, samples: &[Vec<(f64, u32)>], mesh: &mut Mesh) -> Result<()> {
+/// Meshes every face, on as many threads as the machine offers and at most `threads`, and appends
+/// them to `mesh`.
+fn faces(
+    threads: usize,
+    b: &Brep,
+    opt: &MeshOptions,
+    samples: &[Vec<(f64, u32)>],
+    mesh: &mut Mesh,
+) -> Result<()> {
     let ids: Vec<FaceId> = b.face_ids().collect();
     let positions = &mesh.positions;
-    let results = par_map(ids.len(), |i| {
+    let results = par_map(threads, ids.len(), |i| {
         face::mesh_face(b, ids[i], opt, samples, positions)
     });
     let mut meshes = Vec::with_capacity(ids.len());
@@ -874,10 +903,10 @@ fn split_shared_chords(b: &Brep, ids: &[FaceId], meshes: &mut [face::FaceMesh]) 
     }
 }
 
-/// `f(0..n)` in order, spread over the machine's threads.
-fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+/// `f(0..n)` in order, spread over the machine's threads, at most `threads` of them.
+fn par_map<T: Send>(threads: usize, n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
     let next = AtomicUsize::new(0);
-    let runs = threads::spread(n, || {
+    let runs = threads::spread(n.min(threads), || {
         let mut mine = Vec::new();
         loop {
             let i = next.fetch_add(1, Ordering::Relaxed);

@@ -1858,7 +1858,9 @@ rim drawn as a square past its bolt holes). A loop of only two chords gets a poi
 Deflections must be positive and finite. Where a face's loops pass one vertex twice (a crescent
 pinched where two circles touch), images of it that only rounding parts, far closer than a period or
 a pole's span, become one point, so the face is meshed through that point once rather than twice a
-hair apart.
+hair apart. Edges and faces are meshed on as many threads as the machine offers, each result in its
+place, so the mesh is the same on any number; a solid of flat faces and at most 128 straight edges
+is meshed on the calling thread alone, being less work than starting the others.
 
 [`display`](../src/mesh/display.rs) makes what a viewer draws from that mesh: each face's triangles
 with nodes of its own, so shading creases where faces meet, each node's normal the exact surface's
