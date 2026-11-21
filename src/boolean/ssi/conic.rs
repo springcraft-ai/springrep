@@ -1,16 +1,16 @@
 //! A plane against a cone whose axis is not square to it: the lines through the apex each meet the
 //! plane once, at `s = h / (n·g(θ))` along the generator `g(θ)`, `h` the plane's distance from the
 //! apex. Where `n·g` keeps its sign the section is an ellipse, built exactly from its vertices;
-//! where it changes sign the branches run out to infinity, and the parts within reach of the region
-//! are evaluated along the generators and fitted. A plane through the apex holds the generators it
+//! where it changes sign the branches run out to infinity, and the part of each within reach of the
+//! region is the rational quadratic curve it is. A plane through the apex holds the generators it
 //! contains, touches the cone along one, or meets it at the apex alone.
 
 use std::f64::consts::{PI, TAU};
 
 use super::{Ssi, SsiCurve, line_curve};
 use crate::{
-    geom::{Cone, Curve, Ellipse, IntersectionCurve, Plane, Surface},
-    math::{Aabb, Frame, Vec3},
+    geom::{Cone, Curve, Ellipse, IntersectionCurve, NurbsCurve, Plane, Surface},
+    math::{Aabb, Frame, Point3, Vec3},
     tol,
 };
 
@@ -158,16 +158,30 @@ pub(super) fn plane_cone(p: &Plane, c: &Cone, region: &Aabb) -> Option<Ssi> {
         let t = c_lo.min(1.0).acos();
         arcs.push((t, TAU - t));
     }
-    let (sp, sc) = (Surface::Plane(p.clone()), Surface::Cone(c.clone()));
     let mut curves = Vec::new();
     for (t0, t1) in arcs {
-        let sample = |s: f64| at(t0 + (t1 - t0) * s);
-        let fit =
-            IntersectionCurve::fit_sampled(&sample, (0.0, 1.0), sp.clone(), sc.clone(), false, 32)
-                .ok()?;
-        let range = fit.approx.domain();
+        // Over the arc about θ = π both parts change sign, so the weights are positive on either.
+        let sign = (a * (0.5 * (t0 + t1)).cos() + b).signum();
+        let hom = |cos: f64, sin: f64, one: f64| {
+            let along = (e1 * cos + e2 * sin) * sa.abs() + z * (ca * one);
+            (along * (h * sign), (a * cos + b * one) * sign)
+        };
+        let (curve, range) = match conic_arc(apex, &hom, (t0, t1)) {
+            Some(arc) => {
+                let range = arc.domain();
+                (Curve::Nurbs(Box::new(arc)), range)
+            }
+            None => {
+                let (sp, sc) = (Surface::Plane(p.clone()), Surface::Cone(c.clone()));
+                let sample = |s: f64| at(t0 + (t1 - t0) * s);
+                let fit =
+                    IntersectionCurve::fit_sampled(&sample, (0.0, 1.0), sp, sc, false, 32).ok()?;
+                let range = fit.approx.domain();
+                (Curve::Intersection(Box::new(fit)), range)
+            }
+        };
         curves.push(SsiCurve {
-            curve: Curve::Intersection(Box::new(fit)),
+            curve,
             range,
             closed: false,
             tangent: false,
@@ -179,10 +193,82 @@ pub(super) fn plane_cone(p: &Plane, c: &Cone, region: &Aabb) -> Option<Ssi> {
     })
 }
 
+/// The most pieces [`conic_arc`] cuts an arc into.
+const MAX_PIECES: usize = 64;
+
+/// The conic `apex + v / w` for `(v, w) = hom(cos θ, sin θ, 1)`, `hom` linear, over the angles
+/// `t0..t1` where `w > 0`: the image of a circle's arc, so each piece of it is a rational quadratic
+/// Bézier curve on the images of the arc's own three points, the middle one of weight the cosine
+/// of half its angle (Piegl and Tiller 1997, ch. 7). The pieces are cut until none bends through
+/// more than a quarter turn or runs far out toward an asymptote, and each takes the parameter in
+/// which it starts and ends at unit speed, so the curve's parameter is close to its length and
+/// its first derivative has no step. `None` where a middle weight is not positive, or the arc is
+/// shorter than the tolerance.
+fn conic_arc(
+    apex: Point3,
+    hom: &dyn Fn(f64, f64, f64) -> (Vec3, f64),
+    (t0, t1): (f64, f64),
+) -> Option<NurbsCurve> {
+    let mut todo = vec![(t0, t1)];
+    let mut knots = vec![0.0; 3];
+    let mut ctrl: Vec<Point3> = Vec::new();
+    let mut weights: Vec<f64> = Vec::new();
+    let mut pieces = 0;
+    while let Some((lo, hi)) = todo.pop() {
+        let (mid, half) = (0.5 * (lo + hi), 0.5 * (hi - lo));
+        let (v, w): (Vec<Vec3>, Vec<f64>) = [
+            hom(lo.cos(), lo.sin(), 1.0),
+            hom(mid.cos(), mid.sin(), half.cos()),
+            hom(hi.cos(), hi.sin(), 1.0),
+        ]
+        .into_iter()
+        .unzip();
+        if !(w[0] > 0.0 && w[2] > 0.0) {
+            return None;
+        }
+        // 1 for a parabola's piece, and further from it the more unevenly the piece is run.
+        let shape = w[1] * w[1] / (w[0] * w[2]);
+        let even = w[1] > 0.0 && half <= 0.26 * PI && (0.4..=2.5).contains(&shape);
+        if !even && pieces + todo.len() + 2 <= MAX_PIECES && half > 1e-9 {
+            todo.push((mid, hi));
+            todo.push((lo, mid));
+            continue;
+        }
+        if w[1].is_nan() || w[1] <= 0.0 {
+            return None;
+        }
+        let q = [0, 1, 2].map(|i| apex + v[i] * (1.0 / w[i]));
+        let (l0, l1) = (q[1].dist(q[0]), q[2].dist(q[1]));
+        if !(l0 > 0.0 && l1 > 0.0) {
+            return None;
+        }
+        // Weights w0, k·w1, k²·w2 draw the same piece at another rate: this k makes its speed at
+        // the two ends equal, and the knot span that speed makes it 1.
+        let k = (w[0] * l1 / (w[2] * l0)).sqrt();
+        let span = 2.0 * k * w[1] / w[0] * l0;
+        let scale = match weights.last() {
+            Some(&last) => last / w[0],
+            None => {
+                ctrl.push(q[0]);
+                weights.push(1.0);
+                1.0 / w[0]
+            }
+        };
+        ctrl.extend([q[1], q[2]]);
+        weights.extend([scale * k * w[1], scale * k * k * w[2]]);
+        let end = knots[knots.len() - 1] + span;
+        knots.extend([end, end]);
+        pieces += 1;
+    }
+    knots.push(knots[knots.len() - 1]);
+    let arc = NurbsCurve::new(2, knots, ctrl, Some(weights)).ok()?;
+    arc.period().is_none().then_some(arc)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{boolean::csi::signed_distance, math::Point3};
+    use crate::boolean::csi::signed_distance;
 
     /// A cone about z with its apex at the origin, opening upward at 45°.
     fn cone() -> Cone {
@@ -288,6 +374,67 @@ mod tests {
             cs[0].curve.eval(cs[0].range.1),
         ];
         assert!(ends.iter().all(|p| p.norm() < 100.0), "{ends:?}");
+    }
+
+    /// Each curve is a rational quadratic lying on both surfaces to rounding all along, and runs
+    /// at one speed across every join.
+    fn exact_conic(p: &Plane, c: &Cone, cs: &[SsiCurve]) {
+        let (sp, sc) = (Surface::Plane(p.clone()), Surface::Cone(c.clone()));
+        for cv in cs {
+            let Curve::Nurbs(nc) = &cv.curve else {
+                panic!("a {} for a conic", cv.curve.kind());
+            };
+            assert_eq!(nc.degree(), 2);
+            assert_eq!(cv.range, nc.domain());
+            let (t0, t1) = cv.range;
+            for i in 0..=512 {
+                let x = nc.eval(t0 + (t1 - t0) * i as f64 / 512.0);
+                for s in [&sp, &sc] {
+                    let d = signed_distance(s, x).abs();
+                    assert!(d <= 1e-12 * (1.0 + x.norm()), "off {} by {d}", s.kind());
+                }
+            }
+            for t in nc.breakpoints(t0, t1) {
+                let e = 1e-9 * (t1 - t0);
+                let (before, after) = (nc.d2(t - e).1, nc.d2(t + e).1);
+                assert!(before.dist(after) <= 1e-6 * before.norm(), "a kink at {t}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_hyperbola_and_a_parabola_are_exact_rational_quadratics() {
+        let c = cone();
+        // x = 1 cuts z² − y² = 1: the branch through (1, 3, √10), out to the region's reach.
+        let p = plane([1.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
+        let (cs, _) = meet(&p, &c);
+        exact_conic(&p, &c, &cs);
+        let at = Vec3::new(1.0, 3.0, 10f64.sqrt());
+        let (d, _) = crate::boolean::csi::curve_distance(&cs[0].curve, cs[0].range, at);
+        assert!(d < 1e-12, "{d}");
+        let ends = [cs[0].range.0, cs[0].range.1].map(|t| cs[0].curve.eval(t));
+        assert!(ends.iter().all(|e| e.norm() > 17.0), "{ends:?}");
+        // z = 1 + x cuts the parabola y² = 1 + 2x, through (4, 3, 5).
+        let p = plane([0.0, 0.0, 1.0], [-1.0, 0.0, 1.0]);
+        let (cs, _) = meet(&p, &c);
+        exact_conic(&p, &c, &cs);
+        let at = Vec3::new(4.0, 3.0, 5.0);
+        let (d, _) = crate::boolean::csi::curve_distance(&cs[0].curve, cs[0].range, at);
+        assert!(d < 1e-12, "{d}");
+        // An ellipse too long for the region, an oblique hyperbola, and a narrowing cone's.
+        let p = plane([0.0, 0.0, 1.0], [-1.0, 0.0, 1.0 + 1e-12]);
+        exact_conic(&p, &c, &meet(&p, &c).0);
+        let p = plane([0.3, -0.2, 0.5], [1.0, 0.4, 0.3]);
+        let (cs, _) = meet(&p, &c);
+        assert_eq!(cs.len(), 1);
+        exact_conic(&p, &c, &cs);
+        let narrowing = Cone {
+            frame: Frame::WORLD,
+            radius: 4.0,
+            half_angle: -PI / 4.0,
+        };
+        let p = plane([0.0, 2.0, 0.0], [0.1, 1.0, 0.0]);
+        exact_conic(&p, &narrowing, &meet(&p, &narrowing).0);
     }
 
     #[test]

@@ -854,7 +854,13 @@ once: an ellipse within the region's reach of the apex is built exactly from its
 point a quarter turn round; any other section is followed along the generators only as far as the
 region reaches, on the cone's own nappe, which is the one its parameters and projection describe. A
 plane all but parallel to a generator cuts an ellipse some 1e16 mm long, which is followed as a
-parabola is.
+parabola is. That part of a parabola or of a hyperbola's branch is stored as the curve it is, not
+fitted: a conic arc with no point at infinity is the image of a circle's arc, so a rational
+quadratic `Curve::Nurbs` of Bézier pieces with positive weights (Piegl and Tiller 1997, ch. 7).
+The pieces are cut where one would bend through more than a quarter turn or run far out toward an
+asymptote, and each is given the parameter in which it starts and ends at unit speed, so the
+parameter is close to arc length and the first derivative is continuous across the double knots.
+The fitted curve remains only where a middle weight would not be positive.
 
 Curve–surface meetings in closed form: a line against a plane, cylinder, sphere, cone or ring torus;
 a circle or ellipse against a plane, a circle against a cylinder whose axis is square to it, and a
