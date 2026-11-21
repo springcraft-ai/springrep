@@ -456,7 +456,13 @@ pub(crate) fn roots(f: &mut impl FnMut(f64) -> f64, a: f64, b: f64, n: usize) ->
         out.push(a);
     }
     for i in 1..=n {
-        let t = a + (b - a) * i as f64 / n as f64;
+        // The last sample is `b` itself: a float short of it, a sign change at `b` would be seen
+        // neither here nor by a search of the interval that starts there.
+        let t = if i == n {
+            b
+        } else {
+            a + (b - a) * i as f64 / n as f64
+        };
         let v = f(t);
         if v == 0.0 {
             out.push(t);
@@ -700,5 +706,17 @@ mod tests {
     fn dense_solve_pivots() {
         let x = solve_dense(vec![0.0, 1.0, 1.0, 1.0], vec![2.0, 3.0], 2, 1).unwrap();
         assert_eq!(x, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn a_root_at_the_join_of_two_intervals_is_found_in_one_of_them() {
+        // 12 twelfths of this join round to the float below it, where the sign has not changed.
+        let join = 3.6768490867348502f64;
+        assert!(join * 12.0 / 12.0 < join);
+        let mut f = |t: f64| if t < join { -1.0 } else { 1.0 };
+        let mut found = roots(&mut f, 0.0, join, 12);
+        found.extend(roots(&mut f, join, 2.0 * join, 12));
+        assert_eq!(found.len(), 1);
+        assert!((found[0] - join).abs() < 1e-12);
     }
 }
