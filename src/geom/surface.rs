@@ -383,23 +383,9 @@ impl Surface {
                 self.refine_projection(p, seeds)
             }
             Surface::Revolution(s) => {
-                let (a, b) = finite_domain(&s.curve);
-                let frame = Frame::from_axis(s.origin, s.axis).unwrap_or(Frame::WORLD);
-                let ang = angle_of(frame.to_local(p));
-                let seeds = meridian_seeds(s, &frame, p, a, b);
-                let seeds = seeds.into_iter().map(|v| {
-                    let (q, dq) = s.curve.d1(v);
-                    let q = frame.to_local(q);
-                    // A point on the axis has no angle of its own: the meridian leaves it along
-                    // its tangent, which is the way the curve's points beside it lie.
-                    let at = if q.x.hypot(q.y) <= tol::LINEAR {
-                        let dq = frame.to_local(frame.origin + dq);
-                        angle_of(if v < b { dq } else { -dq })
-                    } else {
-                        angle_of(q)
-                    };
-                    Vec2::new((ang - at).rem_euclid(TAU), v)
-                });
+                let m = Meridian::of(s);
+                let seeds = meridian_seeds(s, &m, p);
+                let seeds = seeds.into_iter().map(|v| m.seed(s, p, v));
                 self.refine_projection(p, seeds)
             }
             Surface::Ruled(_) => {
@@ -409,6 +395,30 @@ impl Surface {
             }
             Surface::Nurbs(s) => s.project(p),
         }
+    }
+
+    /// [`Surface::project`] onto a surface of revolution whose meridian `m` holds, for many points
+    /// in turn: the same seeds and the same point. A seed turned to the angle of `p` lies as far
+    /// from `p` as its place in the meridian plane lies from that of `p`, so only the seeds within
+    /// rounding of the nearest there are placed on the surface to pick the nearest from.
+    pub(crate) fn project_on(&self, m: &Meridian, p: Point3) -> Vec2 {
+        let Surface::Revolution(s) = self else {
+            return self.project(p);
+        };
+        let target = m.to_meridian(p);
+        let seeds = meridian_seeds(s, m, p);
+        let gaps: Vec<f64> = (0..seeds.len())
+            .map(|k| match m.at.get(k) {
+                Some(q) => q.dist(target),
+                None => m.to_meridian(s.curve.eval(seeds[k])).dist(target),
+            })
+            .collect();
+        let least = gaps.iter().copied().fold(f64::INFINITY, f64::min);
+        let near = least + 1e-9 * (1.0 + least + target.norm());
+        let nearest = (0..seeds.len())
+            .filter(|&k| gaps[k] <= near)
+            .map(|k| m.seed(s, p, seeds[k]));
+        self.refine_projection(p, nearest)
     }
 
     /// As [`Surface::project`], with each periodic parameter moved by whole periods to lie
@@ -579,20 +589,66 @@ fn finite_domain(c: &Curve) -> (f64, f64) {
     (a.max(-1e4), b.min(1e4))
 }
 
+/// A surface of revolution's curve read once for the projections onto it: its samples, and where
+/// each lies in the meridian plane, by its distance from the axis and its place along it.
+pub(crate) struct Meridian {
+    frame: Frame,
+    /// The end of the curve's domain the samples stop at.
+    end: f64,
+    samples: Vec<f64>,
+    at: Vec<Vec2>,
+}
+
+impl Meridian {
+    pub(crate) fn of(s: &Revolution) -> Meridian {
+        let (a, b) = finite_domain(&s.curve);
+        let frame = Frame::from_axis(s.origin, s.axis).unwrap_or(Frame::WORLD);
+        let samples = curve_seeds(&s.curve, a, b);
+        let mut m = Meridian {
+            frame,
+            end: b,
+            samples,
+            at: Vec::new(),
+        };
+        m.at = (m.samples.iter())
+            .map(|&v| m.to_meridian(s.curve.eval(v)))
+            .collect();
+        m
+    }
+
+    fn to_meridian(&self, q: Point3) -> Vec2 {
+        let l = self.frame.to_local(q);
+        Vec2::new(l.x.hypot(l.y), l.z)
+    }
+
+    /// The parameters of the curve's point at `v`, turned to the angle of `p` about the axis.
+    fn seed(&self, s: &Revolution, p: Point3, v: f64) -> Vec2 {
+        let frame = &self.frame;
+        let ang = angle_of(frame.to_local(p));
+        let (q, dq) = s.curve.d1(v);
+        let q = frame.to_local(q);
+        // A point on the axis has no angle of its own: the meridian leaves it along its tangent,
+        // which is the way the curve's points beside it lie.
+        let at = if q.x.hypot(q.y) <= tol::LINEAR {
+            let dq = frame.to_local(frame.origin + dq);
+            angle_of(if v < self.end { dq } else { -dq })
+        } else {
+            angle_of(q)
+        };
+        Vec2::new((ang - at).rem_euclid(TAU), v)
+    }
+}
+
 /// The curve's sample parameters, each local least of the distance in the meridian plane (from the
 /// axis and along it) from `p` refined by Newton's method on that distance alone. The point of a
 /// surface of revolution nearest `p` lies in the half-plane through `p` and the axis, so this is
 /// the whole problem; the two-parameter steps stall where the curve crosses its own meridian
 /// square to it, where the surface folds back on itself and its partials are parallel.
-fn meridian_seeds(s: &Revolution, frame: &Frame, p: Point3, a: f64, b: f64) -> Vec<f64> {
-    let to_meridian = |q: Point3| {
-        let l = frame.to_local(q);
-        Vec2::new(l.x.hypot(l.y), l.z)
-    };
-    let target = to_meridian(p);
-    let gap = |v: f64| to_meridian(s.curve.eval(v)).dist(target);
-    let mut seeds = curve_seeds(&s.curve, a, b);
-    let gaps: Vec<f64> = seeds.iter().map(|&v| gap(v)).collect();
+fn meridian_seeds(s: &Revolution, m: &Meridian, p: Point3) -> Vec<f64> {
+    let frame = &m.frame;
+    let target = m.to_meridian(p);
+    let mut seeds = m.samples.clone();
+    let gaps: Vec<f64> = m.at.iter().map(|q| q.dist(target)).collect();
     let n = seeds.len();
     for k in 0..n {
         let below = |j: usize| gaps[k] <= gaps[j];
@@ -813,6 +869,62 @@ mod tests {
                 let p = s.eval(u, near_pole);
                 let uv = s.project(p);
                 assert!(s.eval(uv.x, uv.y).dist(p) < 1e-9, "at {u}: {uv:?}");
+            }
+        }
+    }
+
+    // Three meridians: a spline that wanders, a circle out of every meridian plane, whose image
+    // there runs out and turns back on itself, and a line that starts on the axis.
+    #[test]
+    fn projection_from_a_meridian_read_once_is_projection() {
+        let wander = Curve::BSpline(
+            BSpline::interpolate(&[
+                Vec3::new(5.0, 0.0, 0.0),
+                Vec3::new(6.0, 0.5, 2.0),
+                Vec3::new(5.5, -0.5, 4.0),
+                Vec3::new(7.0, 0.0, 6.0),
+                Vec3::new(6.0, 1.0, 7.0),
+            ])
+            .unwrap(),
+        );
+        let askew = Curve::Circle(Circle {
+            frame: Frame::new(Vec3::new(5.0, 0.0, 0.0), Vec3::X, Vec3::Y).unwrap(),
+            radius: 0.5,
+        });
+        let spoke = Curve::BSpline(
+            BSpline::interpolate(&[
+                Vec3::ZERO,
+                Vec3::new(1.0, 0.0, 0.125),
+                Vec3::new(2.0, 0.0, 0.5),
+                Vec3::new(3.0, 0.0, 1.125),
+            ])
+            .unwrap(),
+        );
+        for (curve, span) in [(wander, 8.0), (askew, 6.0), (spoke, 4.0)] {
+            let r = Revolution {
+                curve,
+                origin: Vec3::ZERO,
+                axis: Vec3::Z,
+            };
+            let m = Meridian::of(&r);
+            let (a, b) = finite_domain(&r.curve);
+            let s = Surface::Revolution(Box::new(r));
+            for k in 0..3000 {
+                let x = k as f64 * 0.618;
+                // Points on the surface, a hair off it, and anywhere about it.
+                let p = match k % 3 {
+                    0 => s.eval(x, a + (b - a) * (x * 0.37).sin().abs()),
+                    1 => {
+                        let (u, v) = (x, a + (b - a) * (x * 0.37).sin().abs());
+                        s.eval(u, v) + s.normal(u, v) * (1e-4 * (x * 1.7).sin())
+                    }
+                    _ => Vec3::new(
+                        span * (x * 1.3).sin(),
+                        span * (x * 0.7).cos(),
+                        span * (x * 2.1).sin(),
+                    ),
+                };
+                assert_eq!(s.project(p), s.project_on(&m, p), "{k}");
             }
         }
     }

@@ -43,18 +43,30 @@ pub(crate) fn signed_distance(s: &Surface, p: Point3) -> f64 {
 
 /// The signed distance to `s` along a path of points: each projection onto a B-spline surface
 /// continues from the last point's where the last point lay near enough the surface, and the
-/// step from it is short enough, for that to find the nearest point.
+/// step from it is short enough, for that to find the nearest point. A surface of revolution's
+/// meridian is sampled once for the whole path; each point is still projected from every sample,
+/// as a meridian that turns back has two sheets no step is short enough to tell apart.
 pub(crate) struct Tracker<'a> {
     s: &'a Surface,
     last: Option<(Point3, Vec2, f64)>,
+    meridian: Option<crate::geom::Meridian>,
 }
 
 impl<'a> Tracker<'a> {
     pub(crate) fn new(s: &'a Surface) -> Tracker<'a> {
-        Tracker { s, last: None }
+        Tracker {
+            s,
+            last: None,
+            meridian: None,
+        }
     }
 
     pub(crate) fn at(&mut self, p: Point3) -> f64 {
+        if let Surface::Revolution(r) = self.s {
+            let m = (self.meridian).get_or_insert_with(|| crate::geom::Meridian::of(r));
+            let uv = self.s.project_on(m, p);
+            return (p - self.s.eval(uv.x, uv.y)).dot(self.s.normal(uv.x, uv.y));
+        }
         let Surface::Nurbs(n) = self.s else {
             return signed_distance(self.s, p);
         };

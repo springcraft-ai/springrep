@@ -16,4 +16,5 @@ pub(crate) use intersection::{
 };
 pub(crate) use nurbs::Bezier;
 pub use nurbs::{IsoLine, NurbsCurve, NurbsSurface, Patch};
+pub(crate) use surface::Meridian;
 pub use surface::{Cone, Cylinder, Extrusion, Plane, Revolution, Ruled, Sphere, Surface, Torus};
