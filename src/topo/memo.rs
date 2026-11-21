@@ -37,6 +37,10 @@ pub(crate) struct FaceMemo {
     /// The memos of faces the checker found this one does not meet away from their shared edges
     /// and vertices.
     pub apart: Mutex<HashSet<u64>>,
+    /// Those of [`FaceMemo::apart`] found so with nothing left unsearched: the two faces' surfaces
+    /// stand clear of each other there, or every curve they meet in is known and none runs
+    /// inside both faces.
+    pub clear: Mutex<HashSet<u64>>,
     /// The memos of faces sharing edges with this one that the checker found meeting it nowhere
     /// else, each with a hash of which coedges of the two the shared edges are.
     pub beside: Mutex<HashSet<(u64, u64)>>,
@@ -57,6 +61,7 @@ impl Default for FaceMemo {
             images: OnceLock::new(),
             loose_box: OnceLock::new(),
             apart: Mutex::new(HashSet::new()),
+            clear: Mutex::new(HashSet::new()),
             beside: Mutex::new(HashSet::new()),
         }
     }

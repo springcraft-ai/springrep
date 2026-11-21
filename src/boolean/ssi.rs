@@ -723,6 +723,15 @@ pub(crate) fn intersect(
     Ok(Ssi::Curves { curves, points })
 }
 
+/// The intersection of `a` and `b` within `region` where a closed form gives all of it: `None`
+/// where it would have to be traced from seeds, which can miss a loop no seed lies on.
+pub(crate) fn intersect_closed(a: &Surface, b: &Surface, region: &Aabb) -> Option<Ssi> {
+    if same_domain(a, b) {
+        return Some(Ssi::Coincident);
+    }
+    closed_form(a, b, region).or_else(|| closed_form(b, a, region))
+}
+
 /// Whether moving along `dir` leaves `s` unchanged.
 fn translation_invariant(s: &Surface, dir: Vec3) -> bool {
     match s {

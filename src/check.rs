@@ -8,8 +8,8 @@ use crate::{
     boolean::{
         classify,
         csi::{
-            CurveBoxes, curve_surface_in, line_crossings, line_crossings_known,
-            ray_surface_is_closed_form, signed_distance,
+            CurveBoxes, curve_curve, curve_distance, curve_surface_in, line_crossings,
+            line_crossings_known, ray_surface_is_closed_form, signed_distance,
         },
         domain::{Domain, Where},
         face_domain,
@@ -167,7 +167,7 @@ pub(crate) fn check_structure(b: &Brep) -> Vec<Issue> {
 /// Where two faces of one solid of `b` that share no edge meet, and how far they pass through each
 /// other there: an imported mesh stitched with small folds passes through itself by microns.
 pub fn self_crossings(b: &Brep) -> Vec<SelfCrossing> {
-    crossings(b, None, true, &mut PairCache::default())
+    crossings(b, None, true, &mut PairCache::default(), None)
         .into_iter()
         .map(|x| SelfCrossing {
             a: x.a,
@@ -597,7 +597,8 @@ fn checked(
                 .is_some_and(|uv| inside(g, d.surface.eval(uv.x, uv.y)))
         };
         let touching = |x: &Crossing| {
-            b.face(x.a).shell != b.face(x.b).shell
+            !x.through
+                && b.face(x.a).shell != b.face(x.b).shell
                 && depth(b, x.a, x.b).max(depth(b, x.b, x.a)) <= tol::LINEAR
                 && !(crate::boolean::ssi::same_domain(&b.face(x.a).surface, &b.face(x.b).surface)
                     && (inside(x.a, x.at)
@@ -606,10 +607,18 @@ fn checked(
                         || overlaps(x.b, x.a)))
         };
         cache.domains.extend(domains.built());
-        for x in crossings(b, sides, each, &mut cache)
-            .into_iter()
-            .filter(|x| !touching(x))
-        {
+        let mut open: HashSet<SolidId> = HashSet::new();
+        let found = crossings(b, sides, each, &mut cache, Some(&mut open));
+        // A solid a ray settled, two of whose faces could not be searched for a crossing no edge
+        // shows, is settled by its volume after all.
+        let unproven = |s: &SolidId| {
+            let v = measure::solid_volume_sign(b, *s);
+            v.is_nan() || v <= 0.0
+        };
+        if outward.intersection(&open).any(unproven) {
+            return checked(b, each, sides, crossing, sheet, false);
+        }
+        for x in found.into_iter().filter(|x| !touching(x)) {
             out.push(Issue {
                 message: format!(
                     "faces {} and {} share no edge but meet at ({:.6}, {:.6}, {:.6}): the solid \
@@ -810,6 +819,10 @@ fn faces_outward(b: &Brep, domains: &Domains, cache: &mut PairCache, s: SolidId)
     if solid.outer != 1 || !one_sheet(b, faces) {
         return false;
     }
+    // A face off the analytic surfaces is not searched for crossing itself.
+    if !faces.iter().all(|&f| analytic(&b.face(f).surface)) || !boundaries_simple(b, faces) {
+        return false;
+    }
     let Some(sharers) = sharers_to_search(b, faces) else {
         return false;
     };
@@ -892,6 +905,250 @@ fn convex_at(b: &Brep, f: FaceId, v: VertexId) -> bool {
         }
     }
     corners > 0
+}
+
+/// What the curves two faces' surfaces meet in tell of a crossing no edge shows.
+enum Hidden {
+    /// Not every curve the surfaces meet in is known.
+    Unknown,
+    /// No stretch of any of them lies inside both faces.
+    Clear,
+    /// The faces pass through each other along a curve through this point.
+    At(Point3),
+}
+
+/// Whether faces `fa` and `fb` pass through each other along a curve that no edge of either
+/// reaches, given that no edge of one meets the other face away from the vertices `va` and `vb`
+/// they share: a closed curve inside both, or one that runs from one shared vertex to another.
+/// The curves the two surfaces meet in are cut at the shared vertices on them; a stretch between
+/// two cuts, or out to the curve's end, lies inside both faces whole or not at all, since it could
+/// leave either only across an edge, so its middle is located in both. Curves the surfaces only
+/// touch along are left out: there they do not pass through each other. `ends` are the ends of
+/// the edges the two share: where the surfaces cut across each other at one, a stretch out of it
+/// is that edge or the edge carried on past its end, which a face whose corner there is convex
+/// does not hold, so such a stretch is not located.
+fn hidden_crossing(
+    b: &Brep,
+    (fa, fb): (FaceId, FaceId),
+    (va, vb): (&[VertexId], &[VertexId]),
+    ends: &[VertexId],
+    cache: &mut PairCache,
+) -> Hidden {
+    use crate::boolean::ssi::{Ssi, intersect_closed};
+    let (sa, sb) = (&b.face(fa).surface, &b.face(fb).surface);
+    if !(analytic(sa) && analytic(sb)) {
+        return Hidden::Unknown;
+    }
+    let (ba, bb) = (cache.face_box(b, fa), cache.face_box(b, fb));
+    if !boxes_meet(&ba, &bb) {
+        return Hidden::Clear;
+    }
+    let each = |f: &dyn Fn(usize) -> f64| Vec3::new(f(0), f(1), f(2));
+    let region = padded_box(Aabb {
+        min: each(&|k| ba.min[k].max(bb.min[k])),
+        max: each(&|k| ba.max[k].min(bb.max[k])),
+    });
+    let curves = match intersect_closed(sa, sb, &region) {
+        None => return Hidden::Unknown,
+        Some(Ssi::Coincident) => return Hidden::Clear,
+        Some(Ssi::Curves { curves, .. }) => curves,
+    };
+    let mut shared: Vec<VertexId> = va.iter().copied().filter(|v| vb.contains(v)).collect();
+    shared.sort();
+    shared.dedup();
+    let outward = |f: FaceId, p: Point3| {
+        let face = b.face(f);
+        let uv = face.surface.project(p);
+        face.surface.normal(uv.x, uv.y)
+    };
+    for c in curves.iter().filter(|c| !c.tangent) {
+        let (t0, t1) = c.range;
+        // Each shared vertex on the curve, and whether no stretch out of it need be located.
+        let mut cuts: Vec<(f64, bool)> = Vec::new();
+        for &v in &shared {
+            let p = b.vertex(v).point;
+            let (d, t) = curve_distance(&c.curve, c.range, p);
+            if d > b.vertex_tolerance(v) {
+                continue;
+            }
+            let across = outward(fa, p).cross(outward(fb, p)).norm() > tol::TANGENT;
+            let shut = across && ends.contains(&v) && (convex_at(b, fa, v) || convex_at(b, fb, v));
+            cuts.push((t, shut));
+        }
+        cuts.sort_by(|x, y| x.0.total_cmp(&y.0));
+        let mut spans: Vec<(f64, f64, bool)> = Vec::new();
+        for w in cuts.windows(2) {
+            spans.push((w[0].0, w[1].0, w[0].1 || w[1].1));
+        }
+        match (cuts.first(), cuts.last()) {
+            (Some(&first), Some(&last)) if c.closed => {
+                spans.push((last.0, first.0 + (t1 - t0), first.1 || last.1));
+            }
+            (Some(&first), Some(&last)) => {
+                spans.push((t0, first.0, first.1));
+                spans.push((last.0, t1, last.1));
+            }
+            _ => spans.push((t0, t1, false)),
+        }
+        for (from, to, shut) in spans {
+            if shut || to - from <= 1e-12 * (1.0 + to.abs()) {
+                continue;
+            }
+            let mid = 0.5 * (from + to);
+            let p = c.curve.eval(if mid > t1 { mid - (t1 - t0) } else { mid });
+            if !(in_box(p, &ba) && in_box(p, &bb)) {
+                continue;
+            }
+            let mut inside = |f: FaceId| {
+                let dom = cache
+                    .domains
+                    .entry(f)
+                    .or_insert_with(|| std::rc::Rc::new(face_domain(b, f)));
+                matches!(dom.locate(p), Where::Inside(_))
+            };
+            if inside(fa) && inside(fb) {
+                return Hidden::At(p);
+            }
+        }
+    }
+    Hidden::Clear
+}
+
+/// Whether edge `e`'s curve is certain not to cross itself over the edge's range. A line is; a
+/// circle or an ellipse over no more than a turn is. A spline is where it runs one way along its
+/// chord, each span's control points stepping forward along it, or turns one way about an axis
+/// through the middle of its control points for no more than a turn, each span's control points
+/// and their steps turning that way: the curve's point lies among a span's control points and
+/// its direction among their steps. An intersection curve is judged by the spline it is kept as.
+fn edge_is_simple(b: &Brep, e: EdgeId) -> bool {
+    let edge = b.edge(e);
+    let (t0, t1) = edge.range;
+    let sp = match &edge.curve {
+        None | Some(Curve::Line(_)) => return true,
+        Some(Curve::Circle(_) | Curve::Ellipse(_)) => {
+            return t1 - t0 <= std::f64::consts::TAU * (1.0 + 1e-12);
+        }
+        Some(Curve::BSpline(sp)) => sp,
+        Some(Curve::Intersection(ic)) => &ic.approx,
+        Some(Curve::Nurbs(_)) => return false,
+    };
+    let (p, knots, ctrl) = (sp.degree(), sp.knots(), sp.control_points());
+    let (d0, d1) = sp.domain();
+    if t0 < d0 - 1e-12 || t1 > d1 + 1e-12 || ctrl.len() + p + 1 != knots.len() {
+        return false;
+    }
+    // Each span the range reaches, by the indices of the control points that shape it.
+    let spans: Vec<(usize, usize)> = (p..ctrl.len())
+        .filter(|&k| knots[k] < knots[k + 1] && knots[k] < t1 && knots[k + 1] > t0)
+        .map(|k| (k - p, k))
+        .collect();
+    let steps = |&(lo, hi): &(usize, usize)| (lo..hi).map(|i| ctrl[i + 1] - ctrl[i]);
+    let chord = sp.eval(t1) - sp.eval(t0);
+    let forward =
+        |s: &(usize, usize)| steps(s).all(|d| d.dot(chord) > 1e-9 * d.norm() * chord.norm());
+    if chord.norm() > tol::LINEAR && spans.iter().all(forward) {
+        return true;
+    }
+    let used: Vec<Vec3> = spans
+        .iter()
+        .flat_map(|&(lo, hi)| (lo..=hi).map(|i| ctrl[i]))
+        .collect();
+    if used.is_empty() {
+        return false;
+    }
+    let o = used.iter().fold(Vec3::ZERO, |a, &q| a + q) * (1.0 / used.len() as f64);
+    let about = used
+        .windows(2)
+        .fold(Vec3::ZERO, |a, w| a + (w[0] - o).cross(w[1] - o));
+    let Some(axis) = about.unit() else {
+        return false;
+    };
+    let turning = |s: &(usize, usize)| {
+        let (lo, hi) = *s;
+        (lo..=hi).all(|m| {
+            let r = ctrl[m] - o;
+            steps(s).all(|d| r.cross(d).dot(axis) > 1e-9 * r.norm() * d.norm())
+        })
+    };
+    if !spans.iter().all(turning) {
+        return false;
+    }
+    // How far round the axis it goes, by steps each less than a half turn.
+    let n = 8 * spans.len();
+    let at = |i: usize| {
+        let r = sp.eval(t0 + (t1 - t0) * i as f64 / n as f64) - o;
+        r - axis * r.dot(axis)
+    };
+    let mut turned = 0.0;
+    for i in 0..n {
+        let (r, q) = (at(i), at(i + 1));
+        let step = r.cross(q).dot(axis).atan2(r.dot(q));
+        if step.is_nan() || step <= 0.0 {
+            return false;
+        }
+        turned += step;
+    }
+    turned <= std::f64::consts::TAU * (1.0 + 1e-9)
+}
+
+/// Whether no face of `faces`, a sheet every edge of which two coedges use, has a boundary that
+/// crosses itself, so far as the search of faces that share an edge does not show it. Two edges
+/// of a face that cross are shown there when some other face uses one and not the other: the
+/// other edge then meets that face on its boundary. That leaves an edge crossing itself, and two
+/// edges the same other face uses, or the face itself along a seam: each such edge must be
+/// [`edge_is_simple`], and each such pair, lines, circles and ellipses only, is intersected.
+/// A face on an analytic surface whose boundary does not cross itself covers no part of the
+/// surface twice: the surfaces fold onto themselves only at a cone's apex, a sphere's poles and
+/// the points where a torus that reaches its axis meets it, where a face can touch itself and not
+/// pass through.
+fn boundaries_simple(b: &Brep, faces: &[FaceId]) -> bool {
+    let plain = |c: &Curve| matches!(c, Curve::Line(_) | Curve::Circle(_) | Curve::Ellipse(_));
+    for &f in faces {
+        let mut by_other: HashMap<Option<FaceId>, Vec<EdgeId>> = HashMap::new();
+        for (_, e) in face_edges(b, f) {
+            if b.edge(e).curve.is_none() {
+                continue;
+            }
+            if !edge_is_simple(b, e) {
+                return false;
+            }
+            let other = b
+                .edge_uses(e)
+                .iter()
+                .map(|&c| b.coedge_face(c))
+                .find(|&g| g != f);
+            let group = by_other.entry(other).or_default();
+            if !group.contains(&e) {
+                group.push(e);
+            }
+        }
+        for group in by_other.values() {
+            for (k, &e1) in group.iter().enumerate() {
+                for &e2 in &group[k + 1..] {
+                    let (x, y) = (b.edge(e1), b.edge(e2));
+                    let (Some(c1), Some(c2)) = (&x.curve, &y.curve) else {
+                        continue;
+                    };
+                    if !(plain(c1) && plain(c2)) {
+                        return false;
+                    }
+                    let common: Vec<VertexId> = [x.start, x.end]
+                        .into_iter()
+                        .filter(|v| *v == y.start || *v == y.end)
+                        .collect();
+                    let at_common = |p: &Point3| {
+                        common
+                            .iter()
+                            .any(|&v| b.vertex(v).point.dist(*p) <= b.vertex_tolerance(v))
+                    };
+                    if !curve_curve(c1, x.range, c2, y.range).iter().all(at_common) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
 }
 
 /// A coedge's place in its face, loop and coedge, with its edge.
@@ -998,20 +1255,15 @@ fn sharers_apart(
                 }
             }
         }
-        // A crossing that runs out of a vertex the two share may meet no edge of either. Where
-        // the surfaces cut across each other at an end of a shared edge, they meet near it along
-        // one curve, the edge's own: the faces can cross there only along the edge carried on
-        // past its end, which a face whose corner there is convex does not hold.
+        // A crossing no edge shows: a closed curve inside both, or one out of a shared vertex.
         let ends: Vec<VertexId> = ef
             .intersection(&eg)
             .flat_map(|&e| [b.edge(e).start, b.edge(e).end])
             .collect();
-        let open = |v: &VertexId| {
-            vg.contains(v) && !(ends.contains(v) && (convex_at(b, f, *v) || convex_at(b, g, *v)))
-        };
-        if vf.iter().any(open)
-            && crossing_from_shared_vertex(b, (f, g), (&vf, &vg), cache).is_some()
-        {
+        if !matches!(
+            hidden_crossing(b, (f, g), (&vf, &vg), &ends, cache),
+            Hidden::Clear
+        ) {
             return false;
         }
         let (mf, mg) = (b.memo(f), b.memo(g));
@@ -1259,6 +1511,9 @@ struct Crossing {
     a: FaceId,
     b: FaceId,
     at: Point3,
+    /// The faces pass through each other along a curve through `at` that no edge of either
+    /// reaches: their boundaries tell nothing of how deep.
+    through: bool,
 }
 
 fn padded_box(bb: Aabb) -> Aabb {
@@ -1364,7 +1619,9 @@ fn crossings(
     sides: Option<&[Option<usize>]>,
     each: bool,
     cache: &mut PairCache,
+    mut open: Option<&mut HashSet<SolidId>>,
 ) -> Vec<Crossing> {
+    let hidden = open.is_some();
     let faces: Vec<FaceId> = b.face_ids().collect();
     let solid_of = |f: FaceId| b.face(f).shell.and_then(|s| b.shell(s).solid);
     let boxes: Vec<Aabb> = faces.iter().map(|&f| cache.face_box(b, f)).collect();
@@ -1395,6 +1652,13 @@ fn crossings(
             }
         }
     };
+    let clear = |ma: &FaceMemo, mb: &FaceMemo| {
+        for (m, other) in [(ma, mb.id), (mb, ma.id)] {
+            if let Ok(mut s) = m.clear.lock() {
+                s.insert(other);
+            }
+        }
+    };
 
     let mut out = Vec::new();
     for (k, &i) in order.iter().enumerate() {
@@ -1410,19 +1674,35 @@ fn crossings(
                 continue;
             }
             let (ma, mb) = (b.memo(fa), b.memo(fb));
-            if sides.is_some_and(|s| s[fa.index()].is_some() && s[fa.index()] == s[fb.index()]) {
-                apart(ma, mb);
+            let (sa, sb) = (&b.face(fa).surface, &b.face(fb).surface);
+            if ma.clear.lock().is_ok_and(|s| s.contains(&mb.id)) {
                 continue;
             }
-            if ma.apart.lock().is_ok_and(|s| s.contains(&mb.id)) {
+            // Taken apart unsearched: cut from one input, or found so by an earlier check. A pair
+            // on analytic surfaces is searched all the same, since for most of them every curve
+            // the surfaces meet in is known; any other leaves its solid open.
+            let one_input =
+                sides.is_some_and(|s| s[fa.index()].is_some() && s[fa.index()] == s[fb.index()]);
+            let taken = one_input || ma.apart.lock().is_ok_and(|s| s.contains(&mb.id));
+            let searched = hidden && analytic(sa) && analytic(sb);
+            let leave_open = |open: &mut Option<&mut HashSet<SolidId>>| {
+                if let (Some(open), Some(s)) = (open.as_mut(), solid_of(fa))
+                    && solid_of(fb) == Some(s)
+                {
+                    open.insert(s);
+                }
+            };
+            if taken && !searched {
+                apart(ma, mb);
+                leave_open(&mut open);
                 continue;
             }
             // Where either face's box is clear of the other's surface, they cannot meet.
-            let (sa, sb) = (&b.face(fa).surface, &b.face(fb).surface);
             if (analytic(sb) && clear_of(&boxes[i], sb))
                 || (analytic(sa) && clear_of(&boxes[j], sa))
             {
                 apart(ma, mb);
+                clear(ma, mb);
                 continue;
             }
             let mut hit = None;
@@ -1450,12 +1730,44 @@ fn crossings(
                     }
                 }
             }
+            // What an edge shows of a pair taken apart is not reported: two faces cut from one
+            // input may touch where that input's faces did. Only their volume settles their solid.
+            if taken && hit.is_some() {
+                apart(ma, mb);
+                leave_open(&mut open);
+                continue;
+            }
+            let mut through = false;
+            let mut proven = false;
             if hit.is_none() {
-                hit = crossing_from_shared_vertex(b, (fa, fb), (&verts[&fa], &verts[&fb]), cache);
+                let pair = ((fa, fb), (verts[&fa].as_slice(), verts[&fb].as_slice()));
+                let found = match searched {
+                    true => hidden_crossing(b, pair.0, pair.1, &[], cache),
+                    false => Hidden::Unknown,
+                };
+                match found {
+                    Hidden::At(p) => (hit, through) = (Some(p), true),
+                    Hidden::Clear => proven = true,
+                    Hidden::Unknown => {
+                        hit = crossing_from_shared_vertex(b, pair.0, pair.1, cache);
+                    }
+                }
             }
             match hit {
-                Some(at) => out.push(Crossing { a: fa, b: fb, at }),
-                None => apart(ma, mb),
+                Some(at) => out.push(Crossing {
+                    a: fa,
+                    b: fb,
+                    at,
+                    through,
+                }),
+                None => {
+                    apart(ma, mb);
+                    if proven {
+                        clear(ma, mb);
+                    } else {
+                        leave_open(&mut open);
+                    }
+                }
             }
         }
     }
@@ -2504,7 +2816,9 @@ mod tests {
         // faces that share no edge meet: only the volume's sign is wrong.
         let faces: Vec<FaceId> = b.face_ids().collect();
         assert!(one_sheet(&b, &faces));
-        assert!(crossings(&b, None, false, &mut PairCache::default()).is_empty());
+        let mut open = HashSet::new();
+        let found = crossings(&b, None, false, &mut PairCache::default(), Some(&mut open));
+        assert!(found.is_empty() && open.is_empty());
         // The rays off the outward block's edges see nothing.
         assert!(seen_off_edges(&b).contains(&Some(true)));
         assert_eq!(seen_outward(&b), [false]);
@@ -2609,7 +2923,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ray_off_its_seam_settles_a_ball_of_one_spline_face_and_one_grown_from_it() {
+    fn a_spline_face_is_not_searched_for_crossing_itself_and_leaves_its_sheet_to_its_volume() {
         let ball = spline_ball();
         assert_eq!(ball.face_count(), 1);
         let grown = crate::edit::offset(&ball, 2.0, "grow").unwrap();
@@ -2618,16 +2932,121 @@ mod tests {
                 b.face_ids()
                     .all(|f| matches!(b.face(f).surface, Surface::Nurbs(_)))
             );
-            assert_eq!(seen_outward(b), [true]);
+            // The ray off its seam sees it facing outward, and is not believed.
+            assert!(seen_off_edges(b).contains(&Some(true)));
+            assert_eq!(seen_outward(b), [false]);
             assert_eq!(cut_issues(b), Vec::<String>::new());
             let t = rebuilt(b, |_| true, false);
-            assert_eq!(seen_outward(&t), [false]);
             let issues = cut_issues(&t);
             assert!(
                 issues.iter().any(|m| m.starts_with("solid 0 has volume -")),
                 "{issues:?}"
             );
         }
+    }
+
+    /// A patch of the cylinder of radius 1 about `frame`'s z axis, from angle `u.0` to `u.1` and
+    /// height `v.0` to `v.1`, its two straight sides each cut in two at height 0. Vertices are
+    /// shared with those already in `b` at the same points.
+    fn cylinder_patch(b: &mut Brep, frame: Frame, u: (f64, f64), v: (f64, f64)) -> FaceId {
+        use crate::geom::{Circle, Cylinder, Line};
+        use crate::topo::{CoedgeSpec, PCurve};
+        let surface = Surface::Cylinder(Cylinder { frame, radius: 1.0 });
+        let at = |u: f64, v: f64| surface.eval(u, v);
+        let vertex = |b: &mut Brep, p: Vec3| {
+            let found = b.vertex_ids().find(|&w| b.vertex(w).point.dist(p) < 1e-9);
+            found.unwrap_or_else(|| b.add_vertex(p))
+        };
+        let arc = |b: &mut Brep, h: f64, ends: (VertexId, VertexId)| {
+            let ring = Circle {
+                frame: Frame::new(frame.origin + frame.z * h, frame.z, frame.x).unwrap(),
+                radius: 1.0,
+            };
+            let e = b.add_edge(Curve::Circle(ring), u, ends.0, ends.1);
+            let (origin, dir) = (Vec2::new(0.0, h), Vec2::new(1.0, 0.0));
+            (e, PCurve::Affine { origin, dir })
+        };
+        let rule = |b: &mut Brep, angle: f64, span: (f64, f64), ends: (VertexId, VertexId)| {
+            let line = Line {
+                origin: at(angle, 0.0),
+                dir: frame.z,
+            };
+            let e = b.add_edge(Curve::Line(line), span, ends.0, ends.1);
+            let (origin, dir) = (Vec2::new(angle, 0.0), Vec2::new(0.0, 1.0));
+            (e, PCurve::Affine { origin, dir })
+        };
+        let corner = |b: &mut Brep, u: f64, v: f64| vertex(b, at(u, v));
+        let low = (corner(b, u.0, v.0), corner(b, u.1, v.0));
+        let mid = (corner(b, u.0, 0.0), corner(b, u.1, 0.0));
+        let high = (corner(b, u.0, v.1), corner(b, u.1, v.1));
+        let sides = [
+            (arc(b, v.0, low), false),
+            (rule(b, u.1, (v.0, 0.0), (low.1, mid.1)), false),
+            (rule(b, u.1, (0.0, v.1), (mid.1, high.1)), false),
+            (arc(b, v.1, high), true),
+            (rule(b, u.0, (0.0, v.1), (mid.0, high.0)), true),
+            (rule(b, u.0, (v.0, 0.0), (low.0, mid.0)), true),
+        ];
+        let f = b.add_face(surface.clone(), false, std::iter::empty());
+        let specs = sides
+            .into_iter()
+            .map(|((edge, pcurve), reversed)| CoedgeSpec {
+                edge,
+                reversed,
+                pcurve,
+            })
+            .collect();
+        b.add_loop(f, specs);
+        f
+    }
+
+    #[test]
+    fn faces_that_cross_out_of_a_vertex_where_their_surfaces_touch_are_found() {
+        use std::f64::consts::PI;
+        // Half of each of two cylinders of radius 1 whose axes cross at the origin. The surfaces
+        // touch at (0, 1, 0) and (0, -1, 0), vertices of both halves, and the halves pass through
+        // each other along half an ellipse from one to the other, which no edge of either meets.
+        let mut b = Brep::new();
+        let upright = Frame::new(Vec3::ZERO, Vec3::Z, Vec3::X).unwrap();
+        let level = Frame::new(Vec3::ZERO, Vec3::X, Vec3::Y).unwrap();
+        let fa = cylinder_patch(&mut b, upright, (0.5 * PI, 1.5 * PI), (-1.5, 1.5));
+        let fb = cylinder_patch(&mut b, level, (PI, 2.0 * PI), (-1.5, 1.5));
+        b.add_shell(vec![fa, fb]);
+        let vertices = |f: FaceId| -> Vec<VertexId> {
+            let ends = |(_, e): PlacedEdge| [b.edge(e).start, b.edge(e).end];
+            face_edges(&b, f).into_iter().flat_map(ends).collect()
+        };
+        let (va, vb) = (vertices(fa), vertices(fb));
+        let both: HashSet<VertexId> = va.iter().copied().filter(|v| vb.contains(v)).collect();
+        assert_eq!(both.len(), 2);
+        let mut cache = PairCache::default();
+        // No edge of either meets the other, and the step out of a shared vertex is not taken
+        // where the surfaces touch.
+        let boxes = [cache.face_box(&b, fa), cache.face_box(&b, fb)];
+        for (x, y, bound, own) in [(fa, fb, boxes[1], &vb), (fb, fa, boxes[0], &va)] {
+            for (_, e) in face_edges(&b, x) {
+                assert_eq!(edge_meets_face(&b, e, y, &bound, own, &mut cache), None);
+            }
+        }
+        assert_eq!(
+            crossing_from_shared_vertex(&b, (fa, fb), (&va, &vb), &mut cache),
+            None
+        );
+        let Hidden::At(p) = hidden_crossing(&b, (fa, fb), (&va, &vb), &[], &mut cache) else {
+            panic!("the crossing along the ellipse was not found");
+        };
+        assert!((p.x - p.z).abs() < 1e-9 && p.x < -0.5, "{p:?}");
+        let found = crossings(
+            &b,
+            None,
+            false,
+            &mut PairCache::default(),
+            Some(&mut HashSet::new()),
+        );
+        assert_eq!(found.len(), 1);
+        assert!(found[0].through);
+        // What the edges and the shared vertices alone show is nothing.
+        assert!(crossings(&b, None, false, &mut PairCache::default(), None).is_empty());
     }
 
     #[test]
@@ -2741,6 +3160,36 @@ mod tests {
                 "{issues:?}"
             );
         }
+    }
+
+    /// Two balls of radius 5 whose centres are 9.5 apart, each with its poles and its seam turned
+    /// away from the other: they pass through each other along a circle inside both faces, which
+    /// no edge of either reaches.
+    fn two_balls() -> Brep {
+        let ball = |x: f64, seam: f64| {
+            let f = Frame::new(Vec3::new(x, 0.0, 0.0), Vec3::Z, Vec3::Y * seam).unwrap();
+            crate::primitive::sphere(&f, 5.0, "s").unwrap()
+        };
+        let mut b = ball(0.0, 1.0);
+        b.append(&ball(9.5, -1.0));
+        b
+    }
+
+    #[test]
+    fn two_curved_faces_that_cross_along_a_closed_curve_inside_both_are_found() {
+        let b = two_balls();
+        // No edge of either ball meets the other, and they share no vertex.
+        assert!(crossings(&b, None, false, &mut PairCache::default(), None).is_empty());
+        let issues = cut_issues(&b);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(
+            issues[0].starts_with("faces 0 and 1 share no edge but meet at (4.75"),
+            "{issues:?}"
+        );
+        // Balls that only come near each other are left alone.
+        let mut near = crate::primitive::sphere(&at(0.0, 0.0, 0.0), 5.0, "s").unwrap();
+        near.append(&crate::primitive::sphere(&at(10.5, 0.0, 0.0), 5.0, "s").unwrap());
+        assert_eq!(cut_issues(&near), Vec::<String>::new());
     }
 
     #[test]

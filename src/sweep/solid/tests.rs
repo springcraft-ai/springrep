@@ -169,9 +169,38 @@ fn a_ball_turned_about_a_line_adds_a_piece_of_torus() {
     );
 }
 
+// The volume of the ball of radius `r` about (`big`, 0, 0) turned by `angle` about the z axis,
+// `big` less than `r`. At height z the ball is the disc of radius s = √(r² − z²) about (big, 0),
+// and the circle of radius ρ about the axis meets it whole for ρ ≤ s − big, else in an arc
+// 2 acos((ρ² + big² − s²)/(2ρ·big)) wide, which the turn widens by θ up to the whole circle: up to
+// ρ_c, where the arc is 2π − θ, the circle is whole. So the solid is ∫∫ ρ min(arc + θ, 2π) dρ dz.
+fn turned_ball(r: f64, big: f64, angle: f64) -> f64 {
+    let slice = |z: f64| {
+        let s = (r * r - z * z).sqrt();
+        let arc = |rho: f64| {
+            let c = (rho * rho + big * big - s * s) / (2.0 * rho * big);
+            2.0 * c.clamp(-1.0, 1.0).acos()
+        };
+        let c = -(angle / 2.0).cos() * big;
+        let whole = (s - big)
+            .max(0.0)
+            .max(c + (c * c - big * big + s * s).max(0.0).sqrt());
+        let mut widened = |rho: f64| rho * (arc(rho) + angle);
+        // a circle nearer the axis than big − s misses a disc that does not reach it
+        let from = whole.max(big - s);
+        let partial = crate::numeric::integrate(&mut widened, from, s + big, 1e-13);
+        PI * whole * whole + partial
+    };
+    let mut column = |a: f64| slice(r * a.sin()) * r * a.cos();
+    crate::numeric::integrate(&mut column, -PI / 2.0, PI / 2.0, 1e-12)
+}
+
 // The axis passes through the ball, so the circles about it that the ball holds whole stay whole,
-// and the rest each meet it in one arc the turn widens by θ: the same πr²Rθ is added. The axis
-// pierces the sphere where its grazing great circle passes, which the turn holds still.
+// and the rest each meet it in one arc the turn widens by θ, the circles just beyond those to the
+// whole: a little less than πr²Rθ is added. Beyond the axis the ball at the start and the ball at
+// the end pass through each other between the points the axis pierces both, along an arc no edge
+// of either reaches: the two hemispheres sewn to the swept torus as they stand cross there and
+// count that lens twice.
 #[test]
 fn a_ball_turned_about_a_line_through_it_adds_a_piece_of_torus() {
     let (r, big, angle) = (1.0, 0.5, 1.0);
@@ -183,42 +212,23 @@ fn a_ball_turned_about_a_line_through_it_adds_a_piece_of_torus() {
     .unwrap();
     let b = solid(&ball, &about_z(angle), "sw").unwrap();
     assert!(check::check(&b).is_empty());
-    let want = 4.0 / 3.0 * PI * r.powi(3) + angle * PI * r * r * big;
-    assert!(
-        rel(measure::volume(&b), want) < 1e-9,
-        "{} {want}",
-        measure::volume(&b)
-    );
+    let want = turned_ball(r, big, angle);
+    let twice = 4.0 / 3.0 * PI * r.powi(3) + angle * PI * r * r * big;
+    assert!(want < twice - 5e-3, "{want} {twice}");
+    let got = measure::volume(&b);
+    assert!(rel(got, want) < 1e-9, "{got} {want}");
 }
 
-// The ball of radius 2 about (1, 0, 0) turned 120° about the z axis. At height z it is the disc of
-// radius s = √(4 − z²) about (1, 0), and the circle of radius ρ about the axis meets it whole for
-// ρ ≤ s − 1, else in an arc 2 acos((ρ² + 1 − s²)/(2ρ)) wide, which the turn widens by θ up to the
-// whole circle: up to ρ_c, where the arc is 2π − θ, the circle is whole. So the solid is
-// ∫∫ ρ min(arc + θ, 2π) dρ dz. Near the axis the balls at the two ends overlap between the points
-// the axis pierces both, with no edge of either crossing the other.
+// The ball of radius 2 about (1, 0, 0) turned 120° about the z axis. Near the axis the balls at
+// the two ends overlap between the points the axis pierces both, with no edge of either crossing
+// the other.
 #[test]
 fn a_ball_turned_far_about_a_line_through_it_closes_round_the_axis() {
     let angle = 2.0 * PI / 3.0;
     let ball = sphere(&Frame::WORLD.translated(Vec3::X), 2.0, "ball").unwrap();
     let b = solid(&ball, &about_z(angle), "sw").unwrap();
     assert!(check::check(&b).is_empty());
-    let slice = |z: f64| {
-        let s = (4.0 - z * z).sqrt();
-        let arc = |rho: f64| {
-            let c = (rho * rho + 1.0 - s * s) / (2.0 * rho);
-            2.0 * c.clamp(-1.0, 1.0).acos()
-        };
-        let c = -(angle / 2.0).cos();
-        let whole = (s - 1.0).max(0.0).max(c + (c * c - 1.0 + s * s).sqrt());
-        let mut widened = |rho: f64| rho * (arc(rho) + angle);
-        // a circle nearer the axis than 1 − s misses a disc that does not reach it
-        let from = whole.max(1.0 - s);
-        let partial = crate::numeric::integrate(&mut widened, from, s + 1.0, 1e-13);
-        PI * whole * whole + partial
-    };
-    let mut column = |a: f64| slice(2.0 * a.sin()) * 2.0 * a.cos();
-    let want = crate::numeric::integrate(&mut column, -PI / 2.0, PI / 2.0, 1e-12);
+    let want = turned_ball(2.0, 1.0, angle);
     let got = measure::volume(&b);
     assert!(rel(got, want) < 1e-9, "{got} {want}");
 }
