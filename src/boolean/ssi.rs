@@ -919,6 +919,11 @@ fn swept(a: &Surface, b: &Surface, region: &Aabb) -> Option<Ssi> {
 /// side the patch leaves the plane at the slope of the row beside it: along the plane where that
 /// whole row is on the plane too, so the two are tangent there, and at an angle all the way
 /// along where none of that row is. A row beside it partly on the plane is left to the trace.
+///
+/// Where no side's row lies wholly on the plane, unless the side is drawn to a point, the patch
+/// meets the plane only at its corners whose control points are on it: they touch at those
+/// points. A side between two such corners whose middle is still within the tolerance of the
+/// plane, or a patch whose middle is, lies along the plane more than at points, and is traced.
 fn plane_patch(p: &Frame, n: &crate::geom::NurbsSurface) -> Option<Ssi> {
     if n.weights()
         .is_some_and(|w| w.iter().any(|&x| x.is_nan() || x <= 0.0))
@@ -939,6 +944,11 @@ fn plane_patch(p: &Frame, n: &crate::geom::NurbsSurface) -> Option<Ssi> {
     }
     if off.len() == heights.len() {
         return Some(none());
+    }
+    // A control point off the plane by a few tolerances leaves the patch along the plane for a
+    // stretch that the control points on it do not account for.
+    if off.iter().any(|h| h.abs() <= 10.0 * tol::LINEAR) {
+        return None;
     }
     let (nu, nv) = n.counts();
     let (pu, pv) = n.degrees();
@@ -971,6 +981,39 @@ fn plane_patch(p: &Frame, n: &crate::geom::NurbsSurface) -> Option<Ssi> {
         (true, 0, 1, v0),
         (true, nv - 1, nv - 2, v1),
     ];
+    let ctrl = n.control_points();
+    let height = |u: f64, v: f64| (n.eval(u, v) - p.origin).dot(p.z);
+    let point_like = |r: &[usize]| r.iter().all(|&k| ctrl[k].dist(ctrl[r[0]]) <= tol::LINEAR);
+    let curved = |&(across, i, _, _): &(bool, usize, usize, f64)| {
+        whole(&row(across, i)) && !point_like(&row(across, i))
+    };
+    if !sides.iter().any(curved) {
+        let (um, vm) = (0.5 * (u0 + u1), 0.5 * (v0 + v1));
+        let mut lies_along = on(height(um, vm));
+        for (across, i, _, at) in sides {
+            let r = row(across, i);
+            let ends_on = on(heights[r[0]]) && on(heights[r[r.len() - 1]]);
+            let middle = if across {
+                height(um, at)
+            } else {
+                height(at, vm)
+            };
+            lies_along |= ends_on && !point_like(&r) && on(middle);
+        }
+        let mut touch: Vec<Point3> = Vec::new();
+        for k in [0, nv - 1, (nu - 1) * nv, nu * nv - 1] {
+            if on(heights[k]) && !touch.iter().any(|q| q.dist(ctrl[k]) <= tol::LINEAR) {
+                touch.push(ctrl[k]);
+            }
+        }
+        if lies_along || touch.is_empty() {
+            return None;
+        }
+        return Some(Ssi::Curves {
+            curves: Vec::new(),
+            points: touch,
+        });
+    }
     for (across, i, beside, at) in sides {
         let (edge, next) = (row(across, i), row(across, beside));
         if !whole(&edge) {
@@ -985,11 +1028,7 @@ fn plane_patch(p: &Frame, n: &crate::geom::NurbsSurface) -> Option<Ssi> {
             return None;
         };
         // A side drawn to a point is no curve.
-        let pts = n.control_points();
-        if edge
-            .iter()
-            .all(|&k| pts[k].dist(pts[edge[0]]) <= tol::LINEAR)
-        {
+        if point_like(&edge) {
             return None;
         }
         let curve = n.iso_curve(!across, at);
@@ -1448,6 +1487,13 @@ mod tests {
     /// What the plane z = 0 and `s` meet in, and whether that took a trace: the seeds are asked
     /// for only when no closed form decides.
     fn against_level(s: &Surface, plane_first: bool) -> (Vec<SsiCurve>, bool) {
+        let (curves, points, traced) = against_level_at(s, plane_first);
+        assert!(points.is_empty());
+        (curves, traced)
+    }
+
+    /// [`against_level`] with the points the two touch at.
+    fn against_level_at(s: &Surface, plane_first: bool) -> (Vec<SsiCurve>, Vec<Point3>, bool) {
         let level = Surface::Plane(Plane {
             frame: Frame::WORLD,
         });
@@ -1468,8 +1514,56 @@ mod tests {
         let Ssi::Curves { curves, points } = intersect(a, b, &region, &mut seeds).unwrap() else {
             panic!("coincident");
         };
-        assert!(points.is_empty());
-        (curves, traced)
+        (curves, points, traced)
+    }
+
+    /// `s` with the control points numbered `to` moved onto the one numbered `at`.
+    fn drawn_together(s: &Surface, to: &[usize], at: usize) -> Surface {
+        let Surface::Nurbs(n) = s else {
+            panic!("a spline patch");
+        };
+        let mut ctrl = n.control_points().to_vec();
+        for &k in to {
+            ctrl[k] = ctrl[at];
+        }
+        Surface::Nurbs(Box::new(n.with_control_points(ctrl).unwrap()))
+    }
+
+    #[test]
+    fn a_patch_touching_a_plane_at_its_corners_meets_it_in_those_points() {
+        let touches = |s: &Surface, want: &[Vec3]| {
+            for plane_first in [true, false] {
+                let (curves, points, traced) = against_level_at(s, plane_first);
+                assert!(curves.is_empty() && !traced);
+                assert_eq!(points.len(), want.len());
+                assert!(
+                    want.iter()
+                        .all(|w| points.iter().any(|q| q.dist(*w) <= 1e-12))
+                );
+            }
+        };
+        // A blend's corner patch: one side drawn to a point on the plane, the row beside it on
+        // the plane too, so the patch is tangent to the plane at that point alone.
+        let s = patch([[1.0, 0.0, 0.0], [1.2, 0.0, 0.0], [1.0, 0.0, 0.0]]);
+        let s = drawn_together(&s, &[2, 5], 8);
+        touches(&s, &[Vec3::new(2.0, 2.0, 0.0)]);
+        // Tangent at one corner, the control points beside it on the plane: no side lies on it.
+        touches(
+            &patch([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0], [1.0, 1.2, 1.0]]),
+            &[Vec3::ZERO],
+        );
+        // A corner alone on the plane, where the patch comes down to it at a slope, from above
+        // or from below; and two corners, the side between them rising clear of the plane.
+        let poke = [[0.0, 0.3, 0.4], [0.5, 0.4, 0.5], [1.0, 1.2, 1.0]];
+        touches(&patch(poke), &[Vec3::ZERO]);
+        touches(&patch(poke.map(|r| r.map(|z: f64| -z))), &[Vec3::ZERO]);
+        touches(
+            &patch([[0.0, 0.3, 0.0], [0.5, 0.4, 0.5], [1.0, 1.2, 1.0]]),
+            &[Vec3::ZERO, Vec3::new(0.0, 2.0, 0.0)],
+        );
+        // A side drawn to a point that is on the plane, the rest leaving it at a slope.
+        let s = patch([[0.0, 0.0, 0.0], [0.5, 0.4, 0.5], [1.0, 1.2, 1.0]]);
+        touches(&drawn_together(&s, &[1, 2], 0), &[Vec3::ZERO]);
     }
 
     fn transposed(h: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
@@ -1582,18 +1676,16 @@ mod tests {
         // A corner, or a second side, touches the plane beyond the boundary row.
         assert!(traced([[0.0, 0.0, 0.0], [0.5, 0.4, 0.5], [0.0, 1.2, 1.0]]));
         assert!(traced([[0.0, 0.0, 0.0], [0.0, 0.4, 0.5], [0.0, 1.2, 1.0]]));
-        // Only a corner, or an inner control point, is on the plane; or the whole patch is.
-        assert!(traced([[0.0, 0.3, 0.4], [0.5, 0.4, 0.5], [1.0, 1.2, 1.0]]));
+        // Only an inner control point is on the plane; or the whole patch is.
         assert!(traced([[0.3, 0.3, 0.4], [0.5, 0.0, 0.5], [1.0, 1.2, 1.0]]));
         assert!(traced([[0.0; 3]; 3]));
-        // A boundary row that is one point has no curve to meet in.
-        let mut pole = patch([[0.0, 0.0, 0.0], [0.5, 0.4, 0.5], [1.0, 1.2, 1.0]]);
-        if let Surface::Nurbs(n) = &pole {
-            let mut ctrl = n.control_points().to_vec();
-            (ctrl[1], ctrl[2]) = (ctrl[0], ctrl[0]);
-            pole = Surface::Nurbs(Box::new(n.with_control_points(ctrl).unwrap()));
-        }
-        assert!(against_level(&pole, true).1);
+        // Two corners on the plane and the side between them within the tolerance of it all
+        // the way: more than two points of contact, and less than a row on the plane.
+        assert!(traced([
+            [0.0, 1.5e-7, 0.0],
+            [0.5, 0.4, 0.5],
+            [1.0, 1.2, 1.0]
+        ]));
         // A surface of several spans with a boundary row on the plane.
         let knots = vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0];
         let ctrl = (0..16)
