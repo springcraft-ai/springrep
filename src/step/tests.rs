@@ -1776,8 +1776,8 @@ fn rate_on(s: &Surface, curve: &Curve) -> Option<Vec2> {
     super::write::steady_rate(s, curve, (0.3, uv), 0.9)
 }
 
-// Each curve lies within the tolerance of a parameter line of its surface, so a line pcurve read
-// at points along it would pass for it, but its geometry is not that line's.
+// Each curve refused lies close to a parameter line of its surface but strays from it by more
+// than the 0.45 of the tolerance a pcurve keeps to, by its tilt across its size or by its centre.
 #[test]
 fn a_curve_close_to_a_parameter_line_but_not_one_is_not_written_as_a_line() {
     let (lin, ang) = (crate::tol::LINEAR, crate::tol::ANGULAR);
@@ -1792,7 +1792,9 @@ fn a_curve_close_to_a_parameter_line_but_not_one_is_not_written_as_a_line() {
         })
     };
     let up = Vec3::new(0.0, 0.0, 2.0);
-    let tilt = Vec3::new(4.0 * ang, 0.0, 1.0);
+    // In radians: 5e-7 mm across a radius of 5 mm, and 6e-8 mm along the 0.6 mm of a line read.
+    let lean = 1e-7;
+    let tilt = Vec3::new(lean, 0.0, 1.0);
     let aside = Vec3::new(4.0 * lin, 0.0, 2.0);
 
     let rod = Surface::Cylinder(crate::geom::Cylinder {
@@ -1803,6 +1805,15 @@ fn a_curve_close_to_a_parameter_line_but_not_one_is_not_written_as_a_line() {
     assert_eq!(rate_on(&rod, &circle(up, Vec3::Z, 5.0)), along);
     assert_eq!(rate_on(&rod, &circle(up, -Vec3::Z, 5.0)), along.map(|d| -d));
     assert_eq!(rate_on(&rod, &circle(up, tilt, 5.0)), None);
+    // A tilt of the angular tolerance strays 5e-10 mm across this radius and 1e-6 mm across 10 m.
+    let slight = Vec3::new(ang, 0.0, 1.0);
+    assert_eq!(rate_on(&rod, &circle(up, slight, 5.0)), along);
+    let mast = Surface::Cylinder(crate::geom::Cylinder {
+        frame: Frame::WORLD,
+        radius: 1e4,
+    });
+    assert_eq!(rate_on(&mast, &circle(up, Vec3::Z, 1e4)), along);
+    assert_eq!(rate_on(&mast, &circle(up, slight, 1e4)), None);
     assert_eq!(rate_on(&rod, &circle(aside, Vec3::Z, 5.0)), None);
     let foot = Vec3::new(5.0, 0.0, 0.0);
     assert_eq!(
@@ -1813,10 +1824,7 @@ fn a_curve_close_to_a_parameter_line_but_not_one_is_not_written_as_a_line() {
         rate_on(&rod, &line(foot, -Vec3::Z)),
         Some(Vec2::new(0.0, -1.0))
     );
-    assert_eq!(
-        rate_on(&rod, &line(foot, Vec3::new(0.0, 4.0 * ang, 1.0))),
-        None
-    );
+    assert_eq!(rate_on(&rod, &line(foot, Vec3::new(0.0, lean, 1.0))), None);
 
     let cone = Surface::Cone(Cone {
         frame: Frame::WORLD,
@@ -1831,7 +1839,7 @@ fn a_curve_close_to_a_parameter_line_but_not_one_is_not_written_as_a_line() {
         rate_on(&cone, &line(foot, slant)),
         Some(Vec2::new(0.0, 1.0))
     );
-    let off_slant = slant + Vec3::new(0.0, 4.0 * ang, 0.0);
+    let off_slant = slant + Vec3::new(0.0, lean, 0.0);
     assert_eq!(rate_on(&cone, &line(foot, off_slant)), None);
 
     let globe = Surface::Sphere(crate::geom::Sphere {
@@ -1844,7 +1852,7 @@ fn a_curve_close_to_a_parameter_line_but_not_one_is_not_written_as_a_line() {
     let meridian = Frame::new(Vec3::ZERO, -Vec3::Y, Vec3::X).unwrap();
     let great = |frame: Frame| Curve::Circle(Circle { frame, radius: 5.0 });
     assert_eq!(rate_on(&globe, &great(meridian)), Some(Vec2::new(0.0, 1.0)));
-    let leaning = Frame::from_axis(Vec3::ZERO, Vec3::new(0.0, -1.0, 4.0 * ang).unit().unwrap());
+    let leaning = Frame::from_axis(Vec3::ZERO, Vec3::new(0.0, -1.0, lean).unit().unwrap());
     assert_eq!(rate_on(&globe, &great(leaning.unwrap())), None);
     // The meridian itself, on an edge that runs on over the pole.
     let uv = globe.project(great(meridian).eval(0.3));
@@ -1870,20 +1878,17 @@ fn a_curve_close_to_a_parameter_line_but_not_one_is_not_written_as_a_line() {
         rate_on(&ring, &tube(hub, -Vec3::Y)),
         Some(Vec2::new(0.0, 1.0))
     );
-    assert_eq!(
-        rate_on(&ring, &tube(hub, Vec3::new(4.0 * ang, -1.0, 0.0))),
-        None
-    );
+    assert_eq!(rate_on(&ring, &tube(hub, Vec3::new(lean, -1.0, 0.0))), None);
     assert_eq!(
         rate_on(&ring, &tube(hub + Vec3::X * (4.0 * lin), -Vec3::Y)),
         None
     );
 
-    // Two balls whose centres lie a hair off one axis meet in a circle tilted from a latitude of
-    // each by five times the angular tolerance, which stays 2e-9 mm from that latitude.
+    // Two balls whose centres lie two tolerances off one axis meet in a circle that strays from a
+    // latitude of each by about that much.
     let mut small = ball(4.0);
     small.transform(&crate::math::Transform::translation(Vec3::new(
-        3e-9, 0.0, 6.0,
+        2e-7, 0.0, 6.0,
     )));
     let got = pcurve_kinds(&boolean::union(&ball(5.0), &small).unwrap());
     assert_eq!(got, kinds(&[("B_SPLINE_CURVE_WITH_KNOTS", 2), ("LINE", 4)]));

@@ -1648,13 +1648,16 @@ solid never pinches.
   turns the way the plane's parameters do is that conic in them (one turning the other way has no
   conic there with the edge's own parameter). An edge that is a parameter line of its surface by its
   geometry is a line from the coedge's own parameters where it starts: a circle with the axis of a
-  cylinder, a cone, a sphere, a torus or a surface of revolution (its normal along the axis within
-  the angular tolerance, its centre on the axis within the linear one) runs along `u` at one radian
-  a radian; a meridian circle of a sphere or a torus (its plane through the axis, its centre the
-  sphere's or the tube's, its radius theirs) runs along `v`, on a sphere only short of the poles;
-  a line along the rulings of a cylinder, a cone or an extrusion runs along `v`. A curve that only
-  lies near a parameter line is not one. Any other pcurve is a cubic through the coedge's
-  parameter-plane points, with points added where the surface over it strays more than 0.45 of the tolerance from
+  cylinder, a cone, a sphere, a torus or a surface of revolution (its normal along the axis, its
+  centre on it) runs along `u` at one radian a radian; a meridian circle of a sphere or a torus
+  (its plane through the axis, its centre the sphere's or the tube's, its radius theirs) runs along
+  `v`, on a sphere only short of the poles; a line along the rulings of a cylinder, a cone or an
+  extrusion runs along `v`. Each test, the conic on a plane's too, bounds how far the edge can lie
+  from the pcurve's image: the tilt times the radius or the length it acts across, the offsets of
+  the centre and the radius, and the gap at the coedge's start, added together, must come within
+  the 0.45 of the tolerance a fitted pcurve keeps to, so the bound holds at any size of model. A
+  curve that only lies near a parameter line is fitted. Any other pcurve is a cubic through the
+  coedge's parameter-plane points, with points added where the surface over it strays more than 0.45 of the tolerance from
   the edge at any of seven points a span, which keeps it within half the tolerance between them (a
   part's file grows by up to 7%). A reader given no pcurves must project each traced edge onto its
   face itself. A ruled surface between conics, whose rational rails do not run at the angle's rate,

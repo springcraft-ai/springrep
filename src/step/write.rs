@@ -662,13 +662,14 @@ fn step_scale(s: &Surface) -> Option<Vec2> {
 /// The most samples a fitted pcurve takes before the writer leaves the coedge without one.
 const MAX_PCURVE_SAMPLES: usize = 4096;
 
-fn same_direction(a: Vec3, b: Vec3) -> bool {
-    a.cross(b).norm() <= tol::ANGULAR
-}
+/// The furthest the surface over a pcurve may lie from its edge's curve where the writer reads or
+/// bounds it.
+const PCURVE_FIT: f64 = 0.45 * tol::LINEAR;
 
 /// The circle or ellipse `curve`, where it lies in the plane `pl` and turns the way the plane's
-/// parameters do, in those parameters. One turning the other way has no conic there with its own
-/// parameter.
+/// parameters do, in those parameters: its tilt from the plane across its reach, its centre's
+/// height off the plane and the shortening of its axis laid in the plane come to no more than
+/// [`PCURVE_FIT`] together. One turning the other way has no conic there with its own parameter.
 fn conic_on_plane(pl: &Plane, curve: &Curve) -> Option<Curve2> {
     let (frame, major, minor) = match curve {
         Curve::Circle(c) => (&c.frame, c.radius, c.radius),
@@ -676,12 +677,14 @@ fn conic_on_plane(pl: &Plane, curve: &Curve) -> Option<Curve2> {
         _ => return None,
     };
     let off = frame.origin - pl.frame.origin;
-    let lies = same_direction(frame.z, pl.frame.z) && off.dot(pl.frame.z).abs() <= tol::LINEAR;
-    if !lies || frame.z.dot(pl.frame.z) <= 0.0 {
-        return None;
-    }
     let local = |d: Vec3| Vec2::new(d.dot(pl.frame.x), d.dot(pl.frame.y));
     let x = local(frame.x);
+    let reach = major.max(minor);
+    let tilt = frame.z.cross(pl.frame.z).norm();
+    let stray = (tilt + (1.0 - x.norm()).abs()) * reach + off.dot(pl.frame.z).abs();
+    if frame.z.dot(pl.frame.z) <= 0.0 || stray.is_nan() || stray > PCURVE_FIT {
+        return None;
+    }
     Some(Curve2::Conic {
         center: local(off),
         x: x * (1.0 / x.norm()),
@@ -693,7 +696,10 @@ fn conic_on_plane(pl: &Plane, curve: &Curve) -> Option<Curve2> {
 /// The rate `d(u, v)/dt` of `curve` on `s` where its geometry makes it a parameter line of `s`: a
 /// circle about the axis of a surface swept about one, a meridian circle of a sphere or a torus, a
 /// line along the rulings of a cylinder, a cone or an extrusion. `uv` is a coedge's parameters at
-/// the point of the curve at `t`, and `far` the parameter its edge runs to from there.
+/// the point of the curve at `t`, and `far` the parameter its edge runs to from there. Each is
+/// taken where the furthest the curve can lie from that parameter line is within [`PCURVE_FIT`]:
+/// its gap from the surface at `uv`, its tilt across its radius or its length, and what its centre
+/// and its radius are off by, added together.
 pub(super) fn steady_rate(
     s: &Surface,
     curve: &Curve,
@@ -701,9 +707,7 @@ pub(super) fn steady_rate(
     far: f64,
 ) -> Option<Vec2> {
     let (p, _, sv) = s.d1(uv.x, uv.y);
-    if p.dist(curve.eval(t)) > tol::LINEAR {
-        return None;
-    }
+    let gap = p.dist(curve.eval(t));
     let circle = match curve {
         Curve::Line(l) => {
             // The parameter lines along `v` of these three are straight, each of one direction.
@@ -711,7 +715,8 @@ pub(super) fn steady_rate(
                 s,
                 Surface::Cylinder(_) | Surface::Cone(_) | Surface::Extrusion(_)
             );
-            let along = ruled && same_direction(l.dir, sv);
+            let stray = gap + l.dir.cross(sv).norm() * (far - t).abs();
+            let along = ruled && stray <= PCURVE_FIT;
             return along.then(|| Vec2::new(0.0, l.dir.dot(sv).signum()));
         }
         Curve::Circle(c) => c,
@@ -728,7 +733,7 @@ pub(super) fn steady_rate(
     let normal = circle.frame.z;
     let off = circle.frame.origin - origin;
     let out = off - axis * off.dot(axis);
-    if same_direction(normal, axis) && out.norm() <= tol::LINEAR {
+    if gap + normal.cross(axis).norm() * circle.radius + out.norm() <= PCURVE_FIT {
         return Some(Vec2::new(normal.dot(axis).signum(), 0.0));
     }
     // A meridian's plane holds the axis, and its centre is the centre of the sphere or of the
@@ -738,13 +743,17 @@ pub(super) fn steady_rate(
         Surface::Torus(x) => (&x.frame, x.major, x.minor, false),
         _ => return None,
     };
-    let centred = off.dot(axis).abs() <= tol::LINEAR
-        && (out.norm() - major).abs() <= tol::LINEAR
-        && (ball || normal.dot(out).abs() <= tol::ANGULAR * out.norm());
-    let meridian = centred
-        && normal.dot(axis).abs() <= tol::ANGULAR
-        && (circle.radius - minor).abs() <= tol::LINEAR;
-    if !meridian {
+    let (rise, reach) = (off.dot(axis), out.norm());
+    let centre = rise.hypot(reach - major);
+    let turned = if ball {
+        0.0
+    } else {
+        normal.dot(out).abs() / reach
+    };
+    let tilt = normal.dot(axis).abs() + turned;
+    let stray = gap + tilt * circle.radius + centre + (circle.radius - minor).abs();
+    // A torus's tube centred on its axis has no radial direction: the ratio is not a number.
+    if stray.is_nan() || stray > PCURVE_FIT {
         return None;
     }
     let rate = normal.dot(frame.radial(uv.x).cross(axis)).signum();
@@ -870,7 +879,7 @@ pub(super) fn pcurve(b: &Brep, c: CoedgeId) -> Option<Curve2> {
         let mut next = Vec::with_capacity(2 * ts.len());
         for w in ts.windows(2) {
             next.push(w[0]);
-            if (1..8).any(|i| off(w[0] + (w[1] - w[0]) * i as f64 / 8.0) > 0.45 * tol::LINEAR) {
+            if (1..8).any(|i| off(w[0] + (w[1] - w[0]) * i as f64 / 8.0) > PCURVE_FIT) {
                 next.push(0.5 * (w[0] + w[1]));
             }
         }
