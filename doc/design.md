@@ -1646,12 +1646,15 @@ solid never pinches.
   height along the STEP axis, turned with it). An affine pcurve is a line, a spline one its own
   spline, and on a plane a line or spline edge maps onto it exactly, and a circle or an ellipse that
   turns the way the plane's parameters do is that conic in them (one turning the other way has no
-  conic there with the edge's own parameter). An edge whose parameters run at a steady rate along
-  it is the line they follow: a circle about its surface's axis, a meridian, a ruling of a cylinder,
-  a cone or an extrusion. The writer takes the line through the coedge's parameters at its two ends
-  and keeps it where the surface over it stays within 0.45 of the tolerance of the edge at
-  sixty-five points along it. Any other pcurve is a cubic through the coedge's parameter-plane
-  points, with points added where the surface over it strays more than 0.45 of the tolerance from
+  conic there with the edge's own parameter). An edge that is a parameter line of its surface by its
+  geometry is a line from the coedge's own parameters where it starts: a circle with the axis of a
+  cylinder, a cone, a sphere, a torus or a surface of revolution (its normal along the axis within
+  the angular tolerance, its centre on the axis within the linear one) runs along `u` at one radian
+  a radian; a meridian circle of a sphere or a torus (its plane through the axis, its centre the
+  sphere's or the tube's, its radius theirs) runs along `v`, on a sphere only short of the poles;
+  a line along the rulings of a cylinder, a cone or an extrusion runs along `v`. A curve that only
+  lies near a parameter line is not one. Any other pcurve is a cubic through the coedge's
+  parameter-plane points, with points added where the surface over it strays more than 0.45 of the tolerance from
   the edge at any of seven points a span, which keeps it within half the tolerance between them (a
   part's file grows by up to 7%). A reader given no pcurves must project each traced edge onto its
   face itself. A ruled surface between conics, whose rational rails do not run at the angle's rate,

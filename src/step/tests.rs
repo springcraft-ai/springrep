@@ -1769,6 +1769,126 @@ fn circles_and_lines_a_boolean_leaves_on_surfaces_of_revolution_are_exact_pcurve
     }
 }
 
+/// The rate [`super::write::steady_rate`] reads for `curve` on `s` from its point at `t = 0.3`, to
+/// which the surface's own projection gives the parameters.
+fn rate_on(s: &Surface, curve: &Curve) -> Option<Vec2> {
+    let uv = s.project(curve.eval(0.3));
+    super::write::steady_rate(s, curve, (0.3, uv), 0.9)
+}
+
+// Each curve lies within the tolerance of a parameter line of its surface, so a line pcurve read
+// at points along it would pass for it, but its geometry is not that line's.
+#[test]
+fn a_curve_close_to_a_parameter_line_but_not_one_is_not_written_as_a_line() {
+    let (lin, ang) = (crate::tol::LINEAR, crate::tol::ANGULAR);
+    let circle = |origin: Vec3, z: Vec3, radius: f64| {
+        let frame = Frame::from_axis(origin, z.unit().unwrap()).unwrap();
+        Curve::Circle(Circle { frame, radius })
+    };
+    let line = |origin: Vec3, dir: Vec3| {
+        Curve::Line(Line {
+            origin,
+            dir: dir.unit().unwrap(),
+        })
+    };
+    let up = Vec3::new(0.0, 0.0, 2.0);
+    let tilt = Vec3::new(4.0 * ang, 0.0, 1.0);
+    let aside = Vec3::new(4.0 * lin, 0.0, 2.0);
+
+    let rod = Surface::Cylinder(crate::geom::Cylinder {
+        frame: Frame::WORLD,
+        radius: 5.0,
+    });
+    let along = Some(Vec2::new(1.0, 0.0));
+    assert_eq!(rate_on(&rod, &circle(up, Vec3::Z, 5.0)), along);
+    assert_eq!(rate_on(&rod, &circle(up, -Vec3::Z, 5.0)), along.map(|d| -d));
+    assert_eq!(rate_on(&rod, &circle(up, tilt, 5.0)), None);
+    assert_eq!(rate_on(&rod, &circle(aside, Vec3::Z, 5.0)), None);
+    let foot = Vec3::new(5.0, 0.0, 0.0);
+    assert_eq!(
+        rate_on(&rod, &line(foot, Vec3::Z)),
+        Some(Vec2::new(0.0, 1.0))
+    );
+    assert_eq!(
+        rate_on(&rod, &line(foot, -Vec3::Z)),
+        Some(Vec2::new(0.0, -1.0))
+    );
+    assert_eq!(
+        rate_on(&rod, &line(foot, Vec3::new(0.0, 4.0 * ang, 1.0))),
+        None
+    );
+
+    let cone = Surface::Cone(Cone {
+        frame: Frame::WORLD,
+        radius: 5.0,
+        half_angle: 0.5,
+    });
+    let slant = Vec3::new(0.5f64.sin(), 0.0, 0.5f64.cos());
+    let rim = 5.0 + 2.0 * 0.5f64.tan();
+    assert_eq!(rate_on(&cone, &circle(up, Vec3::Z, rim)), along);
+    assert_eq!(rate_on(&cone, &circle(up, tilt, rim)), None);
+    assert_eq!(
+        rate_on(&cone, &line(foot, slant)),
+        Some(Vec2::new(0.0, 1.0))
+    );
+    let off_slant = slant + Vec3::new(0.0, 4.0 * ang, 0.0);
+    assert_eq!(rate_on(&cone, &line(foot, off_slant)), None);
+
+    let globe = Surface::Sphere(crate::geom::Sphere {
+        frame: Frame::WORLD,
+        radius: 5.0,
+    });
+    assert_eq!(rate_on(&globe, &circle(up, Vec3::Z, 21f64.sqrt())), along);
+    assert_eq!(rate_on(&globe, &circle(up, tilt, 21f64.sqrt())), None);
+    assert_eq!(rate_on(&globe, &circle(aside, Vec3::Z, 21f64.sqrt())), None);
+    let meridian = Frame::new(Vec3::ZERO, -Vec3::Y, Vec3::X).unwrap();
+    let great = |frame: Frame| Curve::Circle(Circle { frame, radius: 5.0 });
+    assert_eq!(rate_on(&globe, &great(meridian)), Some(Vec2::new(0.0, 1.0)));
+    let leaning = Frame::from_axis(Vec3::ZERO, Vec3::new(0.0, -1.0, 4.0 * ang).unit().unwrap());
+    assert_eq!(rate_on(&globe, &great(leaning.unwrap())), None);
+    // The meridian itself, on an edge that runs on over the pole.
+    let uv = globe.project(great(meridian).eval(0.3));
+    let over = super::write::steady_rate(&globe, &great(meridian), (0.3, uv), 2.0);
+    assert_eq!(over, None);
+
+    let ring = Surface::Torus(crate::geom::Torus {
+        frame: Frame::WORLD,
+        major: 8.0,
+        minor: 3.0,
+    });
+    assert_eq!(
+        rate_on(&ring, &circle(up, Vec3::Z, 8.0 + 5f64.sqrt())),
+        along
+    );
+    assert_eq!(rate_on(&ring, &circle(up, tilt, 8.0 + 5f64.sqrt())), None);
+    let tube = |origin: Vec3, z: Vec3| {
+        let frame = Frame::new(origin, z.unit().unwrap(), Vec3::X).unwrap();
+        Curve::Circle(Circle { frame, radius: 3.0 })
+    };
+    let hub = Vec3::new(8.0, 0.0, 0.0);
+    assert_eq!(
+        rate_on(&ring, &tube(hub, -Vec3::Y)),
+        Some(Vec2::new(0.0, 1.0))
+    );
+    assert_eq!(
+        rate_on(&ring, &tube(hub, Vec3::new(4.0 * ang, -1.0, 0.0))),
+        None
+    );
+    assert_eq!(
+        rate_on(&ring, &tube(hub + Vec3::X * (4.0 * lin), -Vec3::Y)),
+        None
+    );
+
+    // Two balls whose centres lie a hair off one axis meet in a circle tilted from a latitude of
+    // each by five times the angular tolerance, which stays 2e-9 mm from that latitude.
+    let mut small = ball(4.0);
+    small.transform(&crate::math::Transform::translation(Vec3::new(
+        3e-9, 0.0, 6.0,
+    )));
+    let got = pcurve_kinds(&boolean::union(&ball(5.0), &small).unwrap());
+    assert_eq!(got, kinds(&[("B_SPLINE_CURVE_WITH_KNOTS", 2), ("LINE", 4)]));
+}
+
 #[test]
 fn an_ellipse_on_a_plane_is_written_as_an_ellipse_pcurve() {
     let rod = extrude(&Profile::circle(Vec2::ZERO, 4.0), &Frame::WORLD, 9.0, "rod").unwrap();

@@ -662,51 +662,105 @@ fn step_scale(s: &Surface) -> Option<Vec2> {
 /// The most samples a fitted pcurve takes before the writer leaves the coedge without one.
 const MAX_PCURVE_SAMPLES: usize = 4096;
 
-/// The furthest the surface over a pcurve may lie from its edge's curve where the writer reads it.
-const PCURVE_FIT: f64 = 0.45 * tol::LINEAR;
-
-/// Whether `s` over `uv(t)` stays within [`PCURVE_FIT`] of `curve` at seven points in each eighth
-/// of `range`, and at its ends.
-fn follows(s: &Surface, curve: &Curve, (t0, t1): (f64, f64), uv: impl Fn(f64) -> Vec2) -> bool {
-    (0..=64).all(|i| {
-        let t = t0 + (t1 - t0) * i as f64 / 64.0;
-        let q = uv(t);
-        s.eval(q.x, q.y).dist(curve.eval(t)) <= PCURVE_FIT
-    })
+fn same_direction(a: Vec3, b: Vec3) -> bool {
+    a.cross(b).norm() <= tol::ANGULAR
 }
 
-/// The circle or ellipse `curve`, lying in the plane `pl` of `s` and turning the way its parameters
-/// do, in those parameters. One turning the other way has no conic there with its own parameter.
-fn conic_on_plane(pl: &Plane, s: &Surface, curve: &Curve, range: (f64, f64)) -> Option<Curve2> {
+/// The circle or ellipse `curve`, where it lies in the plane `pl` and turns the way the plane's
+/// parameters do, in those parameters. One turning the other way has no conic there with its own
+/// parameter.
+fn conic_on_plane(pl: &Plane, curve: &Curve) -> Option<Curve2> {
     let (frame, major, minor) = match curve {
         Curve::Circle(c) => (&c.frame, c.radius, c.radius),
         Curve::Ellipse(e) => (&e.frame, e.major, e.minor),
         _ => return None,
     };
-    if frame.z.dot(pl.frame.z) <= 0.0 {
+    let off = frame.origin - pl.frame.origin;
+    let lies = same_direction(frame.z, pl.frame.z) && off.dot(pl.frame.z).abs() <= tol::LINEAR;
+    if !lies || frame.z.dot(pl.frame.z) <= 0.0 {
         return None;
     }
     let local = |d: Vec3| Vec2::new(d.dot(pl.frame.x), d.dot(pl.frame.y));
-    let center = local(frame.origin - pl.frame.origin);
     let x = local(frame.x);
-    let x = x * (1.0 / x.norm());
-    let at = |t: f64| center + x * (major * t.cos()) + x.perp() * (minor * t.sin());
-    follows(s, curve, range, at).then_some(Curve2::Conic {
-        center,
-        x,
+    Some(Curve2::Conic {
+        center: local(off),
+        x: x * (1.0 / x.norm()),
         major,
         minor,
     })
 }
 
+/// The rate `d(u, v)/dt` of `curve` on `s` where its geometry makes it a parameter line of `s`: a
+/// circle about the axis of a surface swept about one, a meridian circle of a sphere or a torus, a
+/// line along the rulings of a cylinder, a cone or an extrusion. `uv` is a coedge's parameters at
+/// the point of the curve at `t`, and `far` the parameter its edge runs to from there.
+pub(super) fn steady_rate(
+    s: &Surface,
+    curve: &Curve,
+    (t, uv): (f64, Vec2),
+    far: f64,
+) -> Option<Vec2> {
+    let (p, _, sv) = s.d1(uv.x, uv.y);
+    if p.dist(curve.eval(t)) > tol::LINEAR {
+        return None;
+    }
+    let circle = match curve {
+        Curve::Line(l) => {
+            // The parameter lines along `v` of these three are straight, each of one direction.
+            let ruled = matches!(
+                s,
+                Surface::Cylinder(_) | Surface::Cone(_) | Surface::Extrusion(_)
+            );
+            let along = ruled && same_direction(l.dir, sv);
+            return along.then(|| Vec2::new(0.0, l.dir.dot(sv).signum()));
+        }
+        Curve::Circle(c) => c,
+        _ => return None,
+    };
+    let (origin, axis) = match s {
+        Surface::Cylinder(x) => (x.frame.origin, x.frame.z),
+        Surface::Cone(x) => (x.frame.origin, x.frame.z),
+        Surface::Sphere(x) => (x.frame.origin, x.frame.z),
+        Surface::Torus(x) => (x.frame.origin, x.frame.z),
+        Surface::Revolution(x) => (x.origin, x.axis),
+        _ => return None,
+    };
+    let normal = circle.frame.z;
+    let off = circle.frame.origin - origin;
+    let out = off - axis * off.dot(axis);
+    if same_direction(normal, axis) && out.norm() <= tol::LINEAR {
+        return Some(Vec2::new(normal.dot(axis).signum(), 0.0));
+    }
+    // A meridian's plane holds the axis, and its centre is the centre of the sphere or of the
+    // torus's tube there.
+    let (frame, major, minor, ball) = match s {
+        Surface::Sphere(x) => (&x.frame, 0.0, x.radius, true),
+        Surface::Torus(x) => (&x.frame, x.major, x.minor, false),
+        _ => return None,
+    };
+    let centred = off.dot(axis).abs() <= tol::LINEAR
+        && (out.norm() - major).abs() <= tol::LINEAR
+        && (ball || normal.dot(out).abs() <= tol::ANGULAR * out.norm());
+    let meridian = centred
+        && normal.dot(axis).abs() <= tol::ANGULAR
+        && (circle.radius - minor).abs() <= tol::LINEAR;
+    if !meridian {
+        return None;
+    }
+    let rate = normal.dot(frame.radial(uv.x).cross(axis)).signum();
+    // Past a pole a sphere's meridian runs on at another `u`.
+    let crosses = ball && (uv.y + rate * (far - t)).abs() > FRAC_PI_2 + tol::param(minor);
+    (!crosses).then_some(Vec2::new(0.0, rate))
+}
+
 /// Coedge `c`'s pcurve in its face's STEP surface parameters. An affine pcurve is a line and a
 /// spline one its spline; on a plane a line or a spline is mapped exactly onto it, and a circle or
-/// an ellipse turning the plane's way is that conic. A curve whose parameters run at a steady rate
-/// along it is the line they follow: a circle about its surface's axis or a meridian of it, a
-/// ruling of a cylinder, a cone or an extrusion, a parameter line of any surface. Any other is a
-/// cubic through the coedge's own parameter-plane points, at enough of them that the surface over
-/// it stays within half the tolerance of the edge's curve. `None` where no such pcurve is found, or
-/// the surface's STEP form has other parameters than the kernel's that no scale maps.
+/// an ellipse turning the plane's way is that conic. A curve that is a parameter line of its
+/// surface by its geometry ([`steady_rate`]) is the line it follows, from the coedge's own
+/// parameters where it starts. Any other is a cubic through the coedge's own parameter-plane
+/// points, at enough of them that the surface over it stays within half the tolerance of the
+/// edge's curve. `None` where no such pcurve is found, or the surface's STEP form has other
+/// parameters than the kernel's that no scale maps.
 pub(super) fn pcurve(b: &Brep, c: CoedgeId) -> Option<Curve2> {
     let co = b.coedge(c);
     let edge = b.edge(co.edge);
@@ -767,7 +821,7 @@ pub(super) fn pcurve(b: &Brep, c: CoedgeId) -> Option<Curve2> {
                 ));
             }
             Curve::Circle(_) | Curve::Ellipse(_) => {
-                if let Some(c2) = conic_on_plane(pl, s, curve, edge.range) {
+                if let Some(c2) = conic_on_plane(pl, curve) {
                     return Some(c2);
                 }
             }
@@ -786,18 +840,21 @@ pub(super) fn pcurve(b: &Brep, c: CoedgeId) -> Option<Curve2> {
         }
         uvs
     };
-    let mut ts: Vec<f64> = (0..=8).map(|i| t0 + (t1 - t0) * i as f64 / 8.0).collect();
-    if !matches!(s, Surface::Plane(_)) {
-        let uvs = sampled(&ts);
-        let dir = (uvs[8] - uvs[0]) * (1.0 / (t1 - t0));
-        let origin = uvs[0] - dir * t0;
-        if dir.norm() > 0.0 && follows(s, curve, edge.range, |t| origin + dir * t) {
+    if matches!(curve, Curve::Line(_) | Curve::Circle(_)) && !matches!(s, Surface::Plane(_)) {
+        let ends = sampled(&[t0, t1]);
+        let (from, far) = if co.reversed {
+            ((t1, ends[1]), t0)
+        } else {
+            ((t0, ends[0]), t1)
+        };
+        if let Some(dir) = steady_rate(s, curve, from, far) {
             return Some(Curve2::Line {
-                origin: scaled(origin),
+                origin: scaled(from.1 - dir * from.0),
                 dir: scaled(dir),
             });
         }
     }
+    let mut ts: Vec<f64> = (0..=8).map(|i| t0 + (t1 - t0) * i as f64 / 8.0).collect();
     while ts.len() <= MAX_PCURVE_SAMPLES {
         let uvs = sampled(&ts);
         let pts: Vec<Vec3> = uvs.iter().map(|uv| Vec3::new(uv.x, uv.y, 0.0)).collect();
@@ -813,7 +870,7 @@ pub(super) fn pcurve(b: &Brep, c: CoedgeId) -> Option<Curve2> {
         let mut next = Vec::with_capacity(2 * ts.len());
         for w in ts.windows(2) {
             next.push(w[0]);
-            if (1..8).any(|i| off(w[0] + (w[1] - w[0]) * i as f64 / 8.0) > PCURVE_FIT) {
+            if (1..8).any(|i| off(w[0] + (w[1] - w[0]) * i as f64 / 8.0) > 0.45 * tol::LINEAR) {
                 next.push(0.5 * (w[0] + w[1]));
             }
         }
