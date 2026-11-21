@@ -3,10 +3,7 @@
 use std::f64::consts::{PI, TAU};
 
 use super::{BSpline, IntersectionCurve, NurbsCurve};
-use crate::{
-    math::{Aabb, Frame, Point3, Transform, Vec3},
-    numeric,
-};
+use crate::math::{Aabb, Frame, Point3, Transform, Vec3};
 
 /// `origin + t·dir`, with `dir` a unit vector, so `t` is arc length.
 #[derive(Clone, Debug, PartialEq)]
@@ -67,6 +64,7 @@ impl Curve {
         match self {
             Curve::BSpline(b) => b.eval(t),
             Curve::Intersection(c) => c.approx.eval(t),
+            Curve::Nurbs(c) => c.eval(t),
             _ => self.d2(t).0,
         }
     }
@@ -79,6 +77,7 @@ impl Curve {
         match self {
             Curve::BSpline(b) => spline(b),
             Curve::Intersection(c) => spline(&c.approx),
+            Curve::Nurbs(c) => c.d1(t),
             _ => {
                 let (p, d, _) = self.d2(t);
                 (p, d)
@@ -375,6 +374,9 @@ impl Curve {
         if let Some(s) = self.spline() {
             return s.bbox(t0, t1);
         }
+        if let Curve::Nurbs(c) = self {
+            return c.bbox(t0, t1);
+        }
         let mut bb = Aabb::EMPTY;
         bb.add(self.eval(t0));
         bb.add(self.eval(t1));
@@ -405,24 +407,9 @@ impl Curve {
             Curve::Ellipse(e) => {
                 in_range((e.minor * dir.dot(e.frame.y)).atan2(e.major * dir.dot(e.frame.x)))
             }
-            _ if self.spline().is_some() => {
-                self.spline().expect("checked above").extremes(dir, t0, t1)
-            }
-            _ => {
-                let mut cuts = vec![t0];
-                cuts.extend(self.breakpoints(t0, t1));
-                cuts.push(t1);
-                let mut out = Vec::new();
-                for w in cuts.windows(2) {
-                    let mut f = |t: f64| self.d1(t).1.dot(dir);
-                    for r in numeric::roots(&mut f, w[0], w[1], 12) {
-                        if r > t0 && r < t1 {
-                            out.push(r);
-                        }
-                    }
-                }
-                out
-            }
+            Curve::BSpline(b) => b.extremes(dir, t0, t1),
+            Curve::Intersection(c) => c.approx.extremes(dir, t0, t1),
+            Curve::Nurbs(c) => c.extremes(dir, t0, t1),
         }
     }
 }
@@ -594,6 +581,117 @@ mod tests {
         Curve::Nurbs(Box::new(
             NurbsCurve::new(3, knots, ctrl, Some(weights)).unwrap(),
         ))
+    }
+
+    /// A curve's extremes along `dir` with nothing kept: the roots of its rate along `dir` over
+    /// each stretch between breakpoints.
+    fn extremes_afresh(c: &Curve, dir: Vec3, t0: f64, t1: f64) -> Vec<f64> {
+        let mut cuts = vec![t0];
+        cuts.extend(c.breakpoints(t0, t1));
+        cuts.push(t1);
+        let mut out = Vec::new();
+        for w in cuts.windows(2) {
+            let mut f = |t: f64| c.d1(t).1.dot(dir);
+            out.extend(crate::numeric::roots(&mut f, w[0], w[1], 12));
+        }
+        out.retain(|&r| r > t0 && r < t1);
+        out
+    }
+
+    fn bbox_afresh(c: &Curve, t0: f64, t1: f64) -> Aabb {
+        let mut bb = Aabb::EMPTY;
+        bb.add(c.eval(t0));
+        bb.add(c.eval(t1));
+        for ax in [Vec3::X, Vec3::Y, Vec3::Z] {
+            for t in extremes_afresh(c, ax, t0, t1) {
+                bb.add(c.eval(t));
+            }
+        }
+        bb
+    }
+
+    fn same_box(a: &Aabb, b: &Aabb) -> bool {
+        (0..3).all(|k| {
+            a.min[k].to_bits() == b.min[k].to_bits() && a.max[k].to_bits() == b.max[k].to_bits()
+        })
+    }
+
+    #[test]
+    fn a_rational_splines_kept_extremes_give_the_box_worked_out_afresh() {
+        for closed in [false, true] {
+            let c = coil(closed);
+            let (a, b) = c.domain();
+            // Whole spans, stretches that end inside a span or lie within one, and, on the closed
+            // coil, stretches a period on and across the join.
+            let mut ranges = vec![
+                (a, b),
+                (a + 3.0, a + 11.0),
+                (a + 3.3, b - 10.1),
+                (a + 20.2, a + 20.7),
+                (a + 5.0, a + 5.5),
+            ];
+            if closed {
+                ranges.extend([(b - 4.0, b + 3.0), (b + 2.0, b + 9.0), (a - 6.5, a + 1.0)]);
+            }
+            // Twice over: the second pass reads every whole span from what the first kept.
+            for pass in 0..2 {
+                for &(t0, t1) in &ranges {
+                    let bb = c.bbox(t0, t1);
+                    assert!(same_box(&bb, &bbox_afresh(&c, t0, t1)), "{pass} {t0} {t1}");
+                    for dir in [Vec3::X, Vec3::Y, Vec3::Z, Vec3::new(0.6, 0.0, 0.8)] {
+                        let got = c.extremes(dir, t0, t1);
+                        let want = extremes_afresh(&c, dir, t0, t1);
+                        assert_eq!(got.len(), want.len());
+                        assert!(
+                            got.iter()
+                                .zip(&want)
+                                .all(|(x, y)| x.to_bits() == y.to_bits())
+                        );
+                    }
+                }
+            }
+            // The coil turns three times, so its box over all of it is the circle's.
+            let bb = c.bbox(a, b);
+            assert!(bb.min.x < -4.9 && bb.max.x > 4.9 && bb.min.y < -4.9 && bb.max.y > 4.9);
+        }
+    }
+
+    #[test]
+    fn a_moved_or_copied_spline_has_its_own_box() {
+        let c = coil(false);
+        let (a, b) = c.domain();
+        let here = c.bbox(a, b);
+        let parts = |c: &Curve| match c {
+            Curve::Nurbs(n) => (
+                n.knots().to_vec(),
+                n.control_points().to_vec(),
+                n.weights().map(<[f64]>::to_vec),
+            ),
+            _ => unreachable!(),
+        };
+        let built = |(knots, ctrl, weights)| {
+            Curve::Nurbs(Box::new(NurbsCurve::new(3, knots, ctrl, weights).unwrap()))
+        };
+        // Moved after its extremes were kept: the box is the moved curve's, as built from its
+        // parts with nothing kept.
+        let t = Transform::rotation(Vec3::new(7.0, -2.0, 1.0), Vec3::new(1.0, 2.0, 2.0), 0.8);
+        let moved = c.transformed(&t);
+        let rebuilt = built(parts(&moved));
+        let there = moved.bbox(a, b);
+        assert!(same_box(&there, &rebuilt.bbox(a, b)));
+        assert!(same_box(&there, &bbox_afresh(&rebuilt, a, b)));
+        assert!(!same_box(&there, &here));
+        for i in 0..=600 {
+            let p = moved.eval(a + (b - a) * i as f64 / 600.0);
+            assert!((0..3).all(|k| there.min[k] <= p[k] && p[k] <= there.max[k]));
+        }
+        // A copy reads the same box, and a curve with one control point elsewhere does not.
+        assert!(same_box(&c.clone().bbox(a, b), &here));
+        let (knots, mut ctrl, weights) = parts(&c);
+        ctrl[20] = ctrl[20] * 3.0;
+        let bulged = built((knots, ctrl, weights));
+        assert!(same_box(&bulged.bbox(a, b), &bbox_afresh(&bulged, a, b)));
+        assert!(bulged.bbox(a, b).diagonal() > here.diagonal() + 1.0);
     }
 
     #[test]

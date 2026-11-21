@@ -469,9 +469,73 @@ pub(crate) fn roots(f: &mut impl FnMut(f64) -> f64, a: f64, b: f64, n: usize) ->
     out
 }
 
+/// [`roots`] of each of `f`'s three values, from one pass of samples: each value's roots are the
+/// ones `roots` finds for it alone.
+pub(crate) fn roots_each(
+    f: &mut impl FnMut(f64) -> [f64; 3],
+    a: f64,
+    b: f64,
+    n: usize,
+) -> [Vec<f64>; 3] {
+    let samples: Vec<(f64, [f64; 3])> = (0..=n)
+        .map(|i| {
+            let t = if i == 0 {
+                a
+            } else {
+                a + (b - a) * i as f64 / n as f64
+            };
+            (t, f(t))
+        })
+        .collect();
+    std::array::from_fn(|k| {
+        let mut out = Vec::new();
+        let (mut prev_t, mut prev) = (a, samples[0].1[k]);
+        if prev == 0.0 {
+            out.push(a);
+        }
+        for &(t, v) in &samples[1..] {
+            let v = v[k];
+            if v == 0.0 {
+                out.push(t);
+            } else if prev != 0.0 && (v < 0.0) != (prev < 0.0) {
+                out.push(bisect(&mut |x| f(x)[k], prev_t, t));
+            }
+            prev_t = t;
+            prev = v;
+        }
+        out
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn roots_of_three_values_at_once_are_those_of_each_alone() {
+        // Sign changes, a touch at a sample, a root at each end, and no root at all.
+        let fs: [fn(f64) -> f64; 3] = [
+            |t| (3.0 * t).sin() * (t - 0.25),
+            |t| (t - 0.5) * (t - 0.5) * (t + 1.0),
+            |t| t * t + 1.0,
+        ];
+        for (a, b) in [
+            (0.0, 3.0),
+            (-1.0, 0.5),
+            (0.25, 2.0943951023931953),
+            (0.1, 0.2),
+        ] {
+            let each = roots_each(&mut |t| fs.map(|f| f(t)), a, b, 12);
+            for k in 0..3 {
+                let alone = roots(&mut |t| fs[k](t), a, b, 12);
+                assert_eq!(each[k].len(), alone.len());
+                for (x, y) in each[k].iter().zip(&alone) {
+                    assert_eq!(x.to_bits(), y.to_bits());
+                }
+            }
+        }
+        assert!(!roots_each(&mut |t| fs.map(|f| f(t)), 0.0, 3.0, 12)[0].is_empty());
+    }
 
     /// A banded system that needs row swaps (zero diagonal, larger values below) solves to what
     /// the dense solver finds.
