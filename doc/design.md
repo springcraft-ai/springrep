@@ -1644,8 +1644,13 @@ solid never pinches.
   loop, which lie inside one piece's face. Each edge is a `SURFACE_CURVE` (a seam a `SEAM_CURVE`)
   with its pcurve on every face that uses it, in the surface's STEP parameters (a cone's `v` is its
   height along the STEP axis, turned with it). An affine pcurve is a line, a spline one its own
-  spline, and on a plane a line or
-  spline edge maps onto it exactly; any other pcurve is a cubic through the coedge's parameter-plane
+  spline, and on a plane a line or spline edge maps onto it exactly, and a circle or an ellipse that
+  turns the way the plane's parameters do is that conic in them (one turning the other way has no
+  conic there with the edge's own parameter). An edge whose parameters run at a steady rate along
+  it is the line they follow: a circle about its surface's axis, a meridian, a ruling of a cylinder,
+  a cone or an extrusion. The writer takes the line through the coedge's parameters at its two ends
+  and keeps it where the surface over it stays within 0.45 of the tolerance of the edge at
+  sixty-five points along it. Any other pcurve is a cubic through the coedge's parameter-plane
   points, with points added where the surface over it strays more than 0.45 of the tolerance from
   the edge at any of seven points a span, which keeps it within half the tolerance between them (a
   part's file grows by up to 7%). A reader given no pcurves must project each traced edge onto its

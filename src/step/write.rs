@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use super::{WRITER, part21::encode_string};
 use crate::{
     Error, Result,
-    geom::{BSpline, Cone, Curve, Ruled, Surface},
+    geom::{BSpline, Cone, Curve, Plane, Ruled, Surface},
     math::{Frame, Point3, Transform, Vec2, Vec3},
     numeric::solve_dense,
     tol,
@@ -339,6 +339,25 @@ impl Writer {
                 let v = self.add(format!("VECTOR('',#{d},{})", real(len)));
                 Ok(self.add(format!("LINE('',#{p},#{v})")))
             }
+            Curve2::Conic {
+                center,
+                x,
+                major,
+                minor,
+            } => {
+                let p = self.point_2d(*center)?;
+                let d = self.add(format!("DIRECTION('',{})", reals([x.x, x.y])));
+                let a = self.add(format!("AXIS2_PLACEMENT_2D('',#{p},#{d})"));
+                Ok(if major == minor {
+                    self.add(format!("CIRCLE('',#{a},{})", real(*major)))
+                } else {
+                    self.add(format!(
+                        "ELLIPSE('',#{a},{},{})",
+                        real(*major),
+                        real(*minor)
+                    ))
+                })
+            }
             Curve2::Spline {
                 degree,
                 knots,
@@ -601,6 +620,14 @@ fn slit_mate(b: &Brep, c: CoedgeId) -> Option<CoedgeId> {
 pub(super) enum Curve2 {
     /// `origin + t·dir`.
     Line { origin: Vec2, dir: Vec2 },
+    /// `center + major·cos t·x + minor·sin t·y`, `y` a quarter turn anticlockwise from the unit
+    /// `x`: a circle where the two radii are equal.
+    Conic {
+        center: Vec2,
+        x: Vec2,
+        major: f64,
+        minor: f64,
+    },
     Spline {
         degree: usize,
         knots: Vec<f64>,
@@ -635,11 +662,51 @@ fn step_scale(s: &Surface) -> Option<Vec2> {
 /// The most samples a fitted pcurve takes before the writer leaves the coedge without one.
 const MAX_PCURVE_SAMPLES: usize = 4096;
 
+/// The furthest the surface over a pcurve may lie from its edge's curve where the writer reads it.
+const PCURVE_FIT: f64 = 0.45 * tol::LINEAR;
+
+/// Whether `s` over `uv(t)` stays within [`PCURVE_FIT`] of `curve` at seven points in each eighth
+/// of `range`, and at its ends.
+fn follows(s: &Surface, curve: &Curve, (t0, t1): (f64, f64), uv: impl Fn(f64) -> Vec2) -> bool {
+    (0..=64).all(|i| {
+        let t = t0 + (t1 - t0) * i as f64 / 64.0;
+        let q = uv(t);
+        s.eval(q.x, q.y).dist(curve.eval(t)) <= PCURVE_FIT
+    })
+}
+
+/// The circle or ellipse `curve`, lying in the plane `pl` of `s` and turning the way its parameters
+/// do, in those parameters. One turning the other way has no conic there with its own parameter.
+fn conic_on_plane(pl: &Plane, s: &Surface, curve: &Curve, range: (f64, f64)) -> Option<Curve2> {
+    let (frame, major, minor) = match curve {
+        Curve::Circle(c) => (&c.frame, c.radius, c.radius),
+        Curve::Ellipse(e) => (&e.frame, e.major, e.minor),
+        _ => return None,
+    };
+    if frame.z.dot(pl.frame.z) <= 0.0 {
+        return None;
+    }
+    let local = |d: Vec3| Vec2::new(d.dot(pl.frame.x), d.dot(pl.frame.y));
+    let center = local(frame.origin - pl.frame.origin);
+    let x = local(frame.x);
+    let x = x * (1.0 / x.norm());
+    let at = |t: f64| center + x * (major * t.cos()) + x.perp() * (minor * t.sin());
+    follows(s, curve, range, at).then_some(Curve2::Conic {
+        center,
+        x,
+        major,
+        minor,
+    })
+}
+
 /// Coedge `c`'s pcurve in its face's STEP surface parameters. An affine pcurve is a line and a
-/// spline one its spline, and on a plane a line or a spline is mapped exactly onto it; any other is
-/// a cubic through the coedge's own parameter-plane points, at enough of them that the surface over it stays within half the
-/// tolerance of the edge's curve. `None` where no such pcurve is found, or the surface's STEP form
-/// has other parameters than the kernel's that no scale maps.
+/// spline one its spline; on a plane a line or a spline is mapped exactly onto it, and a circle or
+/// an ellipse turning the plane's way is that conic. A curve whose parameters run at a steady rate
+/// along it is the line they follow: a circle about its surface's axis or a meridian of it, a
+/// ruling of a cylinder, a cone or an extrusion, a parameter line of any surface. Any other is a
+/// cubic through the coedge's own parameter-plane points, at enough of them that the surface over
+/// it stays within half the tolerance of the edge's curve. `None` where no such pcurve is found, or
+/// the surface's STEP form has other parameters than the kernel's that no scale maps.
 pub(super) fn pcurve(b: &Brep, c: CoedgeId) -> Option<Curve2> {
     let co = b.coedge(c);
     let edge = b.edge(co.edge);
@@ -699,14 +766,17 @@ pub(super) fn pcurve(b: &Brep, c: CoedgeId) -> Option<Curve2> {
                     n.weights(),
                 ));
             }
-            _ => {}
+            Curve::Circle(_) | Curve::Ellipse(_) => {
+                if let Some(c2) = conic_on_plane(pl, s, curve, edge.range) {
+                    return Some(c2);
+                }
+            }
         }
     }
     let (t0, t1) = edge.range;
-    let mut ts: Vec<f64> = (0..=8).map(|i| t0 + (t1 - t0) * i as f64 / 8.0).collect();
-    while ts.len() <= MAX_PCURVE_SAMPLES {
-        // Sampled the way the coedge runs, so periodic parameters continue from its own start.
-        let mut run = ts.clone();
+    // Sampled the way the coedge runs, so periodic parameters continue from its own start.
+    let sampled = |ts: &[f64]| {
+        let mut run = ts.to_vec();
         if co.reversed {
             run.reverse();
         }
@@ -714,6 +784,22 @@ pub(super) fn pcurve(b: &Brep, c: CoedgeId) -> Option<Curve2> {
         if co.reversed {
             uvs.reverse();
         }
+        uvs
+    };
+    let mut ts: Vec<f64> = (0..=8).map(|i| t0 + (t1 - t0) * i as f64 / 8.0).collect();
+    if !matches!(s, Surface::Plane(_)) {
+        let uvs = sampled(&ts);
+        let dir = (uvs[8] - uvs[0]) * (1.0 / (t1 - t0));
+        let origin = uvs[0] - dir * t0;
+        if dir.norm() > 0.0 && follows(s, curve, edge.range, |t| origin + dir * t) {
+            return Some(Curve2::Line {
+                origin: scaled(origin),
+                dir: scaled(dir),
+            });
+        }
+    }
+    while ts.len() <= MAX_PCURVE_SAMPLES {
+        let uvs = sampled(&ts);
         let pts: Vec<Vec3> = uvs.iter().map(|uv| Vec3::new(uv.x, uv.y, 0.0)).collect();
         let fit = BSpline::interpolate_at(&pts, &ts).ok()?;
         let off = |t: f64| {
@@ -727,7 +813,7 @@ pub(super) fn pcurve(b: &Brep, c: CoedgeId) -> Option<Curve2> {
         let mut next = Vec::with_capacity(2 * ts.len());
         for w in ts.windows(2) {
             next.push(w[0]);
-            if (1..8).any(|i| off(w[0] + (w[1] - w[0]) * i as f64 / 8.0) > 0.45 * tol::LINEAR) {
+            if (1..8).any(|i| off(w[0] + (w[1] - w[0]) * i as f64 / 8.0) > PCURVE_FIT) {
                 next.push(0.5 * (w[0] + w[1]));
             }
         }
@@ -748,6 +834,7 @@ pub(super) fn pcurve(b: &Brep, c: CoedgeId) -> Option<Curve2> {
     }
     None
 }
+
 /// The two rails of a ruled surface as B-splines with one knot vector and one set of weights, on
 /// `u ∈ [0, 1]`, so the B-spline surface between them is the ruled surface itself. That holds for
 /// two polynomial curves, and for two conics over equal angles; other pairs have no such form.
