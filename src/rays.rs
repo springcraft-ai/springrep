@@ -9,6 +9,7 @@
 //! surface without crossing it.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::{
     boolean::{
@@ -21,7 +22,7 @@ use crate::{
     geom::{Curve, Line},
     math::{Aabb, Point3, Vec3},
     mesh::{
-        self, MeshOptions,
+        self,
         bvh::{Bvh, segment_triangle},
     },
     tol,
@@ -41,22 +42,6 @@ pub struct Hit {
     pub on_edge: bool,
 }
 
-/// The meshes tried, finest first: the mesher gives up on a very fine chord over a large part.
-const MESHES: [MeshOptions; 3] = [
-    MeshOptions {
-        linear: 0.01,
-        angular: 0.2,
-    },
-    MeshOptions {
-        linear: 0.05,
-        angular: 0.5,
-    },
-    MeshOptions {
-        linear: 0.2,
-        angular: 0.8,
-    },
-];
-
 /// How far past the ends of its range a crossing may lie and still count, and how near the
 /// surface a ray stays over a stretch it only grazes.
 const ON: f64 = 0.01 * tol::LINEAR;
@@ -74,31 +59,25 @@ pub enum Side {
 /// trimmed domain on its surface.
 pub struct Rays<'a> {
     b: &'a Brep,
+    seeds: Arc<Seeds>,
+    domains: Vec<Domain>,
+}
+
+/// Where a ray's search starts: the arena's seed mesh, triangle by triangle.
+#[derive(Debug)]
+pub(crate) struct Seeds {
     tris: Vec<(FaceId, [Point3; 3])>,
     tree: Bvh,
     deflection: f64,
-    domains: Vec<Domain>,
     /// The mesh's box: the arena lies within the deflection of it.
     reach: Aabb,
 }
 
-impl<'a> Rays<'a> {
-    pub fn new(b: &'a Brep) -> Result<Rays<'a>> {
-        let mut err = None;
-        let mut found = None;
-        for opt in MESHES.iter().map(|o| mesh::seeding(o, b)) {
-            match mesh::tessellate(b, &opt) {
-                Ok(m) => {
-                    found = Some((m, opt));
-                    break;
-                }
-                Err(e) => err = Some(e),
-            }
-        }
-        let Some((m, opt)) = found else {
-            return Err(err.expect("a mesh was tried"));
-        };
-        let tree = Bvh::new(&m);
+impl Seeds {
+    fn new(b: &Brep) -> Result<Arc<Seeds>> {
+        let seed = mesh::seed_mesh(b)?;
+        let m = &seed.mesh;
+        let tree = Bvh::new(m);
         let mut face_of = vec![None; m.triangles.len()];
         for (f, range) in &m.faces {
             for k in range.clone() {
@@ -119,13 +98,21 @@ impl<'a> Rays<'a> {
         for &q in &m.positions {
             reach.add(q);
         }
-        Ok(Rays {
-            b,
+        Ok(Arc::new(Seeds {
             tris,
             tree,
-            deflection: opt.linear,
-            domains: b.face_ids().map(|f| face_domain(b, f)).collect(),
+            deflection: seed.options.linear,
             reach,
+        }))
+    }
+}
+
+impl<'a> Rays<'a> {
+    pub fn new(b: &'a Brep) -> Result<Rays<'a>> {
+        Ok(Rays {
+            b,
+            seeds: b.arena().rays.get_or_init(|| Seeds::new(b)).clone()?,
+            domains: b.face_ids().map(|f| face_domain(b, f)).collect(),
         })
     }
 
@@ -134,10 +121,11 @@ impl<'a> Rays<'a> {
     /// grazes a face or starts on one does not say, and the next direction is tried. `None` where
     /// none says: the point is on the boundary.
     pub fn holds(&self, p: Point3) -> Option<bool> {
-        if self.tris.is_empty() {
+        if self.seeds.tris.is_empty() {
             return Some(false);
         }
-        let far = self.reach.min.dist(p).max(self.reach.max.dist(p)) + self.reach.diagonal() + 1.0;
+        let reach = &self.seeds.reach;
+        let far = reach.min.dist(p).max(reach.max.dist(p)) + reach.diagonal() + 1.0;
         DIRECTIONS.iter().find_map(|d| {
             let d = Vec3::from_array(*d).unit()?;
             let hits = self.crossings(p, d, (0.0, far));
@@ -177,14 +165,14 @@ impl<'a> Rays<'a> {
     /// with the face's exact surface, by the intersection the booleans use. A chord across a
     /// curved face shallower than the mesh resolves is two crossings, as any other chord is.
     fn crossings(&self, o: Point3, d: Vec3, (t0, t1): (f64, f64)) -> Vec<Hit> {
-        let pad = 2.0 * self.deflection;
+        let pad = 2.0 * self.seeds.deflection;
         let (s0, s1) = (t0 - pad, t1 + pad);
         let mut near = Vec::new();
-        self.tree.along(o, d, (s0, s1), pad, &mut near);
+        self.seeds.tree.along(o, d, (s0, s1), pad, &mut near);
         let (a, z) = (o + d * s0, o + d * s1);
         let mut stretches: BTreeMap<FaceId, Vec<(f64, f64)>> = BTreeMap::new();
         for &k in &near {
-            let (f, tri) = &self.tris[k];
+            let (f, tri) = &self.seeds.tris[k];
             if segment_triangle(a, z, tri).0 > pad {
                 continue;
             }

@@ -313,6 +313,7 @@ impl Brep {
     /// reflection reverses its sense about the face; a face's natural normal follows its new
     /// surface, so it is turned over where that surface keeps its parameters.
     fn mirror(&mut self, r: &[[f64; 3]; 3]) {
+        self.changed();
         // Where a loop turns round, each coedge starts at its old end.
         let ends: Vec<Vec2> = (0..self.coedges.len())
             .map(|i| {
@@ -376,6 +377,7 @@ impl Brep {
 
     /// Scales the arena by `s` about the origin.
     fn scale(&mut self, s: f64) {
+        self.changed();
         for v in &mut self.vertices {
             v.point = v.point * s;
         }

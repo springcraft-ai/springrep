@@ -8,13 +8,18 @@
 //! point lies outside its face, the face's minimum is on its boundary, which its edges' pieces
 //! cover. Whether a point lies on its face, and whether one solid holds another, are asked of the
 //! exact faces, as the booleans ask them: the meshes only seed the search. Solids that share
-//! material are at distance zero, and a corner of one clearly inside the other says so at once.
+//! material are at distance zero: a vertex of one, or the middle of an edge, clearly inside the
+//! other says so before either is meshed, and a corner of one's mesh clearly inside the other
+//! before the search.
 
+use std::cell::OnceCell;
 use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock};
 
 use crate::{
     boolean::{
         classify,
+        csi::signed_distance,
         domain::{Domain, Where},
         face_domain,
     },
@@ -22,7 +27,7 @@ use crate::{
     geom::{Curve, Surface},
     math::{Aabb, Point3, Vec3},
     mesh::{
-        self, MeshOptions,
+        self,
         bvh::{Bvh, on_segment, on_triangle, segment_triangle, segments},
     },
     tol,
@@ -131,38 +136,47 @@ impl Piece {
     }
 }
 
-/// One side, expanded: its vertices, its mesh pieces, and its solids' meshes.
-struct Side<'a> {
+/// What a selection names, expanded: a face with its edges, an edge with its vertices.
+struct Extent<'a> {
     b: &'a Brep,
+    faces: Vec<FaceId>,
+    edges: Vec<EdgeId>,
     vertices: Vec<VertexId>,
-    pieces: Vec<Piece>,
     /// The faces of the selected solids, for whether a point lies inside one.
     solid_faces: Vec<FaceId>,
+    /// The arena's own memo of the selection's mesh pieces, where the selection is every solid of
+    /// the arena or every face.
+    kept: Option<&'a OnceLock<Result<Arc<Meshed>>>>,
+}
+
+/// A side's solids' exact faces, each with its box widened by the tolerance: worked out when a
+/// point is first asked about, and kept for one distance.
+type Domains = OnceCell<Vec<(Domain, Aabb)>>;
+
+/// A selection's mesh pieces, and the hierarchy of their boxes.
+#[derive(Debug)]
+pub(crate) struct Meshed {
+    pieces: Vec<Piece>,
+    /// Over each piece's box, in the pieces' order.
+    tree: Bvh,
+    bbox: Aabb,
     deflection: f64,
 }
 
-/// The meshes tried, finest first: the mesher gives up on a very fine chord over a large part.
-const MESHES: [MeshOptions; 3] = [
-    MeshOptions {
-        linear: 0.01,
-        angular: 0.2,
-    },
-    MeshOptions {
-        linear: 0.05,
-        angular: 0.5,
-    },
-    MeshOptions {
-        linear: 0.2,
-        angular: 0.8,
-    },
-];
+/// One side: what it names, and its mesh.
+struct Side<'a> {
+    on: Extent<'a>,
+    mesh: Arc<Meshed>,
+}
 
-impl<'a> Side<'a> {
-    fn new(b: &'a Brep, sel: &Selection) -> Result<Side<'a>> {
+impl<'a> Extent<'a> {
+    fn new(b: &'a Brep, sel: &Selection) -> Extent<'a> {
+        let mut solid_faces: Vec<FaceId> =
+            sel.solids.iter().flat_map(|&s| b.solid_faces(s)).collect();
+        solid_faces.sort();
+        solid_faces.dedup();
         let mut faces = sel.faces.clone();
-        for &s in &sel.solids {
-            faces.extend(b.solid_faces(s));
-        }
+        faces.extend(&solid_faces);
         faces.sort();
         faces.dedup();
         let mut edges = sel.edges.clone();
@@ -180,70 +194,157 @@ impl<'a> Side<'a> {
         vertices.sort();
         vertices.dedup();
 
-        let mut err = None;
-        let mut found = None;
-        for opt in MESHES.iter().map(|o| mesh::seeding(o, b)) {
-            match mesh::tessellate(b, &opt) {
-                Ok(m) => {
-                    found = Some((m, opt));
-                    break;
-                }
-                Err(e) => err = Some(e),
-            }
-        }
-        let Some((m, opt)) = found else {
-            return Err(err.expect("a mesh was tried"));
+        let mut solids = sel.solids.clone();
+        solids.sort();
+        solids.dedup();
+        let bare = sel.edges.is_empty() && sel.vertices.is_empty();
+        let kept = if bare && sel.faces.is_empty() && b.solid_ids().eq(solids.iter().copied()) {
+            Some(&b.arena().solids)
+        } else if bare && sel.solids.is_empty() && b.face_ids().eq(faces.iter().copied()) {
+            Some(&b.arena().faces)
+        } else {
+            None
         };
-        let tri = |t: &[u32; 3]| t.map(|i| m.positions[i as usize]);
-        let wanted: BTreeMap<FaceId, ()> = faces.iter().map(|&f| (f, ())).collect();
-        let solid_faces: BTreeMap<FaceId, ()> = sel
-            .solids
+        Extent {
+            b,
+            faces,
+            edges,
+            vertices,
+            solid_faces,
+            kept,
+        }
+    }
+
+    /// The exact faces of this side's solids.
+    fn domains<'d>(&self, kept: &'d Domains) -> Vec<(&'d Domain, Aabb)> {
+        let pad = Vec3::new(tol::LINEAR, tol::LINEAR, tol::LINEAR);
+        let build = || {
+            let padded = |f: FaceId| {
+                let bb = crate::measure::face_box(self.b, f);
+                Aabb {
+                    min: bb.min - pad,
+                    max: bb.max + pad,
+                }
+            };
+            self.solid_faces
+                .iter()
+                .map(|&f| (face_domain(self.b, f), padded(f)))
+                .collect()
+        };
+        kept.get_or_init(build)
             .iter()
-            .flat_map(|&s| b.solid_faces(s))
-            .map(|f| (f, ()))
-            .collect();
+            .map(|(d, bb)| (d, *bb))
+            .collect()
+    }
+
+    /// Face `f`'s exact domain, where it is a face of this side's solids and theirs are worked out.
+    fn domain<'d>(&self, kept: &'d Domains, f: FaceId) -> Option<&'d Domain> {
+        let i = self.solid_faces.binary_search(&f).ok()?;
+        Some(&kept.get()?[i].0)
+    }
+
+    /// A vertex of `other`, or the middle of one of its edges, that one of this side's solids
+    /// holds, farther than the tolerance from the surface of every face of the solids whose box
+    /// reaches it: a point of `other` inside this side, so the two share it. A few of those in
+    /// the solids' box are asked; where none is held, `None`. Neither side is meshed for it.
+    fn holds_point(&self, other: &Extent, kept: &Domains) -> Option<Point3> {
+        if self.solid_faces.is_empty() {
+            return None;
+        }
+        let mut bb = Aabb::EMPTY;
+        for &f in &self.solid_faces {
+            bb.union(&crate::measure::face_box(self.b, f));
+        }
+        let within = |bb: &Aabb, p: Point3| (0..3).all(|k| p[k] >= bb.min[k] && p[k] <= bb.max[k]);
+        let ends = other.vertices.iter().map(|&v| other.b.vertex(v).point);
+        let mids = other.edges.iter().filter_map(|&e| {
+            let e = other.b.edge(e);
+            let c = e.curve.as_ref()?;
+            Some(c.eval(0.5 * (e.range.0 + e.range.1)))
+        });
+        let inside: Vec<Point3> = ends.chain(mids).filter(|&p| within(&bb, p)).collect();
+        if inside.is_empty() {
+            return None;
+        }
+        let faces = self.domains(kept);
+        let n = inside.len();
+        let tries = n.min(HELD_TRIES);
+        (0..tries).map(|k| inside[k * n / tries]).find(|&p| {
+            let clear = |(d, bb): &(&Domain, Aabb)| {
+                !within(bb, p) || signed_distance(&d.surface, p).abs() > tol::LINEAR
+            };
+            faces.iter().all(clear) && classify::contains(&faces, p) == Some(true)
+        })
+    }
+}
+
+impl Meshed {
+    fn new(on: &Extent) -> Result<Meshed> {
+        let b = on.b;
+        let seed = mesh::seed_mesh(b)?;
+        let (m, opt) = (&seed.mesh, &seed.options);
+        let tri = |t: &[u32; 3]| t.map(|i| m.positions[i as usize]);
         let mut pieces = Vec::new();
         for (f, range) in &m.faces {
-            for t in &m.triangles[range.clone()] {
-                if wanted.contains_key(f) {
-                    pieces.push(Piece::Tri(*f, tri(t)));
-                }
+            if on.faces.binary_search(f).is_ok() {
+                pieces.extend(
+                    m.triangles[range.clone()]
+                        .iter()
+                        .map(|t| Piece::Tri(*f, tri(t))),
+                );
             }
         }
-        for &e in &edges {
+        for &e in &on.edges {
             let edge = b.edge(e);
             let Some(c) = &edge.curve else { continue };
             let (t0, t1) = edge.range;
-            let ts = mesh::edge_params(c, t0, t1, &opt);
+            let ts = mesh::edge_params(c, t0, t1, opt);
             for w in ts.windows(2) {
                 pieces.push(Piece::Seg(e, [c.eval(w[0]), c.eval(w[1])]));
             }
         }
-        for &v in &vertices {
+        for &v in &on.vertices {
             pieces.push(Piece::Pt(v, b.vertex(v).point));
         }
-        Ok(Side {
-            b,
-            vertices,
+        let boxes: Vec<Aabb> = pieces.iter().map(Piece::bbox).collect();
+        let mut bbox = Aabb::EMPTY;
+        boxes.iter().for_each(|bb| bbox.union(bb));
+        Ok(Meshed {
             pieces,
-            solid_faces: solid_faces.into_keys().collect(),
+            tree: Bvh::of_boxes(boxes),
+            bbox,
             deflection: opt.linear,
         })
+    }
+}
+
+impl<'a> Side<'a> {
+    fn new(b: &'a Brep, sel: &Selection) -> Result<Side<'a>> {
+        Side::meshed(Extent::new(b, sel))
+    }
+
+    fn meshed(on: Extent<'a>) -> Result<Side<'a>> {
+        let build = || Meshed::new(&on).map(Arc::new);
+        let mesh = match on.kept {
+            Some(kept) => kept.get_or_init(build).clone()?,
+            None => build()?,
+        };
+        Ok(Side { on, mesh })
     }
 
     /// The exact geometry an entity lies on.
     fn geo(&self, e: Entity) -> Geo<'a> {
         match e {
-            Entity::Face(f) => Geo::Surface(&self.b.face(f).surface),
+            Entity::Face(f) => Geo::Surface(&self.on.b.face(f).surface),
             Entity::Edge(id) => {
-                let edge = self.b.edge(id);
+                let edge = self.on.b.edge(id);
                 let (t0, t1) = edge.range;
                 match &edge.curve {
                     Some(c) => Geo::Curve(c, t0.min(t1), t0.max(t1)),
-                    None => Geo::Point(self.b.vertex(edge.start).point),
+                    None => Geo::Point(self.on.b.vertex(edge.start).point),
                 }
             }
-            Entity::Vertex(v) => Geo::Point(self.b.vertex(v).point),
+            Entity::Vertex(v) => Geo::Point(self.on.b.vertex(v).point),
         }
     }
 }
@@ -255,80 +356,52 @@ impl Side<'_> {
     /// on the exact faces: a corner within the mesh's deflection of this side's boundary falls
     /// either side of the mesh, as a dowel a hair smaller than its hole does all round. The point,
     /// in both, where it holds.
-    fn holds(&self, inner: &Side) -> Option<Point3> {
-        if self.solid_faces.is_empty() {
+    fn holds(&self, inner: &Side, kept: &Domains) -> Option<Point3> {
+        if self.on.solid_faces.is_empty() {
             return None;
         }
         // Only a solid whose box holds the other's can hold it.
-        let boxed = |ps: &[Piece]| {
-            let mut bb = Aabb::EMPTY;
-            ps.iter().for_each(|p| bb.union(&p.bbox()));
-            bb
-        };
-        let (outer, within) = (boxed(&self.pieces), boxed(&inner.pieces));
-        let pad = self.deflection + inner.deflection;
+        let (outer, within) = (self.mesh.bbox, inner.mesh.bbox);
+        let pad = self.mesh.deflection + inner.mesh.deflection;
         if (0..3).any(|k| within.min[k] < outer.min[k] - pad || within.max[k] > outer.max[k] + pad)
         {
             return None;
         }
-        let faces = self.solid_domains();
-        let faces: Vec<(&Domain, Aabb)> = faces.iter().map(|(d, bb)| (d, *bb)).collect();
+        let faces = self.on.domains(kept);
         // A corner no ray decides lies on this side's boundary within rounding: the next is asked.
-        corners(&inner.pieces)
+        corners(&inner.mesh.pieces)
             .take(16)
             .find_map(|p| classify::contains(&faces, p).map(|inside| inside.then_some(p)))
             .flatten()
     }
 
     /// A corner of `other`'s mesh that one of this side's solids holds, farther from this side's
-    /// mesh, whose hierarchy is `tree`, than the mesh can lie from the faces: inside by more than
+    /// mesh than the mesh can lie from the faces: inside by more than
     /// the tolerance, where the classifier is exact, so the two share material there. A few
     /// corners spread over those in this side's box are asked; where none is held, `None`.
-    fn holds_corner(&self, other: &Side, tree: &Bvh) -> Option<Point3> {
-        if self.solid_faces.is_empty() {
+    fn holds_corner(&self, other: &Side, kept: &Domains) -> Option<Point3> {
+        if self.on.solid_faces.is_empty() {
             return None;
         }
-        let mut bb = Aabb::EMPTY;
-        self.pieces.iter().for_each(|p| bb.union(&p.bbox()));
-        let pad = self.deflection;
+        let (bb, pad) = (self.mesh.bbox, self.mesh.deflection);
         let boxed = |p: Point3| (0..3).all(|k| p[k] >= bb.min[k] - pad && p[k] <= bb.max[k] + pad);
-        let inside: Vec<Point3> = corners(&other.pieces).filter(|&p| boxed(p)).collect();
+        let inside: Vec<Point3> = corners(&other.mesh.pieces).filter(|&p| boxed(p)).collect();
         if inside.is_empty() {
             return None;
         }
-        let clear = 2.0 * self.deflection + tol::LINEAR;
+        let clear = 2.0 * self.mesh.deflection + tol::LINEAR;
         let mut hits = Vec::new();
         let mut is_clear = |p: Point3| {
-            tree.within(&Aabb { min: p, max: p }, clear, &mut hits);
-            hits.iter().all(|&i| gap(p, &self.pieces[i]) > clear)
+            self.mesh
+                .tree
+                .within(&Aabb { min: p, max: p }, clear, &mut hits);
+            hits.iter().all(|&i| gap(p, &self.mesh.pieces[i]) > clear)
         };
-        let mut faces = None;
         let n = inside.len();
         let tries = n.min(HELD_TRIES);
-        (0..tries).map(|k| inside[k * n / tries]).find(|&p| {
-            if !is_clear(p) {
-                return false;
-            }
-            let faces = faces.get_or_insert_with(|| self.solid_domains());
-            let faces: Vec<(&Domain, Aabb)> = faces.iter().map(|(d, bb)| (d, *bb)).collect();
-            classify::contains(&faces, p) == Some(true)
-        })
-    }
-
-    /// The exact faces of this side's solids, each with its box widened by the tolerance.
-    fn solid_domains(&self) -> Vec<(Domain, Aabb)> {
-        let pad = Vec3::new(tol::LINEAR, tol::LINEAR, tol::LINEAR);
-        self.solid_faces
-            .iter()
-            .map(|&f| {
-                let bb = crate::measure::face_box(self.b, f);
-                let padded = Aabb {
-                    min: bb.min - pad,
-                    max: bb.max + pad,
-                };
-                (face_domain(self.b, f), padded)
-            })
-            .collect()
+        (0..tries)
+            .map(|k| inside[k * n / tries])
+            .find(|&p| is_clear(p) && classify::contains(&self.on.domains(kept), p) == Some(true))
     }
 }
 
@@ -623,7 +696,24 @@ const SEEDS_PER_PAIR: usize = 32;
 
 /// The closest distance between selection `sa` of `a` and `sb` of `b`, and a point of each at it.
 pub fn closest(a: &Brep, sa: &Selection, b: &Brep, sb: &Selection) -> Result<Closest> {
-    between(&Side::new(a, sa)?, &Side::new(b, sb)?)
+    let (on_a, on_b) = (Extent::new(a, sa), Extent::new(b, sb));
+    let (kept_a, kept_b) = (Domains::new(), Domains::new());
+    // Solids that share a point are no distance apart, whatever else of them lies where.
+    let held = on_b
+        .holds_point(&on_a, &kept_b)
+        .or_else(|| on_a.holds_point(&on_b, &kept_a));
+    if let Some(p) = held {
+        return Ok(Closest {
+            distance: 0.0,
+            on_a: p,
+            on_b: p,
+        });
+    }
+    between(
+        &Side::meshed(on_a)?,
+        &Side::meshed(on_b)?,
+        [&kept_a, &kept_b],
+    )
 }
 
 /// An arena prepared for asking which of its points is nearest a point: its faces, edges and
@@ -663,36 +753,39 @@ impl<'a> Nearest<'a> {
     pub fn to(&self, p: Point3) -> Result<Closest> {
         let mut point = Brep::new();
         let v = point.add_vertex(p);
-        between(&Side::new(&point, &Selection::vertex(v))?, &self.side)
+        let side = Side::new(&point, &Selection::vertex(v))?;
+        between(&side, &self.side, [&Domains::new(), &Domains::new()])
     }
 }
 
-/// [`closest`] between two sides already expanded.
-fn between(side_a: &Side, side_b: &Side) -> Result<Closest> {
-    let (a, b) = (side_a.b, side_b.b);
-    let (pa, pb) = (&side_a.pieces, &side_b.pieces);
+/// [`closest`] between two sides already expanded and meshed, each with its solids' faces.
+fn between(side_a: &Side, side_b: &Side, [kept_a, kept_b]: [&Domains; 2]) -> Result<Closest> {
+    let (a, b) = (side_a.on.b, side_b.on.b);
+    let (pa, pb) = (&side_a.mesh.pieces, &side_b.mesh.pieces);
     if pa.is_empty() || pb.is_empty() {
         return Err(crate::Error::InvalidInput(
             "a distance needs something on each side".into(),
         ));
     }
-    let tree = Bvh::of_boxes(pb.iter().map(Piece::bbox).collect());
-    let boxes: Vec<Aabb> = pa.iter().map(Piece::bbox).collect();
-    let tree_a = Bvh::of_boxes(boxes.clone());
+    let (tree_a, tree) = (&side_a.mesh.tree, &side_b.mesh.tree);
+    let boxes = tree_a.boxes();
 
     // The closest pair of pieces.
-    let best = tree_a.least(&tree, |i, j| piece_distance(&pa[i], &pb[j]).0);
-    let margin = 2.0 * (side_a.deflection + side_b.deflection) + tol::LINEAR;
+    let best = tree_a.least(tree, |i, j| piece_distance(&pa[i], &pb[j]).0);
+    let (defl_a, defl_b) = (side_a.mesh.deflection, side_b.mesh.deflection);
+    let margin = 2.0 * (defl_a + defl_b) + tol::LINEAR;
     // Solids that share material are no distance apart. Boundaries farther apart than the meshes
     // can err meet nowhere, so only a solid holding the other can; nearer, a corner of one inside
     // the other shows the overlap before the search below, which would find it on the crossing.
     let apart = best > margin;
     let held = if apart {
-        side_b.holds(side_a).or_else(|| side_a.holds(side_b))
+        side_b
+            .holds(side_a, kept_b)
+            .or_else(|| side_a.holds(side_b, kept_a))
     } else {
         side_b
-            .holds_corner(side_a, &tree)
-            .or_else(|| side_a.holds_corner(side_b, &tree_a))
+            .holds_corner(side_a, kept_b)
+            .or_else(|| side_a.holds_corner(side_b, kept_a))
     };
     if let Some(p) = held {
         return Ok(Closest {
@@ -704,7 +797,7 @@ fn between(side_a: &Side, side_b: &Side) -> Result<Closest> {
     // Every pair the exact minimum could lie between.
     let mut hits = Vec::new();
     let reach = best + margin;
-    let spread = 4.0 * (side_a.deflection + side_b.deflection);
+    let spread = 4.0 * (defl_a + defl_b);
     // Nearest first, so the closest pair of pieces always seeds its entities: on parts smaller
     // than the meshes' deflection every pair lies within reach and spread of every other.
     let mut near_pairs = Vec::new();
@@ -735,9 +828,13 @@ fn between(side_a: &Side, side_b: &Side) -> Result<Closest> {
     // outline cuts inside a curved edge, and takes a point of a hole's opening for the face.
     let mut lies_on = |side: &Side, which: bool, e: Entity, x: [f64; 2]| match e {
         Entity::Face(f) => {
-            let dom = domains
-                .entry((which, f))
-                .or_insert_with(|| face_domain(side.b, f));
+            let kept = if which { kept_b } else { kept_a };
+            let dom = match side.on.domain(kept, f) {
+                Some(dom) => dom,
+                None => domains
+                    .entry((which, f))
+                    .or_insert_with(|| face_domain(side.on.b, f)),
+            };
             let p = dom.surface.eval(x[0], x[1]);
             !matches!(dom.locate(p), Where::Outside)
         }
@@ -766,8 +863,8 @@ fn between(side_a: &Side, side_b: &Side) -> Result<Closest> {
     }
     // Every vertex pair is a real pair of points, so there is always an answer.
     if answer.is_none() {
-        for &va in &side_a.vertices {
-            for &vb in &side_b.vertices {
+        for &va in &side_a.on.vertices {
+            for &vb in &side_b.on.vertices {
                 let (x, y) = (a.vertex(va).point, b.vertex(vb).point);
                 offer(
                     &mut answer,
@@ -794,7 +891,9 @@ fn between(side_a: &Side, side_b: &Side) -> Result<Closest> {
     // Boundaries apart, however little, one solid may still hold the other.
     if !apart
         && answer.distance > tol::LINEAR
-        && let Some(p) = side_b.holds(side_a).or_else(|| side_a.holds(side_b))
+        && let Some(p) = side_b
+            .holds(side_a, kept_b)
+            .or_else(|| side_a.holds(side_b, kept_a))
     {
         answer = Closest {
             distance: 0.0,
@@ -803,4 +902,136 @@ fn between(side_a: &Side, side_b: &Side) -> Result<Closest> {
         };
     }
     Ok(answer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{boolean, math::Frame, primitive};
+
+    fn block(lo: [f64; 3], size: [f64; 3]) -> Brep {
+        let frame = Frame::new(Vec3::from_array(lo), Vec3::Z, Vec3::X).unwrap();
+        primitive::block(&frame, Vec3::from_array(size), "b").unwrap()
+    }
+
+    fn bodies(a: &Brep, b: &Brep) -> Closest {
+        closest(a, &Selection::body(a), b, &Selection::body(b)).unwrap()
+    }
+
+    /// The distance by the search alone, with no point asked about before the sides are meshed.
+    fn searched(a: &Brep, sa: &Selection, b: &Brep, sb: &Selection) -> Closest {
+        let (side_a, side_b) = (Side::new(a, sa).unwrap(), Side::new(b, sb).unwrap());
+        between(&side_a, &side_b, [&Domains::new(), &Domains::new()]).unwrap()
+    }
+
+    fn is_meshed(b: &Brep) -> bool {
+        b.arena().seed.get().is_some()
+    }
+
+    #[test]
+    fn a_corner_deep_in_the_other_solid_answers_before_either_is_meshed() {
+        // Each block holds one corner of the other, 2 from its nearest faces.
+        let a = block([0.0; 3], [4.0; 3]);
+        let b = block([2.0; 3], [4.0; 3]);
+        for (x, y) in [(&a, &b), (&b, &a)] {
+            let c = bodies(x, y);
+            assert_eq!(c.distance, 0.0);
+            assert_eq!(c.on_a, c.on_b);
+            let p = c.on_a;
+            assert!((0..3).all(|k| p[k] >= 2.0 && p[k] <= 4.0), "{p:?}");
+        }
+        assert!(!is_meshed(&a) && !is_meshed(&b));
+        let (sa, sb) = (Selection::body(&a), Selection::body(&b));
+        assert_eq!(searched(&a, &sa, &b, &sb).distance, 0.0);
+    }
+
+    #[test]
+    fn a_corner_within_the_tolerance_of_a_face_is_left_to_the_search() {
+        // The upper block's bottom corners stand over the middle of the lower's top face: on it,
+        // above it, or below it and no farther inside than the tolerance.
+        let a = block([0.0; 3], [4.0; 3]);
+        let hair = 10.0 * tol::LINEAR;
+        for lift in [
+            0.0,
+            0.5 * tol::LINEAR,
+            -0.5 * tol::LINEAR,
+            -tol::LINEAR,
+            hair,
+        ] {
+            let b = block([1.0, 1.0, 4.0 + lift], [2.0; 3]);
+            let (sa, sb) = (Selection::body(&a), Selection::body(&b));
+            assert_eq!(bodies(&a, &b), searched(&a, &sa, &b, &sb), "lift {lift}");
+            assert_eq!(bodies(&b, &a), searched(&b, &sb, &a, &sa), "lift {lift}");
+            assert!(is_meshed(&b), "lift {lift}");
+        }
+        let b = block([1.0, 1.0, 4.0 + hair], [2.0; 3]);
+        let d = bodies(&a, &b).distance;
+        assert!((d - hair).abs() <= 1e-12, "{d}");
+    }
+
+    #[test]
+    fn a_block_in_a_void_is_as_far_as_the_voids_wall() {
+        // A cube with a closed cavity 4 across, and a cube 2 across in the cavity's middle: the
+        // inner cube's corners lie in the outer's box and in none of its material.
+        let outer = boolean::difference(&block([0.0; 3], [10.0; 3]), &block([3.0; 3], [4.0; 3]));
+        let (outer, inner) = (outer.unwrap(), block([4.0; 3], [2.0; 3]));
+        for (x, y) in [(&outer, &inner), (&inner, &outer)] {
+            let d = bodies(x, y).distance;
+            assert!((d - 1.0).abs() <= 1e-9, "{d}");
+        }
+    }
+
+    #[test]
+    fn a_face_or_an_edge_reaching_into_a_solid_is_no_distance_from_it() {
+        let a = block([0.0; 3], [4.0; 3]);
+        let b = block([2.0; 3], [4.0; 3]);
+        let whole = Selection::body(&b);
+        let holds = |sel: &Selection| {
+            let x = Extent::new(&a, sel);
+            x.vertices
+                .iter()
+                .any(|&v| (0..3).all(|k| a.vertex(v).point[k] > 2.0))
+        };
+        let mut reached = 0;
+        for f in a.face_ids() {
+            let sel = Selection::face(f);
+            let c = closest(&a, &sel, &b, &whole).unwrap();
+            assert_eq!(c.distance, searched(&a, &sel, &b, &whole).distance, "{f:?}");
+            assert_eq!(c.distance == 0.0, holds(&sel), "{f:?}");
+            reached += usize::from(c.distance == 0.0);
+        }
+        // The three faces at the corner (4, 4, 4), which the other block holds.
+        assert_eq!(reached, 3);
+        for e in a.edge_ids() {
+            let sel = Selection::edge(e);
+            let c = closest(&a, &sel, &b, &whole).unwrap();
+            assert_eq!(c.distance, searched(&a, &sel, &b, &whole).distance, "{e:?}");
+            assert_eq!(c.distance == 0.0, holds(&sel), "{e:?}");
+        }
+    }
+
+    #[test]
+    fn the_pieces_of_every_solid_or_every_face_are_meshed_once() {
+        let a = block([0.0; 3], [4.0; 3]);
+        let mesh = |sel: &Selection| Side::new(&a, sel).unwrap().mesh;
+        let body = Selection::body(&a);
+        assert!(Arc::ptr_eq(&mesh(&body), &mesh(&body)));
+        let faces = Selection::faces(a.face_ids());
+        assert!(Arc::ptr_eq(&mesh(&faces), &mesh(&faces)));
+        assert!(!Arc::ptr_eq(&mesh(&body), &mesh(&faces)));
+        // A copy is the same solid, and a moved copy is not.
+        let mut copy = a.clone();
+        let of = |b: &Brep| Side::new(b, &Selection::body(b)).unwrap().mesh;
+        assert!(Arc::ptr_eq(&of(&copy), &mesh(&body)));
+        copy.transform(&crate::math::Transform::translation(Vec3::new(
+            10.0, 0.0, 0.0,
+        )));
+        assert!(!Arc::ptr_eq(&of(&copy), &mesh(&body)));
+        assert_eq!(of(&copy).bbox.min.x, 10.0);
+        assert_eq!(mesh(&body).bbox.min.x, 0.0);
+        // One face of six is its own selection, with its own pieces.
+        let one = Selection::face(a.face_ids().next().unwrap());
+        assert!(mesh(&one).pieces.len() < mesh(&faces).pieces.len());
+        assert!(!Arc::ptr_eq(&mesh(&one), &mesh(&one)));
+    }
 }

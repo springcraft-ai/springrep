@@ -117,6 +117,11 @@ impl Bvh {
         bvh
     }
 
+    /// The boxes the hierarchy is over, in the order they were given.
+    pub(crate) fn boxes(&self) -> &[Aabb] {
+        &self.boxes
+    }
+
     /// The node over `order[lo..hi]`, halved at the median centre along its box's longest axis.
     ///
     /// `keys` orders the run as a stable sort along each ancestor's axis in turn would have left

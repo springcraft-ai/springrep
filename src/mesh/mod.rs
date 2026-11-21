@@ -18,6 +18,7 @@ pub use solid::solid;
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::FRAC_PI_2;
 use std::ops::Range;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use cdt::BOX;
@@ -69,7 +70,7 @@ pub struct Mesh {
 /// `opt` with its deflection between a ten-thousandth and a thousandth of `b`'s size: for a mesh
 /// that seeds exact searches over `b` (rays, distances), whose triangles must stand near the faces
 /// however small the part, and need not be finer than the search's own margin however large.
-pub(crate) fn seeding(opt: &MeshOptions, b: &Brep) -> MeshOptions {
+fn seeding(opt: &MeshOptions, b: &Brep) -> MeshOptions {
     let size = crate::measure::loose_bbox(b).diagonal();
     MeshOptions {
         linear: if size > 0.0 {
@@ -79,6 +80,45 @@ pub(crate) fn seeding(opt: &MeshOptions, b: &Brep) -> MeshOptions {
         },
         angular: opt.angular,
     }
+}
+
+/// The deflections a seed mesh is tried at, finest first: the mesher gives up on a very fine
+/// chord over a large part.
+const SEEDS: [MeshOptions; 3] = [
+    MeshOptions {
+        linear: 0.01,
+        angular: 0.2,
+    },
+    MeshOptions {
+        linear: 0.05,
+        angular: 0.5,
+    },
+    MeshOptions {
+        linear: 0.2,
+        angular: 0.8,
+    },
+];
+
+/// An arena's mesh for seeding exact searches, and the deflections it was built to.
+#[derive(Debug)]
+pub(crate) struct SeedMesh {
+    pub mesh: Mesh,
+    pub options: MeshOptions,
+}
+
+/// The mesh that seeds exact searches over `b`, built once for as long as `b` stays as it is.
+pub(crate) fn seed_mesh(b: &Brep) -> Result<Arc<SeedMesh>> {
+    let build = || {
+        let mut err = None;
+        for options in SEEDS.iter().map(|o| seeding(o, b)) {
+            match tessellate(b, &options) {
+                Ok(mesh) => return Ok(Arc::new(SeedMesh { mesh, options })),
+                Err(e) => err = Some(e),
+            }
+        }
+        Err(err.expect("a mesh was tried"))
+    };
+    b.arena().seed.get_or_init(build).clone()
 }
 
 /// The parameters at which an edge's curve is sampled.

@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 pub use facts::{Facts, OnFace};
-pub(crate) use memo::{FaceMemo, FaceVolume, IntegralKey};
+pub(crate) use memo::{ArenaMemo, FaceMemo, FaceVolume, IntegralKey};
 pub use names::FaceName;
 pub use pcurve::PCurve;
 pub(crate) use pcurve::project_on;
@@ -134,6 +134,7 @@ pub struct Brep {
     shells: Vec<Shell>,
     solids: Vec<Solid>,
     memos: memo::Memos,
+    arena: memo::Arena,
     /// Local tolerances above [`tol::LINEAR`], which only an import's edges and vertices carry.
     tolerances: Box<Tolerances>,
     /// Each coedge of an edge more than two faces use, with the coedge across the wedge of
@@ -164,7 +165,19 @@ impl Brep {
         Brep::default()
     }
 
+    /// What queries have worked out about the whole arena as it stands.
+    pub(crate) fn arena(&self) -> &ArenaMemo {
+        self.arena.0.get_or_init(Arc::default)
+    }
+
+    /// Drops what was worked out about the whole arena: every method that adds an entity, or
+    /// changes one's geometry, tolerance or place in the topology, calls it first.
+    fn changed(&mut self) {
+        self.arena = memo::Arena::default();
+    }
+
     pub(crate) fn add_vertex(&mut self, point: Point3) -> VertexId {
+        self.changed();
         self.vertices.push(Vertex { point });
         VertexId::at(self.vertices.len() - 1)
     }
@@ -176,6 +189,7 @@ impl Brep {
         start: VertexId,
         end: VertexId,
     ) -> EdgeId {
+        self.changed();
         self.edges.push(Edge {
             curve: Some(curve),
             range,
@@ -187,6 +201,7 @@ impl Brep {
     }
 
     pub(crate) fn add_degenerate_edge(&mut self, vertex: VertexId, range: (f64, f64)) -> EdgeId {
+        self.changed();
         self.edges.push(Edge {
             curve: None,
             range,
@@ -203,6 +218,7 @@ impl Brep {
         reversed: bool,
         names: impl IntoIterator<Item = FaceName>,
     ) -> FaceId {
+        self.changed();
         self.faces.push(Face {
             surface,
             reversed,
@@ -215,6 +231,7 @@ impl Brep {
     }
 
     pub(crate) fn add_loop(&mut self, face: FaceId, coedges: Vec<CoedgeSpec>) -> LoopId {
+        self.changed();
         let lp = LoopId::at(self.loops.len());
         let mut ids = Vec::with_capacity(coedges.len());
         for c in coedges {
@@ -236,6 +253,7 @@ impl Brep {
     }
 
     pub(crate) fn add_shell(&mut self, faces: Vec<FaceId>) -> ShellId {
+        self.changed();
         let id = ShellId::at(self.shells.len());
         for &f in &faces {
             self.faces[f.index()].shell = Some(id);
@@ -251,6 +269,7 @@ impl Brep {
 
     /// A solid whose first `outer` shells bound it from outside and the rest voids.
     pub(crate) fn add_solid_of(&mut self, shells: Vec<ShellId>, outer: usize) -> SolidId {
+        self.changed();
         let id = SolidId::at(self.solids.len());
         for &s in &shells {
             self.shells[s.index()].solid = Some(id);
@@ -262,6 +281,7 @@ impl Brep {
     /// Pairs coedges `a` and `b` of one edge across the wedge of material between their faces: for
     /// an edge more than two faces use.
     pub fn pair(&mut self, a: CoedgeId, b: CoedgeId) {
+        self.changed();
         self.partners.insert(a, b);
         self.partners.insert(b, a);
     }
@@ -269,6 +289,7 @@ impl Brep {
     /// Sets coedges `a` and `b` of one edge either side of an empty wedge between their faces: for
     /// an edge more than two faces use.
     pub(crate) fn set_beside(&mut self, a: CoedgeId, b: CoedgeId) {
+        self.changed();
         self.beside.insert(a, b);
         self.beside.insert(b, a);
     }
@@ -310,6 +331,7 @@ impl Brep {
     /// Pairs the coedges of every edge more than two faces use that are not paired yet, from the
     /// faces' geometry round it: for an arena built from another one's faces.
     pub(crate) fn pair_radial(&mut self) {
+        self.changed();
         let edges: Vec<EdgeId> = self.radial_edges().collect();
         for e in edges {
             let us = self.uses[e.index()].clone();
@@ -384,6 +406,7 @@ impl Brep {
     }
 
     pub(crate) fn face_mut(&mut self, id: FaceId) -> &mut Face {
+        self.changed();
         self.memos.0[id.index()] = Arc::default();
         &mut self.faces[id.index()]
     }
@@ -497,6 +520,7 @@ impl Brep {
 
     /// Gives an imported vertex a tolerance; a value at or below [`tol::LINEAR`] clears it.
     pub(crate) fn set_vertex_tolerance(&mut self, v: VertexId, t: f64) {
+        self.changed();
         let old = self.vertex_tolerance(v);
         if t > tol::LINEAR {
             self.tolerances.vertices.insert(v, t);
@@ -510,6 +534,7 @@ impl Brep {
 
     /// Gives an imported edge a tolerance; a value at or below [`tol::LINEAR`] clears it.
     pub(crate) fn set_edge_tolerance(&mut self, e: EdgeId, t: f64) {
+        self.changed();
         let old = self.edge_tolerance(e);
         if t > tol::LINEAR {
             self.tolerances.edges.insert(e, t);
@@ -756,6 +781,7 @@ impl Brep {
     /// Moves every entity by `t`. Parameters are unchanged: frames and curves move with the
     /// geometry, so pcurves stay valid.
     pub fn transform(&mut self, t: &Transform) {
+        self.changed();
         for v in &mut self.vertices {
             v.point = t.point(v.point);
         }
@@ -796,6 +822,7 @@ impl Brep {
 
     /// Copies every entity of `other` into `self`, and returns the new ids of its solids.
     pub fn append(&mut self, other: &Brep) -> Vec<SolidId> {
+        self.changed();
         let (v0, e0, c0, l0, f0, sh0, so0) = (
             self.vertices.len(),
             self.edges.len(),
