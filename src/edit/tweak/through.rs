@@ -51,6 +51,21 @@ pub(crate) fn opening(to: &Cone, s: f64) -> Surface {
 /// How short an edge is, in mm, before the move takes it to have closed.
 const CLOSED: f64 = 10.0 * tol::LINEAR;
 
+/// The most guesses a search for a closing takes before it only halves its bracket.
+const GUESSES: usize = 40;
+
+/// Every edge's length, a pole's infinite.
+fn lengths(b: &Brep) -> Vec<f64> {
+    b.edge_ids()
+        .map(|e| {
+            let x = b.edge(e);
+            x.curve
+                .as_ref()
+                .map_or(f64::INFINITY, |c| radial::length(c, x.range))
+        })
+        .collect()
+}
+
 /// `b` with the faces of `paths` moved to the ends of their paths, its topology changed where a
 /// face closes on the way, and the faces of `b` that closed.
 pub(crate) fn through(b: &Brep, paths: &HashMap<FaceId, Path>) -> Result<(Brep, Vec<FaceId>)> {
@@ -85,15 +100,73 @@ pub(crate) fn through(b: &Brep, paths: &HashMap<FaceId, Path>) -> Result<(Brep, 
             Err(e) => e,
         };
         let (mut lo, mut hi) = (s0, 1.0);
+        // The last two shares the move reached, with every edge's length there: edges shrinking
+        // between them are run on to the shortest length the checker passes, and the first to
+        // get there is a guess at where the move stops. A guess, and the probe that follows it
+        // just to its other side, only choose where the bracket is cut: it still closes on a
+        // share the move reaches beside one it does not, as halving it does.
+        let mut reached: Vec<(f64, Vec<f64>)> = Vec::new();
+        if let Ok(start) = at(s0) {
+            reached.push((s0, lengths(&start)));
+        }
+        let (mut guesses, mut guessed, mut probe) = (0, None::<(f64, f64)>, None::<f64>);
         while hi - lo > 1e-15 * (1.0 + hi) {
-            let mid = 0.5 * (lo + hi);
+            let mut mid = 0.5 * (lo + hi);
             if mid <= lo || mid >= hi {
                 break;
             }
-            if at(mid).is_ok() {
-                lo = mid;
-            } else {
-                hi = mid;
+            let inside = |s: &f64| *s > lo && *s < hi;
+            let mut guess = None;
+            if let Some(s) = probe.take().filter(inside) {
+                mid = s;
+            } else if guesses < GUESSES
+                && let [.., (sa, la), (sb, lb)] = &reached[..]
+                && *sb == lo
+            {
+                let first = la
+                    .iter()
+                    .zip(lb)
+                    .filter(|(a, b)| b < a && a.is_finite())
+                    .map(|(a, b)| sb + (b - tol::LINEAR) * (sb - sa) / (a - b))
+                    .fold(f64::INFINITY, f64::min);
+                if inside(&first) {
+                    mid = first;
+                    guess = Some(first);
+                    guesses += 1;
+                }
+            }
+            let ok = match at(mid) {
+                Ok(out) => {
+                    lo = mid;
+                    reached.push((mid, lengths(&out)));
+                    if reached.len() > 2 {
+                        reached.remove(0);
+                    }
+                    true
+                }
+                Err(_) => {
+                    hi = mid;
+                    false
+                }
+            };
+            // A guess moved since the last one by about what the last was off by, and is itself
+            // off by less in the ratio the moves shrink in: the probe goes a few times that to
+            // its other side, and no nearer than the bracket closes to.
+            if let Some(s) = guess {
+                let least = 0.5e-15 * (1.0 + hi);
+                let step = match guessed {
+                    Some((q, before)) => {
+                        let moved = (s - q).abs();
+                        guessed = Some((s, moved));
+                        4.0 * moved * (moved / before).min(1.0)
+                    }
+                    None => {
+                        guessed = Some((s, f64::INFINITY));
+                        f64::INFINITY
+                    }
+                };
+                let step = step.max(least);
+                probe = Some(if ok { s + step } else { s - step });
             }
         }
         let closing = at(lo).ok().and_then(|near| {

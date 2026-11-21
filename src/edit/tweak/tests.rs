@@ -286,6 +286,44 @@ fn all_walls_drafted_until_two_meet_make_a_hipped_roof() {
     assert_eq!(out.face_count(), 5);
 }
 
+// A box w × d × h with nx of its x walls and ny of its y walls leaning in by t per unit of height
+// has the section (w − nx·t·z)(d − ny·t·z) at height z, up to the height where a pair of walls
+// meet or to its top: its volume is that integrated. Over leans that close at every height from
+// just under the top down, and every choice of walls, so the search for where an edge closes is
+// tried wherever it lands.
+#[test]
+fn drafts_that_close_hold_their_closed_form_at_every_lean() {
+    let (w, d, h) = (5.0, 7.0, 3.0);
+    let b = sweep::extrude(&Profile::rect(Vec2::ZERO, w, d), &Frame::WORLD, h, "box").unwrap();
+    let choices: [&[&str]; 5] = [
+        &["u_min"],
+        &["u_min", "u_max"],
+        &["u_min", "v_max"],
+        &["u_min", "u_max", "v_min"],
+        &["u_min", "u_max", "v_min", "v_max"],
+    ];
+    for walls in choices {
+        let nx = walls.iter().filter(|n| n.starts_with('u')).count() as f64;
+        let ny = walls.iter().filter(|n| n.starts_with('v')).count() as f64;
+        let faces: Vec<FaceId> = walls.iter().map(|n| face(&b, n)).collect();
+        for k in 1..=7 {
+            let meet = h * (0.98 - 0.13 * f64::from(k));
+            let run = (w / nx).min(if ny > 0.0 { d / ny } else { f64::INFINITY });
+            let t = run / meet;
+            let out = draft(&b, &faces, &Frame::WORLD, t.atan()).unwrap();
+            let z = meet;
+            let want =
+                w * d * z - (w * ny + d * nx) * t * z * z / 2.0 + nx * ny * t * t * z.powi(3) / 3.0;
+            assert!(check::check(&out).is_empty());
+            assert!(
+                (measure::volume(&out) - want).abs() < 1e-9 * want,
+                "{walls:?} meeting at {meet}: {} against {want}",
+                measure::volume(&out)
+            );
+        }
+    }
+}
+
 /// The prism 8 tall on the polygon `pts`, every side drafted inward about its foot by `degrees`.
 fn drafted_prism(pts: &[(f64, f64)], degrees: f64) -> Brep {
     let pts: Vec<Vec2> = pts.iter().map(|&(x, y)| Vec2::new(x, y)).collect();

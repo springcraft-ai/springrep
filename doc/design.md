@@ -1235,7 +1235,11 @@ followed there ([`through.rs`](../src/edit/tweak/through.rs)). Each moved face r
 from its old surface to its new one: a plane through the pencil of planes the two span (so a draft
 keeps its hinge and an offset stays parallel), an offset surface by its distance, a cylinder drafted
 into a cone by its half angle. The furthest the solid gets with its topology kept is found by
-bisection. There vertices closer than ten times the tolerance are made one, edges that then run
+bisection, to a bracket of 1e-15 of the move: a share the move reaches beside one it does not. Where
+edges shrink between the last two shares reached, the bracket is cut not at its middle but where the
+first of them, run on in a straight line, comes down to the shortest length the checker passes, and
+then just to that guess's other side, by a few times what the guesses are still moving by; a guess
+only chooses where the bracket is cut, so what it closes on is the same. There vertices closer than ten times the tolerance are made one, edges that then run
 together one, and edges shorter than that dropped; a face left a strip along a single edge (or an
 annulus whose two rims have run together), or lying on another face to face, is taken out, and a
 face left running along an edge and back loses it: the edge goes where nothing else uses it, and is
