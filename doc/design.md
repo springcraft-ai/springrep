@@ -330,7 +330,8 @@ refuses two results the checker used to pass: a 90° revolve cut by its copy mov
 along `x` leaves the copy's corner edge 5e-8 (5e-12) mm from the original's inner wall, a face it
 shares no edge with, so the result touches itself there.
 
-A boolean's result settles the sign of a solid's volume without the integral where a ray does.
+A boolean's result, a sewn blend's and a swept solid's settle the sign of a solid's volume without
+the integral where a ray does.
 For a solid of one shell whose faces are all joined through partner coedges, no edge used by more
 than two, a ray leaves the middle of an edge along the sum of its two faces' outward normals: a
 point just along it lies on the outward side of both faces, whether the edge is convex or concave.

@@ -228,6 +228,12 @@ pub(crate) fn check_cut(b: &Brep, sides: &[Option<usize>]) -> Vec<Issue> {
     check_with(b, false, Some(sides), true)
 }
 
+/// Checks a solid an operation has just built: [`check`], with the sign of a one-sheet solid's
+/// volume settled by a ray where one settles it, as in a boolean's result.
+pub(crate) fn check_built(b: &Brep) -> Vec<Issue> {
+    check_cut(b, &vec![None; b.face_ids().count()])
+}
+
 /// The shell each vertex belongs to, by the faces whose edges end there.
 fn vertex_shells(b: &Brep) -> HashMap<VertexId, ShellId> {
     let mut out = HashMap::new();
@@ -1967,10 +1973,7 @@ mod tests {
 
     /// The issues of `b` as a boolean's result with no two faces known to come from one input.
     fn cut_issues(b: &Brep) -> Vec<String> {
-        check_cut(b, &vec![None; b.face_count()])
-            .into_iter()
-            .map(|i| i.message)
-            .collect()
+        check_built(b).into_iter().map(|i| i.message).collect()
     }
 
     #[test]
@@ -2076,6 +2079,10 @@ mod tests {
         .unwrap();
         assert!(wedge.edge_ids().any(|e| ray_off_edge(&wedge, e).is_none()));
         assert_eq!(seen_outward(&wedge), [true]);
+        assert_eq!(cut_issues(&wedge), Vec::<String>::new());
+        let issues = cut_issues(&rebuilt(&wedge, |_| true, false));
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].starts_with("solid 0 has volume -"), "{issues:?}");
     }
 
     #[test]

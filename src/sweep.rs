@@ -174,7 +174,7 @@ fn traversal(s: &PlacedSegment) -> (f64, f64) {
 }
 
 fn finish(b: Brep) -> Result<Brep> {
-    let issues = check::check(&b);
+    let issues = check::check_built(&b);
     if issues.is_empty() {
         Ok(b)
     } else {
