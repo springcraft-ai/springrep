@@ -1,7 +1,10 @@
 //! A bounding volume hierarchy over boxes, and the closest points and crossings of points,
 //! segments and triangles: the search structures the thin-place probe, distances and rays share.
 
-use std::{cmp::Reverse, collections::BinaryHeap};
+use std::{
+    cmp::{Ordering, Reverse},
+    collections::BinaryHeap,
+};
 
 use crate::math::{Aabb, Point3, Transform, Vec3};
 
@@ -19,13 +22,13 @@ impl PartialEq for Gap {
 impl Eq for Gap {}
 
 impl PartialOrd for Gap {
-    fn partial_cmp(&self, other: &Gap) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Gap) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for Gap {
-    fn cmp(&self, other: &Gap) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Gap) -> Ordering {
         self.0
             .total_cmp(&other.0)
             .then((self.1, self.2).cmp(&(other.1, other.2)))
@@ -41,7 +44,41 @@ pub(crate) struct Bvh {
     order: Vec<usize>,
 }
 
-#[derive(Clone, Debug)]
+/// The order a run of boxes stands in after a stable sort by centre along each of its ancestors'
+/// axes, the root's first: by the last axis sorted on, then the one before, and at last by index,
+/// the order the boxes came in. An axis sorted on again counts where it was sorted on last.
+#[derive(Clone, Copy, Default)]
+struct Keys {
+    axes: [usize; 3],
+    len: usize,
+}
+
+impl Keys {
+    /// The order after one more stable sort, along `axis`.
+    fn then(self, axis: usize) -> Keys {
+        let mut next = Keys {
+            axes: [axis; 3],
+            len: 1,
+        };
+        for &a in &self.axes[..self.len] {
+            if a != axis {
+                next.axes[next.len] = a;
+                next.len += 1;
+            }
+        }
+        next
+    }
+
+    fn cmp(&self, centres: &[[f64; 3]], i: usize, j: usize) -> Ordering {
+        self.axes[..self.len]
+            .iter()
+            .map(|&a| centres[i][a].total_cmp(&centres[j][a]))
+            .find(|o| o.is_ne())
+            .unwrap_or(i.cmp(&j))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 enum Node {
     Inner(usize, usize),
     Leaf(usize, usize),
@@ -65,28 +102,37 @@ impl Bvh {
 
     /// The hierarchy over `boxes`, whose indices a query returns.
     pub(crate) fn of_boxes(boxes: Vec<Aabb>) -> Bvh {
+        let centres: Vec<[f64; 3]> = boxes
+            .iter()
+            .map(|b| ((b.min + b.max) * 0.5).to_array())
+            .collect();
         let mut bvh = Bvh {
             order: (0..boxes.len()).collect(),
             boxes,
             nodes: Vec::new(),
         };
         if !bvh.order.is_empty() {
-            bvh.split(0, bvh.order.len());
+            bvh.split(0, bvh.order.len(), &centres, Keys::default());
         }
         bvh
     }
 
-    fn split(&mut self, lo: usize, hi: usize) -> usize {
+    /// The node over `order[lo..hi]`, halved at the median centre along its box's longest axis.
+    ///
+    /// `keys` orders the run as a stable sort along each ancestor's axis in turn would have left
+    /// it. Halving needs only which boxes fall in each half of that order, so a selection stands
+    /// for the sort, and a leaf alone is put in order.
+    fn split(&mut self, lo: usize, hi: usize, centres: &[[f64; 3]], keys: Keys) -> usize {
         let mut bb = Aabb::EMPTY;
         for &i in &self.order[lo..hi] {
             bb.union(&self.boxes[i]);
         }
         let at = self.nodes.len();
+        self.nodes.push((bb, Node::Leaf(lo, hi)));
         if hi - lo <= 4 {
-            self.nodes.push((bb, Node::Leaf(lo, hi)));
+            self.order[lo..hi].sort_unstable_by(|&i, &j| keys.cmp(centres, i, j));
             return at;
         }
-        self.nodes.push((bb, Node::Leaf(lo, hi)));
         let ext = bb.max - bb.min;
         let axis = if ext.x >= ext.y && ext.x >= ext.z {
             0
@@ -95,15 +141,11 @@ impl Bvh {
         } else {
             2
         };
-        let key = |b: &Aabb| {
-            let c = (b.min + b.max) * 0.5;
-            [c.x, c.y, c.z][axis]
-        };
+        let keys = keys.then(axis);
         let mid = (lo + hi) / 2;
-        let boxes = &self.boxes;
-        self.order[lo..hi].sort_by(|&i, &j| key(&boxes[i]).total_cmp(&key(&boxes[j])));
-        let l = self.split(lo, mid);
-        let r = self.split(mid, hi);
+        self.order[lo..hi].select_nth_unstable_by(mid - lo, |&i, &j| keys.cmp(centres, i, j));
+        let l = self.split(lo, mid, centres, keys);
+        let r = self.split(mid, hi, centres, keys);
         self.nodes[at].1 = Node::Inner(l, r);
         at
     }
@@ -570,6 +612,80 @@ pub(crate) fn crossing(p: Point3, q: Point3, t: &[Point3; 3]) -> Option<Point3> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hierarchy as a stable sort of each node's run along its longest axis builds it.
+    fn sorted(boxes: Vec<Aabb>) -> Bvh {
+        fn split(bvh: &mut Bvh, lo: usize, hi: usize) -> usize {
+            let mut bb = Aabb::EMPTY;
+            for &i in &bvh.order[lo..hi] {
+                bb.union(&bvh.boxes[i]);
+            }
+            let at = bvh.nodes.len();
+            bvh.nodes.push((bb, Node::Leaf(lo, hi)));
+            if hi - lo <= 4 {
+                return at;
+            }
+            let ext = bb.max - bb.min;
+            let axis = if ext.x >= ext.y && ext.x >= ext.z {
+                0
+            } else if ext.y >= ext.z {
+                1
+            } else {
+                2
+            };
+            let key = |b: &Aabb| ((b.min + b.max) * 0.5).to_array()[axis];
+            let boxes = &bvh.boxes;
+            bvh.order[lo..hi].sort_by(|&i, &j| key(&boxes[i]).total_cmp(&key(&boxes[j])));
+            let mid = (lo + hi) / 2;
+            let l = split(bvh, lo, mid);
+            let r = split(bvh, mid, hi);
+            bvh.nodes[at].1 = Node::Inner(l, r);
+            at
+        }
+        let mut bvh = Bvh {
+            order: (0..boxes.len()).collect(),
+            boxes,
+            nodes: Vec::new(),
+        };
+        let n = bvh.order.len();
+        if n > 0 {
+            split(&mut bvh, 0, n);
+        }
+        bvh
+    }
+
+    #[test]
+    fn selecting_each_half_builds_the_tree_a_stable_sort_builds() {
+        // Boxes on a coarse grid, so many centres tie along every axis and the order the ties
+        // are left in decides the halves below.
+        let mut x: u64 = 987654321;
+        let mut next = |n: u64| {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((x >> 33) % n) as f64
+        };
+        for (count, cells) in [(0, 1), (1, 1), (4, 2), (5, 2), (37, 3), (500, 4), (3000, 7)] {
+            for stretch in [[1.0, 1.0, 1.0], [1.0, 5.0, 0.25], [0.0, 1.0, 1.0]] {
+                let boxes: Vec<Aabb> = (0..count)
+                    .map(|_| {
+                        let p = Point3::new(
+                            next(cells) * stretch[0],
+                            next(cells) * stretch[1],
+                            next(cells) * stretch[2],
+                        );
+                        let mut bb = Aabb::EMPTY;
+                        bb.add(p);
+                        bb.add(p + Vec3::new(next(3), next(3), next(3)) * 0.5);
+                        bb
+                    })
+                    .collect();
+                let (want, got) = (sorted(boxes.clone()), Bvh::of_boxes(boxes));
+                assert_eq!(got.order, want.order, "{count} boxes on {cells} cells");
+                assert_eq!(got.nodes, want.nodes, "{count} boxes on {cells} cells");
+            }
+        }
+    }
 
     #[test]
     fn the_least_pair_is_the_least_of_every_pair() {
