@@ -3000,6 +3000,92 @@ pub(crate) mod tests {
         }
     }
 
+    /// A sheet folded back over itself: out from near z = 0 to the fold at x = 2.25 and back near
+    /// z = 1, the two sheets about 1 apart, 2 long in y. `u` runs round the fold and `v` along y.
+    fn hairpin() -> NurbsSurface {
+        let rows = [(0.0, 0.0), (3.0, 0.0), (3.0, 1.0), (0.0, 1.0)];
+        let ctrl = rows
+            .iter()
+            .flat_map(|&(x, z)| [Vec3::new(x, 0.0, z), Vec3::new(x, 2.0, z)])
+            .collect();
+        let knots = (
+            vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 1.0],
+        );
+        NurbsSurface::new((3, 1), knots, (4, 2), ctrl, None).unwrap()
+    }
+
+    #[test]
+    fn a_hint_is_kept_only_for_a_foot_beside_the_surface() {
+        let s = hairpin();
+        let near = s.near_radius();
+        assert!(near < 0.05, "{near}");
+        let dist = |uv: Vec2, p: Point3| s.eval(uv.x, uv.y).dist(p);
+        let (low, high) = (Vec2::new(0.1, 0.5), Vec2::new(0.9, 0.5));
+        let (below, above) = (s.eval(low.x, low.y), s.eval(high.x, high.y));
+        assert!(below.z < 0.1 && above.z > 0.9 && (below.x - above.x).abs() < 1e-9);
+        // The foot Newton finds from a hint alone, and whether it settled there.
+        let local = |p: Point3, hint: Vec2| s.search(p, hint, None);
+
+        // Beside the surface, from a hint beside the foot: the hint's foot is kept, and it is
+        // the global search's.
+        let p = above + Vec3::new(0.02, 0.1, -0.5 * near);
+        let (kept, d, settled) = local(p, high);
+        assert!(settled && d <= near);
+        let got = s.project_near(p, high);
+        assert_eq!(
+            (got.x.to_bits(), got.y.to_bits()),
+            (kept.x.to_bits(), kept.y.to_bits())
+        );
+        assert!((dist(got, p) - dist(s.project(p), p)).abs() < 1e-12);
+
+        // The same point from a hint on the other sheet: Newton settles on that sheet's foot, a
+        // whole gap away, which is no foot beside the surface, and the global search answers.
+        let (wrong, d, settled) = local(p, low);
+        assert!(settled && d > 0.9 && s.eval(wrong.x, wrong.y).z < 0.1);
+        let got = s.project_near(p, low);
+        assert!(dist(got, p) <= near && s.eval(got.x, got.y).z > 0.9);
+
+        // Between the sheets the nearest point jumps from one to the other as the point crosses
+        // the middle: whichever sheet the hint is on, the answer is the nearer sheet's.
+        for (z, hint) in [(0.4, high), (0.6, low), (0.4, low), (0.6, high)] {
+            let p = Vec3::new(below.x, 1.0, z);
+            let got = s.project_near(p, hint);
+            assert_eq!(s.eval(got.x, got.y).z > 0.5, z > 0.5);
+            let sampled = nearest_sampled(&s, p, 400);
+            assert!(dist(got, p) <= sampled + 1e-9 && dist(got, p) > sampled - 1e-3);
+        }
+
+        // Beyond the sheet's edge a step from the hint leaves the domain: the search is held to
+        // the edge, and the foot there, beside the surface or not, is the nearest point.
+        for out in [0.5 * near, 0.3] {
+            let p = s.eval(low.x, 1.0) + Vec3::Y * out;
+            let got = s.project_near(p, low);
+            assert!(
+                got.y == 1.0 && (dist(got, p) - out).abs() < 1e-12,
+                "{got:?}"
+            );
+            assert!((dist(got, p) - dist(s.project(p), p)).abs() < 1e-12);
+        }
+
+        // A hint outside the domain is brought into it before the search starts.
+        let got = s.project_near(below, Vec2::new(-3.0, 7.0));
+        assert!(dist(got, below) < 1e-12);
+
+        // A search that stops short of a foot is not kept, however near it stopped: at the fold
+        // a point on the mid-plane inside the bend has the fold's line as a farthest point, not
+        // a nearest, and the answer is the nearer of what the hint and the global search find.
+        let fold = s.eval(0.5, 0.5);
+        let p = Vec3::new(fold.x - 0.3, 1.0, 0.5);
+        let got = s.project_near(p, Vec2::new(0.5, 0.5));
+        assert!(
+            dist(got, p) <= nearest_sampled(&s, p, 800) + 1e-9,
+            "{}",
+            dist(got, p)
+        );
+        assert!(dist(got, p) <= dist(s.project(p), p));
+    }
+
     #[test]
     fn a_copy_shares_what_its_surface_keeps_and_a_changed_surface_starts_afresh() {
         let s = warped();
