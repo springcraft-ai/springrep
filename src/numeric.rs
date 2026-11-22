@@ -487,6 +487,8 @@ pub(crate) fn roots_each(
         .map(|i| {
             let t = if i == 0 {
                 a
+            } else if i == n {
+                b
             } else {
                 a + (b - a) * i as f64 / n as f64
             };
