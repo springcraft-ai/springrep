@@ -482,3 +482,141 @@ fn a_knurl_twisted_round_its_sleeve_joins_it() {
         measure::volume(&joined)
     );
 }
+
+fn swept_of(b: &Brep, f: crate::topo::FaceId) -> Option<&crate::geom::Swept> {
+    match &b.face(f).surface {
+        Surface::Nurbs(n) => n.swept(),
+        _ => None,
+    }
+}
+
+// Each face a segment askew to the axis screws is the segment carried along the screw, and keeps
+// both; a segment along the axis screws a strip of a cylinder, which has no need of them.
+#[test]
+fn a_screwed_face_keeps_its_segment_and_its_screw() {
+    let lean = Profile::polygon(
+        &[
+            Vec2::new(-1.0, -1.0),
+            Vec2::new(1.0, -0.4),
+            Vec2::new(1.0, 0.4),
+            Vec2::new(-1.0, 1.0),
+        ],
+        &["side"],
+    );
+    let round = Profile::circle(Vec2::ZERO, 1.2);
+    for (profile, sheets, sign) in [(&lean, 2, 1.0), (&lean, 2, -1.0), (&round, 1, 1.0)] {
+        let screw = about_z(5.0, sign);
+        let mut b = helix(profile, &meridian(), &screw, 1.5 * TAU, "coil").unwrap();
+        // Moved rigidly, a face's segment and screw move with it.
+        for moved in [false, true] {
+            if moved {
+                b.transform(
+                    &Transform::rotation(Vec3::new(1.0, 2.0, 3.0), Vec3::new(0.0, 0.6, 0.8), 1.1)
+                        .then(&Transform::translation(Vec3::new(4.0, -2.0, 1.0))),
+                );
+            }
+            let mut found = 0;
+            for f in b.face_ids() {
+                let Surface::Nurbs(s) = &b.face(f).surface else {
+                    continue;
+                };
+                let swept = s.swept().expect("a screwed face");
+                found += 1;
+                let ((u0, u1), (v0, v1)) = s.domain();
+                for i in 0..=40 {
+                    for j in 0..=8 {
+                        let u = u0 + (u1 - u0) * i as f64 / 40.0;
+                        let v = v0 + (v1 - v0) * j as f64 / 8.0;
+                        let carried = swept.motion.pose(u).point(swept.generator.eval(v));
+                        assert!(carried.dist(s.eval(u, v)) <= 2.0 * SCREW_FIT);
+                    }
+                }
+                // A surface made again from its control points may be any shape.
+                let again = s.with_control_points(s.control_points().to_vec()).unwrap();
+                assert!(again.swept().is_none());
+            }
+            assert_eq!(found, sheets);
+        }
+    }
+}
+
+/// Two threads of one screw, the second a part turn further along it: the first's level sides
+/// and the cylinders at its root and crest cross the second's leaning flanks.
+fn threads_of_one_screw() -> (Brep, Brep) {
+    let screw = about_z(5.0, 1.0);
+    let square = Profile::rect(Vec2::ZERO, 2.0, 1.5);
+    let leaning = Profile::polygon(
+        &[
+            Vec2::new(-2.0, -1.2),
+            Vec2::new(0.5, -0.3),
+            Vec2::new(0.5, 0.4),
+            Vec2::new(-2.0, 0.9),
+        ],
+        &["flank"],
+    );
+    let a = helix(&square, &meridian(), &screw, 1.5 * TAU, "square").unwrap();
+    let mut b = helix(&leaning, &meridian(), &screw, 1.5 * TAU, "leaning").unwrap();
+    b.transform(&screw.transform(0.7));
+    (a, b)
+}
+
+// A boolean of the two meets their screwed faces along helices of the screw, each at one distance
+// from the axis all along, and builds what tracing every pair builds.
+#[test]
+fn threads_of_one_screw_meet_along_its_helices() {
+    use crate::boolean::{
+        self, Op,
+        ssi::{TEST_LOCK, TRACE_ONLY},
+    };
+    use std::sync::atomic::Ordering;
+    let _held = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (a, b) = threads_of_one_screw();
+    let faces = |s: &Brep| {
+        let mut out: Vec<(&'static str, f64)> = s
+            .face_ids()
+            .map(|f| (s.face(f).surface.kind(), measure::face_area(s, f)))
+            .collect();
+        out.sort_by(|x, y| x.0.cmp(y.0).then(x.1.total_cmp(&y.1)));
+        out
+    };
+    for op in [Op::Union, Op::Intersection, Op::Difference] {
+        let built = boolean::boolean(&a, &b, op).unwrap();
+        assert!(check::check(&built).is_empty());
+        TRACE_ONLY.store(true, Ordering::Relaxed);
+        let traced = boolean::boolean(&a, &b, op);
+        TRACE_ONLY.store(false, Ordering::Relaxed);
+        let traced = traced.unwrap();
+        assert_eq!(built.name_counts(), traced.name_counts());
+        let (fa, fb) = (faces(&built), faces(&traced));
+        assert_eq!(fa.len(), fb.len());
+        let size = measure::area(&built);
+        for (x, y) in fa.iter().zip(&fb) {
+            assert!(
+                x.0 == y.0 && (x.1 - y.1).abs() <= 1e-7 * size,
+                "{x:?} {y:?}"
+            );
+        }
+        assert!(rel(measure::area(&built), measure::area(&traced)) <= 1e-7);
+        assert!(rel(measure::volume(&built), measure::volume(&traced)) <= 1e-7);
+        // An edge between two screwed faces is where one thread's face crosses the other's.
+        let spreads = |s: &Brep| -> Vec<f64> {
+            let screwed = |c: &crate::topo::CoedgeId| swept_of(s, s.coedge_face(*c)).is_some();
+            s.edge_ids()
+                .filter(|&e| s.edge_uses(e).len() == 2 && s.edge_uses(e).iter().all(screwed))
+                .filter_map(|e| {
+                    let edge = s.edge(e);
+                    let curve = edge.curve.as_ref()?;
+                    let radius = |k: usize| {
+                        let t = edge.range.0 + (edge.range.1 - edge.range.0) * k as f64 / 32.0;
+                        let p = curve.eval(t);
+                        p.x.hypot(p.y)
+                    };
+                    let spread = (0..=32).map(|k| (radius(k) - radius(0)).abs());
+                    Some(spread.fold(0.0, f64::max))
+                })
+                .collect()
+        };
+        let crossings = spreads(&built);
+        assert!(!crossings.is_empty() && crossings.iter().all(|&x| x <= 1e-10));
+    }
+}

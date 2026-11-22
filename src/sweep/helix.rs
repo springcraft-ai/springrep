@@ -748,14 +748,33 @@ pub(crate) fn assemble(
                 net.extend(cols.iter().map(|c| c[row]));
             }
             let nu = cols[0].len();
-            let weights = w.map(|w| (0..nu).flat_map(|_| w.iter().copied()).collect());
-            let surface = Surface::Nurbs(Box::new(NurbsSurface::new(
+            let weights = w
+                .as_ref()
+                .map(|w| (0..nu).flat_map(|_| w.iter().copied()).collect());
+            let mut spline = NurbsSurface::new(
                 (m.degree, r.degree),
                 (m.knots.clone(), r.knots.clone()),
                 (nu, nv),
                 net,
                 weights,
-            )?));
+            )?;
+            // A screw's face is its segment carried along the screw from turn 0, as a sheet is,
+            // and as near it as its columns are to their helices only where every weight is
+            // positive.
+            if let Some(sc) = &m.screw
+                && m.range.0 == 0.0
+                && w.iter().flatten().all(|&x| x > 0.0)
+            {
+                let generator = NurbsCurve::new(r.degree, r.knots.clone(), pts.clone(), w)?;
+                let motion = Steady {
+                    origin: sc.origin,
+                    axis: sc.axis,
+                    turn: sc.sign,
+                    rise: sc.rise,
+                };
+                spline = spline.swept_by(Swept { generator, motion });
+            }
+            let surface = Surface::Nurbs(Box::new(spline));
             // At the start turn, where the surface's column points are the profile's own.
             let (_, su, sv) = surface.d1(m.range.0, 0.5);
             let (p, d) = r_mid(r);

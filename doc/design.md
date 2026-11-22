@@ -952,7 +952,10 @@ it and moves along it, so a slide, a turn and a screw are one form. The surface 
 curve's point at `v` after `u` of the motion, within `SCREW_FIT`, all over its own domain. It
 keeps them through a copy, through a rigid move, which moves the curve and the line with it, and
 through a cut to a rectangle of its parameters, which keeps the parameters; a surface made from
-its parts or from new control points starts without them, since it may be any shape.
+its parts or from new control points starts without them, since it may be any shape. The sheets a
+[sweep of a solid](#sweeps-of-solids) builds keep them, and so does each face a profile's segment
+screws in [`sweep::helix`](../src/sweep/helix.rs), a thread's flank, where the segment's weights
+are all positive; a segment that screws a strip of a cylinder needs neither.
 
 Two such sheets of one motion, `A = M(u)·g(v)` and `B = M(u′)·h(v′)`, meet along the motion's orbits
 ([`ssi/orbits.rs`](../src/boolean/ssi/orbits.rs)): lines under a slide, circles under a turn,
