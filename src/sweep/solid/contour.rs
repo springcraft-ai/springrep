@@ -243,9 +243,32 @@ impl Closed<'_> {
 
     /// The runs of `branch` over `range` inside the face: each stretch between where it crosses
     /// the face's boundary, the window's edge in a periodic parameter, or an end of the branch.
-    pub(super) fn runs(&self, dom: &Domain, branch: Branch, range: (f64, f64)) -> Vec<Run> {
+    /// `marks` are the branch's parameters at the roots it passes through on the boundary: a run
+    /// from one is found however short it is, as where the branch runs nearly along `v`.
+    pub(super) fn runs(
+        &self,
+        dom: &Domain,
+        branch: Branch,
+        range: (f64, f64),
+        marks: &[f64],
+    ) -> Vec<Run> {
         let n = 720;
-        let at = |k: usize| range.0 + (range.1 - range.0) * k as f64 / n as f64;
+        let mut stops: Vec<f64> = (0..=n)
+            .map(|k| range.0 + (range.1 - range.0) * k as f64 / n as f64)
+            .collect();
+        stops.extend(marks.iter().filter(|&&s| s > range.0 && s < range.1));
+        stops.sort_by(f64::total_cmp);
+        // The branch is inside the face on one side of a mark: samples close in on it from both.
+        let mut samples = stops.clone();
+        for w in stops.windows(2) {
+            for (mark, other) in [(w[0], w[1]), (w[1], w[0])] {
+                if marks.contains(&mark) {
+                    samples.extend((1..=40).map(|k| mark + (other - mark) * 0.5f64.powi(k)));
+                }
+            }
+        }
+        samples.sort_by(f64::total_cmp);
+        samples.dedup();
         // A branch running along the boundary, as one on an edge the rate vanishes all along, is
         // no curve across the face.
         let inside = |s: f64| -> bool {
@@ -281,9 +304,9 @@ impl Closed<'_> {
             if a_in { x } else { y }
         };
         let mut out = Vec::new();
-        let mut start: Option<f64> = inside(at(0)).then_some(at(0));
-        for k in 1..=n {
-            let (s0, s1) = (at(k - 1), at(k));
+        let mut start: Option<f64> = inside(samples[0]).then_some(samples[0]);
+        for w in samples.windows(2) {
+            let (s0, s1) = (w[0], w[1]);
             let (i0, i1) = (inside(s0), inside(s1));
             let joins = joined(s0, s1);
             if i0 && (!i1 || !joins) {

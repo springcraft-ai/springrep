@@ -1694,7 +1694,11 @@ one `u`, the whole line `u = const` is a curve (a ball's meridian under a turn a
 axis, a generator of a cylinder under a slide). Each solution's points are exact. A branch is
 clipped to the face by the face's winding number along it, each run inside the face ends at the
 root the branch passes through there, and runs that cross inside the face (a whole line across
-another branch) end at a vertex there. The run's points are fitted with a cubic B-spline at
+another branch) end at a vertex there. The winding number is read at even steps along the branch
+and, closing in from both sides, beside each root the branch passes through, so a run is found
+however little of the branch's parameter it spans: far from a screw's axis a leaning cylinder
+grazes nearly along two rulings, each curve crossing the face within a thousandth of a radian. A
+root that no curve ends at is refused: the face would be taken whole for one side. The run's points are fitted with a cubic B-spline at
 chord-length parameters, points added in each span that strays from them by more than a tenth of
 `LINEAR`; points on one line or one circle within rounding are that line or circle exactly.
 

@@ -590,7 +590,15 @@ fn closed_cuts(
     let size = closed.rate.size;
     let mut runs: Vec<Run> = Vec::new();
     for (branch, range) in closed.branches(eps) {
-        runs.extend(closed.runs(dom, branch, range));
+        let marks: Vec<f64> = roots
+            .iter()
+            .filter_map(|r| {
+                let at = closed.param_of(branch, r.uv);
+                let on = closed.point(branch, at)?.0;
+                (on.dist(r.point) <= 1e-7 * size).then_some(at)
+            })
+            .collect();
+        runs.extend(closed.runs(dom, branch, range, &marks));
     }
     // Each run's stops: its ends, and any crossing inside it, with the vertex there where known.
     let mut stops: Vec<Vec<(f64, Option<usize>)>> = runs
@@ -712,6 +720,14 @@ fn closed_cuts(
                 uvs: (ends[0].2, ends[1].2),
             });
         }
+    }
+    // The rate changes sign along the boundary at each root, so a curve leaves the face there;
+    // without it a piece of the face would be taken whole for one side.
+    let ended = |v: usize| out.iter().any(|c| c.ends.0 == v || c.ends.1 == v);
+    if !roots.iter().all(|r| ended(r.vertex)) {
+        return Err(Error::Numerical(
+            "no characteristic curve was found from a place the boundary crosses one".into(),
+        ));
     }
     Ok(out)
 }

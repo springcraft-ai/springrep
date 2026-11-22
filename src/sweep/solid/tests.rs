@@ -1032,3 +1032,62 @@ fn a_sweep_built_on_orbits_is_the_one_built_on_traces() {
         assert_same_solid(&built, &traced.unwrap(), 1e-7);
     }
 }
+
+/// The volume a second that the frustum about `frame`'s z axis, of radius `bottom` at its origin
+/// and `top` a `height` up, carries outward under the velocity `field`: the flow out through its
+/// surface where that is outward, by the midpoint rule. A steady motion that never brings the body
+/// back over where it was sweeps the body and this for as long as it runs.
+fn frustum_outflow(
+    frame: &Frame,
+    (bottom, top, height): (f64, f64, f64),
+    field: &dyn Fn(Vec3) -> Vec3,
+) -> f64 {
+    let n = 1200;
+    let mid = |k: usize| (k as f64 + 0.5) / n as f64;
+    let at = |rho: f64, u: f64, z: f64| {
+        frame.origin + (frame.x * u.cos() + frame.y * u.sin()) * rho + frame.z * z
+    };
+    let slope = (bottom - top) / height;
+    let cell = 2.0 * PI / (n * n) as f64;
+    let mut sum = 0.0;
+    for i in 0..n {
+        let u = 2.0 * PI * mid(i);
+        let out = frame.x * u.cos() + frame.y * u.sin() + frame.z * slope;
+        for j in 0..n {
+            let z = height * mid(j);
+            let rho = bottom - slope * z;
+            sum += field(at(rho, u, z)).dot(out).max(0.0) * rho * height * cell;
+            for (radius, z, out) in [(bottom, 0.0, -frame.z), (top, height, frame.z)] {
+                let rho = radius * mid(j);
+                sum += field(at(rho, u, z)).dot(out).max(0.0) * rho * radius * cell;
+            }
+        }
+    }
+    sum
+}
+
+// Far from a screw's axis a leaning drum or cone grazes nearly along two of its rulings: each
+// curve crosses the side within a thousandth of a radian of `u`, from rim to rim or to the apex.
+#[test]
+fn a_leaning_drum_or_cone_screwed_far_from_the_axis_is_cut_along_its_steep_curves() {
+    let frame = Frame::new(
+        Vec3::new(10.0, -2.0, 0.0),
+        Vec3::new(0.3, 0.0, 1.0),
+        Vec3::X,
+    )
+    .unwrap();
+    for (bottom, top, height, lead) in [(1.0, 1.0, 3.0, 40.0), (1.0, 0.0, 2.0, 10.0)] {
+        let body = crate::primitive::cone(&frame, bottom, top, height, "body").unwrap();
+        let motion = Motion::Screw {
+            screw: screw_z(lead),
+            from: 0.0,
+            to: 1.0,
+        };
+        let b = solid(&body, &motion, "sw").unwrap();
+        assert!(check::check(&b).is_empty());
+        let field = |p: Vec3| Vec3::Z.cross(p) + Vec3::Z * (lead / (2.0 * PI));
+        let want = measure::volume(&body) + frustum_outflow(&frame, (bottom, top, height), &field);
+        let got = measure::volume(&b);
+        assert!(rel(got, want) < 1e-5, "{got} {want}");
+    }
+}
