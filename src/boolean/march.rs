@@ -526,6 +526,18 @@ pub(crate) fn trace(
             Ok(out) => return Ok((out, crossings)),
             Err((i, e)) => {
                 let bad = std::mem::take(&mut branches[i].ends);
+                // A walk that leaves a known point of both surfaces and comes back to it within
+                // the tolerance found no curve: where a curve leaves a bounded surface at its
+                // corner, the points beside the corner are on both only to the tolerance.
+                let br = &branches[i];
+                let (first, last) = (br.points[0], br.points[br.points.len() - 1]);
+                let known = seeds.iter().any(|s| s.dist(first) <= tol::LINEAR);
+                let short = matches!(&e, Error::Numerical(m) if m == crate::geom::SHORT_BRANCH);
+                let back = !br.closed && br.from.is_none() && first.dist(last) <= tol::LINEAR;
+                if bad.is_empty() && short && known && back {
+                    branches.remove(i);
+                    continue;
+                }
                 if bad.is_empty() {
                     return Err(e);
                 }

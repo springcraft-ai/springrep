@@ -776,7 +776,12 @@ number never overrides what topology or a closed form already decided (Sugihara 
    no branch in particular): within that reach the vertex still splits the branch, and its
    tolerance grows to cover the gap. A sheet a sweep makes from an edge leaves the face beside it
    at such a point, where the face's grazing curve meets the edge, and comes back into a concave
-   face along the second branch.
+   face along the second branch. A walk from a known vertex of both surfaces that comes back to
+   it with no two points the tolerance apart found no curve and is dropped: where a curve of the
+   two surfaces runs out of a bounded one at its corner, the points beside the corner are on both
+   only to the tolerance, and the faces meet at the vertex alone. A sheet a sweep makes from one
+   edge of a block's top leaves the block's side this way at the top corner, a fraction of a
+   degree off the corner's own path.
 
 A stub of this kind, from a fillet's rim meeting a pocket's corner round, came from a pair that both
 later layers now cover: the r 1.5 round's cylinder against the r 4 wall cylinder, axes not parallel,

@@ -1120,3 +1120,40 @@ fn a_cone_screwed_back_through_its_own_sweep_is_no_product() {
     ));
     assert!(solid(&body, &motion, "sw").is_err());
 }
+
+// A leaning block screwed far from the axis is built in parts. What its top sweeps stands on the
+// block, and the sheet one top edge sweeps leaves the block's side at the top corner, a third of a
+// degree off the corner's own path: their intersection runs out of the sheet there, so the two
+// meet at the corner alone, and the parts share no volume.
+#[test]
+fn a_swept_top_joins_its_block_where_a_sheet_leaves_the_side_at_a_corner() {
+    let frame = Frame::new(
+        Vec3::new(10.0, -2.0, 0.0),
+        Vec3::new(0.3, 0.0, 1.0),
+        Vec3::X,
+    )
+    .unwrap();
+    let body = block(&frame, Vec3::new(2.0, 1.0, 3.0), "block").unwrap();
+    let motion = Motion::Screw {
+        screw: screw_z(40.0),
+        from: 0.0,
+        to: 1.0,
+    };
+    let (steady, twist) = (
+        sheet::Steady::of(&motion).unwrap(),
+        motion.steady().unwrap(),
+    );
+    let cut = cut::cut(&body, &move |p| twist.at(p), steady.held()).unwrap();
+    let start = product::start(&cut, &steady).unwrap();
+    let top = cut
+        .parts
+        .iter()
+        .position(|p| p.front && p.names.iter().any(|n| n.face == "end"))
+        .unwrap();
+    let piece = product::product(&cut, &steady, "sw", Some(&[top]), None).unwrap();
+    let facts = crate::blend::shared_edges(&start, &piece);
+    let both = boolean::boolean_with(&start, &piece, boolean::Op::Union, &facts).unwrap();
+    assert!(check::check(&both).is_empty());
+    let want = measure::volume(&start) + measure::volume(&piece);
+    assert!(rel(measure::volume(&both), want) < 1e-12);
+}

@@ -262,6 +262,9 @@ struct Node {
     uv: UvPair,
 }
 
+/// What a branch too short to fit a curve through is refused with.
+pub(crate) const SHORT_BRANCH: &str = "an intersection branch is shorter than the tolerance";
+
 /// Points that refine onto one place are one point; a branch shorter than the tolerance has no
 /// curve to fit.
 fn distinct(nodes: Vec<Node>, closed: bool) -> Result<Vec<Node>> {
@@ -279,9 +282,7 @@ fn distinct(nodes: Vec<Node>, closed: bool) -> Result<Vec<Node>> {
         out.pop();
     }
     if out.len() < if closed { 3 } else { 2 } {
-        return Err(Error::Numerical(
-            "an intersection branch is shorter than the tolerance".into(),
-        ));
+        return Err(Error::Numerical(SHORT_BRANCH.into()));
     }
     Ok(out)
 }
@@ -577,9 +578,7 @@ impl IntersectionCurve {
                 pts[n - 1] = sample(range.1);
             }
             if pts.len() < if closed { 3 } else { 2 } {
-                return Err(Error::Numerical(
-                    "an intersection branch is shorter than the tolerance".into(),
-                ));
+                return Err(Error::Numerical(SHORT_BRANCH.into()));
             }
             ss = keep;
             if ss.len() > 1 << 14 {

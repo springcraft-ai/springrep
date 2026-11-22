@@ -11,6 +11,7 @@ mod surface;
 
 pub use bspline::BSpline;
 pub use curve::{Circle, Curve, Ellipse, Line};
+pub(crate) use intersection::SHORT_BRANCH;
 pub use intersection::{IntersectionCurve, UvPair};
 pub(crate) use intersection::{
     distance_to, refine_across, refine_on_contour, refine_onto_both, refine_onto_both_near,
