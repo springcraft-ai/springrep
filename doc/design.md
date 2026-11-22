@@ -1705,9 +1705,9 @@ however little of the branch's parameter it spans: far from a screw's axis a lea
 grazes nearly along two rulings, each curve crossing the face within a thousandth of a radian. A
 root that no curve ends at is refused: the face would be taken whole for one side. A run stops
 where the face's boundary is first within the tolerance; a branch that runs into an apex beside a
-seam is that near the seam well short of the apex, so an end with no root is first looked for at
-the face's poles, along the branch a little past where the run stopped, and is the pole where the
-branch passes through it. The run's points are fitted with a cubic B-spline at
+seam is that near the seam well short of the apex, so an end with no root, where the run stopped
+away from every pole, is first looked for at the face's poles, along the branch a little past
+where the run stopped, and is the pole where the branch passes through it. The run's points are fitted with a cubic B-spline at
 chord-length parameters, points added in each span that strays from them by more than a tenth of
 `LINEAR`; points on one line or one circle within rounding are that line or circle exactly.
 

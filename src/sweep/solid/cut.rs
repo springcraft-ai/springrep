@@ -717,7 +717,10 @@ fn closed_cuts(
                         // A run stops where the face's boundary is first within the tolerance.
                         // A branch that runs into an apex beside a seam is that near the seam
                         // well short of the apex, and it ends at the apex, not on the seam.
-                        let pole = poles.iter().find_map(|&(v, q)| {
+                        // A run that stopped on a pole already ends there as it is.
+                        let on_pole = |q: Point3| q.dist(p) <= 1e-6 * (1.0 + p.norm());
+                        let far = !poles.iter().any(|&(_, q)| on_pole(q));
+                        let pole = poles.iter().filter(|_| far).find_map(|&(v, q)| {
                             let off = |s: f64| {
                                 closed
                                     .point(run.branch, s)
