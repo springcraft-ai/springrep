@@ -1229,3 +1229,26 @@ fn a_drums_sliver_swept_under_the_drum_is_no_product() {
         }
     }
 }
+
+// A turn's axis pierces a cone's side. A point of the grazing curve a hundredth from the axis
+// turns on a circle that leaves the side, and comes back to it where the sweep ends, at a shallow
+// angle: its meeting with the side at the end is the path's own end, found a millionth short of
+// it, and not a place the swept face passes through the side.
+#[test]
+fn a_path_that_ends_shallow_on_its_own_cap_does_not_pass_through_it() {
+    let frame = Frame::new(Vec3::new(0.5, 0.5, 0.0), Vec3::new(0.4, 0.2, 1.0), Vec3::X).unwrap();
+    let body = crate::primitive::cone(&frame, 1.0, 0.0, 2.0, "cone").unwrap();
+    let motion = about_z(0.5);
+    let (steady, twist) = (
+        sheet::Steady::of(&motion).unwrap(),
+        motion.steady().unwrap(),
+    );
+    let cut = cut::cut(&body, &move |p| twist.at(p), steady.held()).unwrap();
+    let side = cut
+        .parts
+        .iter()
+        .position(|p| p.front && p.names.iter().any(|n| n.face == "side"))
+        .unwrap();
+    let piece = product::product(&cut, &steady, "sw", Some(&[side]), None).unwrap();
+    assert!(check::check(&piece).is_empty());
+}

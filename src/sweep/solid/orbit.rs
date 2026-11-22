@@ -15,6 +15,7 @@ use crate::{
     },
     geom::Curve,
     math::{Vec2, Vec3},
+    tol,
 };
 
 /// Samples along each curve.
@@ -201,7 +202,19 @@ pub(super) fn pierced(motion: &Steady, curves: &[Swept], caps: &[Domain]) -> Res
             let path = motion.path(curve.eval(t))?;
             for cap in caps {
                 let hits = csi::curve_surface(&path, (0.0, span), &cap.surface);
-                let inside = |&s: &f64| matches!(cap.locate(path.eval(s)), Where::Inside(_));
+                // The path starts and ends on edges of the caps beside its curve. Where it leaves
+                // one of those at a shallow angle, the meeting found is the path's own end if
+                // the path stays on the cap's surface from there to the end.
+                let at_end = |s: f64| {
+                    [0.0, span].iter().any(|&end| {
+                        (0..=8).all(|k| {
+                            let x = path.eval(s + (end - s) * f64::from(k) / 8.0);
+                            csi::signed_distance(&cap.surface, x).abs() <= tol::LINEAR
+                        })
+                    })
+                };
+                let inside =
+                    |&s: &f64| !at_end(s) && matches!(cap.locate(path.eval(s)), Where::Inside(_));
                 if hits.ts.iter().any(inside) {
                     return Ok(true);
                 }
