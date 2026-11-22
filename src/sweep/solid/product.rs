@@ -11,7 +11,7 @@ use super::trim::Reach;
 use crate::{
     Error, Result,
     boolean::{
-        domain::{Trim, UvMap},
+        domain::{Domain, Trim, UvMap},
         sew::{self, OutFace, PieceGeom},
     },
     geom::Curve,
@@ -392,9 +392,18 @@ pub(super) fn product(
     let mut bounds = Aabb::EMPTY;
     cut.pool.iter().for_each(|&p| bounds.add(p));
     let size = bounds.diagonal();
-    if super::orbit::crossed(motion, &swept_curves, size) {
+    let caps: Vec<Domain> = faces
+        .iter()
+        .filter(|f| f.side.is_some())
+        .map(|f| Domain::new(f.surface.clone(), f.reversed, f.loops.clone()))
+        .collect();
+    if super::orbit::crossed(motion, &swept_curves, size)
+        || super::orbit::pierced(motion, &swept_curves, &caps)?
+    {
         return Err(Error::InvalidResult(vec![
-            "a face a curve sweeps passes through itself or another such face".into(),
+            "a face a curve sweeps passes through itself, another such face or an end of the \
+             sweep"
+                .into(),
         ]));
     }
     let vtol = vec![tol::LINEAR; pool.len()];

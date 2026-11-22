@@ -1182,3 +1182,50 @@ fn a_grazing_curve_beside_a_cones_seam_runs_on_to_the_apex() {
     let got = measure::volume(&b);
     assert!(rel(got, want) < 1e-5, "{got} {want}");
 }
+
+// A drum lying nearly across a screw's axis carries a sliver of its far end outward, and the rest
+// of the drum then turns through where the sliver went: the faces the sliver's edges sweep pass
+// through an end of the sweep, though they cross no swept face. The product is refused, and
+// built in parts no face of the solid lies inside the drum anywhere along the way.
+#[test]
+fn a_drums_sliver_swept_under_the_drum_is_no_product() {
+    let frame = Frame::new(Vec3::new(3.0, 1.0, -1.0), Vec3::new(1.0, 0.0, 0.2), Vec3::X).unwrap();
+    let (r, h, rise) = (1.0, 3.0, 2.0 / (2.0 * PI));
+    let body = cylinder(&frame, r, h, "drum").unwrap();
+    let motion = Motion::Screw {
+        screw: screw_z(2.0),
+        from: 0.0,
+        to: 1.0,
+    };
+    let (steady, twist) = (
+        sheet::Steady::of(&motion).unwrap(),
+        motion.steady().unwrap(),
+    );
+    let cut = cut::cut(&body, &move |p| twist.at(p), steady.held()).unwrap();
+    assert!(matches!(
+        product::product(&cut, &steady, "sw", None, None),
+        Err(Error::InvalidResult(_))
+    ));
+    let b = solid(&body, &motion, "sw").unwrap();
+    assert!(check::check(&b).is_empty());
+    // Where the drum at turn `t` was when it started, and whether it holds a point by a margin.
+    let held = |p: Vec3| {
+        (0..=400).map(|k| k as f64 / 400.0).any(|t| {
+            let q = p - Vec3::Z * (rise * t);
+            let (s, c) = t.sin_cos();
+            let l = frame.to_local(Vec3::new(c * q.x + s * q.y, c * q.y - s * q.x, q.z));
+            (0.02..=h - 0.02).contains(&l.z) && l.x.hypot(l.y) <= r - 0.02
+        })
+    };
+    for f in b.face_ids() {
+        let d = crate::boolean::face_domain(&b, f);
+        for i in 0..12 {
+            for j in 0..12 {
+                let at = |lo: f64, hi: f64, k: usize| lo + (hi - lo) * (k as f64 + 0.5) / 12.0;
+                let uv = crate::math::Vec2::new(at(d.lo.x, d.hi.x, i), at(d.lo.y, d.hi.y, j));
+                let p = d.surface.eval(uv.x, uv.y);
+                assert!(d.winding(uv) == 0 || !held(p), "{p:?}");
+            }
+        }
+    }
+}

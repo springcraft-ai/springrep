@@ -1799,9 +1799,17 @@ of one sheet twice. So the curves are drawn in the plane of the two lengths, and
 where two drawings cross, or one crosses itself, at points that close along their orbit. The
 drawings are sampled, and each crossing of their chords is confirmed on the curves by Newton's
 method: two curves that leave a shared end along one line, as a grazing curve and the edge it ends
-on do, have chords that cross beside it, and the steps run to the end. Such a product is invalid,
-and is built in parts or refused as any other overlap is; without this it was a solid that bounded
-the overlap twice.
+on do, have chords that cross beside it, and the steps run to the end.
+
+A swept face can also pass through an end of the sweep: the body's faces left where it starts, or
+those carried outward where it ends. It shares an edge with the ends beside its curve, and may
+cross any of them along a curve that meets no edge at all. So the paths of points along each swept
+curve are intersected with each end's surface, and a meeting inside the face is a crossing: a drum
+lying nearly across a screw's axis carries a sliver of its far end outward and then turns through
+where the sliver went.
+
+A product with either kind of crossing is invalid, and is built in parts or refused as any other
+overlap is; without these tests it was a solid that bounded the overlap twice.
 
 A body that is itself a union, as a ball on a stem, may instead be swept a piece at a time,
 since the sweep of a union is the union of the sweeps.

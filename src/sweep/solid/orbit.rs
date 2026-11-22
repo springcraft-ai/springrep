@@ -8,6 +8,11 @@ use std::f64::consts::TAU;
 
 use super::sheet::Steady;
 use crate::{
+    Result,
+    boolean::{
+        csi,
+        domain::{Domain, Where},
+    },
     geom::Curve,
     math::{Vec2, Vec3},
 };
@@ -179,6 +184,31 @@ pub(super) fn crossed(motion: &Steady, curves: &[Swept], size: f64) -> bool {
         }
     }
     false
+}
+
+/// Paths followed from each swept curve.
+const PATHS: usize = 32;
+
+/// Whether a face that a curve of `curves` sweeps under `motion` passes through one of `caps`, the
+/// faces the sweep starts and ends on: the path of a point of the curve comes through the inside
+/// of one. A swept face shares an edge with the caps beside its curve, and may cross any cap along
+/// a curve that meets no edge, so the checker's pairs do not show it.
+pub(super) fn pierced(motion: &Steady, curves: &[Swept], caps: &[Domain]) -> Result<bool> {
+    let span = motion.span();
+    for (curve, range) in curves {
+        for k in 0..PATHS {
+            let t = range.0 + (range.1 - range.0) * (k as f64 + 0.5) / PATHS as f64;
+            let path = motion.path(curve.eval(t))?;
+            for cap in caps {
+                let hits = csi::curve_surface(&path, (0.0, span), &cap.surface);
+                let inside = |&s: &f64| matches!(cap.locate(path.eval(s)), Where::Inside(_));
+                if hits.ts.iter().any(inside) {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
