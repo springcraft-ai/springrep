@@ -713,23 +713,24 @@ pub(crate) fn intersect(
     if same_domain(a, b) {
         return Ok(Ssi::Coincident);
     }
-    if let Some(r) = closed_form(a, b, region) {
+    if let Some(r) = closed_form(a, b, region, true) {
         return Ok(r);
     }
-    if let Some(r) = closed_form(b, a, region) {
+    if let Some(r) = closed_form(b, a, region, true) {
         return Ok(r);
     }
     let (curves, points) = march::trace(a, b, region, &seeds())?;
     Ok(Ssi::Curves { curves, points })
 }
 
-/// The intersection of `a` and `b` within `region` where a closed form gives all of it: `None`
-/// where it would have to be traced from seeds, which can miss a loop no seed lies on.
+/// The intersection of `a` and `b` within `region` where a closed form gives all of it outright:
+/// `None` where it would have to be traced from seeds, which can miss a loop no seed lies on, or
+/// fitted along a sweeping family, which costs as much as a boolean's own work on the pair.
 pub(crate) fn intersect_closed(a: &Surface, b: &Surface, region: &Aabb) -> Option<Ssi> {
     if same_domain(a, b) {
         return Some(Ssi::Coincident);
     }
-    closed_form(a, b, region).or_else(|| closed_form(b, a, region))
+    closed_form(a, b, region, false).or_else(|| closed_form(b, a, region, false))
 }
 
 /// Whether moving along `dir` leaves `s` unchanged.
@@ -1058,7 +1059,9 @@ fn plane_patch(p: &Frame, n: &crate::geom::NurbsSurface) -> Option<Ssi> {
     None
 }
 
-fn closed_form(a: &Surface, b: &Surface, region: &Aabb) -> Option<Ssi> {
+/// With `fitted`, the pairs whose branches are evaluated along a sweeping family and fitted too.
+fn closed_form(a: &Surface, b: &Surface, region: &Aabb, fitted: bool) -> Option<Ssi> {
+    let sweep = |a: &Surface, b: &Surface| fitted.then(|| sweep::intersect(a, b, region)).flatten();
     if let Some(r) = swept(a, b, region) {
         return Some(r);
     }
@@ -1085,7 +1088,7 @@ fn closed_form(a: &Surface, b: &Surface, region: &Aabb) -> Option<Ssi> {
                 let pts = meridian_points(plane_meridian, meridian(b, axis)?)?;
                 return Some(circles_about(axis, axis.dir.any_perpendicular(), pts));
             }
-            return sweep::intersect(a, b, region);
+            return sweep(a, b);
         }
         (Surface::Plane(p), Surface::Cone(c)) => {
             let axis = axis_of(b)?;
@@ -1102,7 +1105,7 @@ fn closed_form(a: &Surface, b: &Surface, region: &Aabb) -> Option<Ssi> {
             return conic::plane_cone(p, c, region);
         }
         (Surface::Cylinder(x), Surface::Cylinder(y)) => {
-            return cylinder_cylinder(x, y, region).or_else(|| sweep::intersect(a, b, region));
+            return cylinder_cylinder(x, y, region).or_else(|| sweep(a, b));
         }
         _ => {}
     }
@@ -1130,7 +1133,7 @@ fn closed_form(a: &Surface, b: &Surface, region: &Aabb) -> Option<Ssi> {
             .flatten(),
         _ => same_axis(xa, xb).then(|| coaxial(a, b, xa)).flatten(),
     };
-    symmetric.or_else(|| sweep::intersect(a, b, region))
+    symmetric.or_else(|| sweep(a, b))
 }
 
 #[cfg(test)]

@@ -348,14 +348,28 @@ surface is certain. A ray decides nothing where it passes the box of a face on a
 meets a face on its boundary or at a tangent, or starts where a third face lies, and an edge kept
 with a local tolerance, or between faces that fold back on each other, starts none.
 
-That the faces meet only where they share an edge or a vertex is searched, not taken. Faces that
-share no edge are the pairs of the search above, which runs after. Faces that share an edge are
-searched before a ray is believed, by the same two tests: no edge of one that the other does not
-share may meet the other face, and the two may not cross along a curve out of a vertex they share.
-Where the surfaces cut across each other at an end of a shared edge they meet near it along one
-curve, the edge's own, so the faces can cross there only along the edge carried on past its end;
-that needs both faces' corners there to span a half turn or more, and the test is left out where
-either corner is convex. A pair found to meet nowhere else is recorded in both faces' memos with the
+That the faces meet only where they share an edge or a vertex is searched, not taken, and a ray
+settles a solid only where the search leaves nothing open.
+
+Two faces can pass through each other with no edge of either meeting the other: along a closed
+curve inside both, as two balls that overlap in a lens, or along a curve from one vertex they share
+to another, as two half cylinders whose surfaces touch at both. For two faces on analytic surfaces
+whose every curve of intersection a closed form gives, those curves are cut at the vertices the
+faces share and the middle of each stretch is located in both faces: a stretch lies inside both
+whole or not at all, since it could leave either only across an edge, which the edge search would
+show. A curve the surfaces only touch along is left out; analytic surfaces that touch along a curve
+stay to one side of each other there. Where the surfaces cut across each other at an end of an edge
+the faces share, they meet near it along one curve, the edge's own, and the stretch out of it is
+the edge or the edge carried on past its end, which a face whose corner there is convex does not
+hold: such a stretch is not located. The search of faces that share no edge makes this test after
+its edges, and reports a crossing whatever shells the faces lie in; a pair it clears is recorded in
+both faces' memos and not searched again. Where a pair's curves would have to be traced from seeds
+(a cylinder and a cone, two tori), or a face lies off the analytic surfaces, the step out of a
+shared vertex is taken as before and the pair's solid is left open.
+
+Faces that share an edge are searched before a ray is believed, in the same two ways: no edge of
+one that the other does not share may meet the other face, and no stretch of the surfaces' curves
+may lie inside both. A pair found to meet nowhere else is recorded in both faces' memos with the
 places of the shared edges in each face, and is not searched again while both keep their geometry
 and share the same edges. An edge against a face off the analytic surfaces costs what the integral
 does, so a sheet with such a pair not yet recorded is left to the integral. Two block-shaped lobes
@@ -363,10 +377,28 @@ joined corner to corner, one facing out and the larger facing in, whose L-shaped
 and pass through each other beyond it, were taken as facing outward by a ray off the first lobe
 before edge-sharing faces were searched.
 
+A face must not cross itself either. On an analytic surface a face whose boundary does not cross
+itself covers no part of the surface twice: those surfaces fold onto themselves only at a cone's
+apex, a sphere's poles and the points where a torus that reaches its axis meets it, where a face
+can touch itself and not pass through. Two edges of a face that cross are shown by the search of
+edge-sharing faces wherever some other face uses one and not the other. What that leaves is tested
+directly: two edges the same other face uses, or the face itself along a seam, are intersected
+where both are lines, circles or ellipses, and every edge must be seen not to cross itself, a
+spline by its control points (it runs one way along its chord, or turns one way about an axis
+through their middle for no more than a turn). A spline face is not searched for crossing itself,
+so a sheet with one is left to the integral, as is one where any of this cannot be shown.
+
+So a ray settles a solid whose faces all lie on analytic surfaces, whose boundaries are seen not to
+cross themselves, and whose every pair of faces with meeting boxes was searched with every curve of
+intersection known. What an edge shows of two faces cut from one input of a boolean is not
+reported, as before, since such faces may touch where the input's faces did; a solid with such a
+pair is left open.
+
 Whenever a check that a ray settled goes on to find any issue, it is made again by the integral
-alone, so the issues are those the integral gives first. What no ray settles, a solid of several
-shells, a sheet that touches itself along an edge, and a check without the search for crossings
-(an import's structure) take the volume integral.
+alone, so the issues are those the integral gives first; a solid a ray settled that the search
+leaves open takes the integral after all. What no ray settles, a solid of several shells, a sheet
+that touches itself along an edge, and a check without the search for crossings (an import's
+structure) take the volume integral.
 
 Every operation runs the checker on its result and returns `Error::InvalidResult` instead of a
 broken solid. Booleans and blends must keep that contract.
