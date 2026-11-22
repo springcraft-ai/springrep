@@ -4,7 +4,8 @@
 //! corner it rounded.
 //!
 //! The faces move along paths from their old surfaces to their new ones. The furthest the solid can
-//! go with its topology kept is found by bisection; there each edge that has shrunk to nothing is
+//! go with its topology kept is found by bisection, or, where an edge shrinks in proportion to the
+//! move, from two shares the move reaches; there each edge that has shrunk to nothing is
 //! collapsed to a vertex, and each face left a strip between two edges that now run together is
 //! taken out, the two edges one; a corner carried onto an edge splits it first, and a corner of
 //! four faces that the move cannot carry on pulls apart into two joined by a new edge. The move
@@ -53,6 +54,106 @@ const CLOSED: f64 = 10.0 * tol::LINEAR;
 
 /// The most guesses a search for a closing takes before it only halves its bracket.
 const GUESSES: usize = 40;
+
+/// How long a guess aims the first shrinking edge at: just over the shortest length the checker
+/// passes, where a bracket ends.
+const AIMED: f64 = 1.5 * tol::LINEAR;
+
+/// How long a shrinking edge may be where a search stops short of its bracket.
+const REACHED: f64 = 2.0 * tol::LINEAR;
+
+/// The radii a guess aims a shrinking arc at, and at which a search may stop on one: an arc is
+/// rebuilt down to a radius of about the tolerance, where its bracket ends, however long that
+/// leaves it.
+const AIMED_RADIUS: f64 = 1.2 * tol::LINEAR;
+const REACHED_RADIUS: f64 = 1.5 * tol::LINEAR;
+
+/// How long a guess aims a shrinking edge that turns through `turn` at, and how long it may be
+/// where a search stops: never as long as what is made one.
+fn aimed(turn: f64) -> f64 {
+    AIMED.max(AIMED_RADIUS * turn)
+}
+
+fn reached(turn: f64) -> f64 {
+    REACHED.max(REACHED_RADIUS * turn).min(0.9 * CLOSED)
+}
+
+/// A share the move reaches, with every edge's length and every vertex there.
+struct Reached {
+    share: f64,
+    lengths: Vec<f64>,
+    points: Vec<Point3>,
+}
+
+impl Reached {
+    fn new(share: f64, b: &Brep) -> Reached {
+        Reached {
+            share,
+            lengths: lengths(b),
+            points: b.vertex_ids().map(|v| b.vertex(v).point).collect(),
+        }
+    }
+}
+
+/// Whether a search that has reached `b`, with the solid `near` there, after `a`, may stop: what
+/// is made one at `b` is what is made one at the end of the bracket, which lies between `b` and
+/// `hi`, a share the move does not reach.
+///
+/// An edge that shrank from `a` to `b`, is no longer than [`reached`] and, run on in a straight
+/// line, closes by `hi` puts the bracket's end between `b` and its closing. What is made one is
+/// every edge and pair of vertices within [`CLOSED`]: each edge, and each pair of vertices near
+/// that at `b`, must be within it at both ends of that stretch or beyond it at both, by a tenth
+/// either way, its length run on in a straight line; and no vertex may lie within [`CLOSED`] or
+/// twice that of the inside of an edge it is not on, which would be split there.
+fn stops(a: &Reached, b: &Reached, near: &Brep, turns: &[f64], hi: f64) -> bool {
+    let run = b.share - a.share;
+    // An edge that closes as the move ends is run on to that end give or take its rounding.
+    let by = hi + 1e-9 * (1.0 + hi);
+    let end = a
+        .lengths
+        .iter()
+        .zip(&b.lengths)
+        .zip(turns)
+        .filter(|&((la, lb), &turn)| lb < la && la.is_finite() && *lb <= reached(turn))
+        .map(|((la, lb), _)| b.share + lb * run / (la - lb))
+        .filter(|&z| z <= by)
+        .fold(f64::INFINITY, f64::min);
+    if !end.is_finite() {
+        return false;
+    }
+    let same = |la: f64, lb: f64| {
+        let then = lb + (lb - la) * (end - b.share) / run;
+        if lb <= CLOSED {
+            lb <= 0.9 * CLOSED && then <= 0.9 * CLOSED
+        } else {
+            then > 1.1 * CLOSED
+        }
+    };
+    let edges = a
+        .lengths
+        .iter()
+        .zip(&b.lengths)
+        .all(|(&la, &lb)| !la.is_finite() || same(la, lb));
+    if !edges {
+        return false;
+    }
+    let mut order: Vec<usize> = (0..b.points.len()).collect();
+    order.sort_by(|&i, &j| b.points[i].x.total_cmp(&b.points[j].x));
+    for (k, &i) in order.iter().enumerate() {
+        for &j in &order[k + 1..] {
+            if b.points[j].x - b.points[i].x > 2.0 * CLOSED {
+                break;
+            }
+            let lb = b.points[i].dist(b.points[j]);
+            if lb <= 2.0 * CLOSED && !same(a.points[i].dist(a.points[j]), lb) {
+                return false;
+            }
+        }
+    }
+    [CLOSED, 2.0 * CLOSED]
+        .iter()
+        .all(|&eps| splits::split_at_vertices(near, eps).is_none())
+}
 
 /// Every edge's length, a pole's infinite.
 fn lengths(b: &Brep) -> Vec<f64> {
@@ -105,11 +206,27 @@ pub(crate) fn through(b: &Brep, paths: &HashMap<FaceId, Path>) -> Result<(Brep, 
         // get there is a guess at where the move stops. A guess, and the probe that follows it
         // just to its other side, only choose where the bracket is cut: it still closes on a
         // share the move reaches beside one it does not, as halving it does.
-        let mut reached: Vec<(f64, Vec<f64>)> = Vec::new();
+        let mut reached: Vec<Reached> = Vec::new();
         if let Ok(start) = at(s0) {
-            reached.push((s0, lengths(&start)));
+            reached.push(Reached::new(s0, &start));
         }
         let (mut guesses, mut guessed, mut probe) = (0, None::<(f64, f64)>, None::<f64>);
+        // Where an edge shrinks in proportion to the move, the first guess is where it closes, and
+        // the move stops there once it reaches a share at which the edge has all but closed.
+        let direct = crate::edit::local::direct_allowed();
+        // The angle each arc turns through, which a move of its faces along their normals keeps.
+        let turns: Vec<f64> = cur
+            .edge_ids()
+            .map(|e| match &cur.edge(e).curve {
+                Some(crate::geom::Curve::Circle(_)) => {
+                    let (t0, t1) = cur.edge(e).range;
+                    (t1 - t0).abs()
+                }
+                _ => 0.0,
+            })
+            .collect();
+        // The solid at `lo`, where the search stopped there.
+        let mut near = None;
         while hi - lo > 1e-15 * (1.0 + hi) {
             let mut mid = 0.5 * (lo + hi);
             if mid <= lo || mid >= hi {
@@ -120,14 +237,18 @@ pub(crate) fn through(b: &Brep, paths: &HashMap<FaceId, Path>) -> Result<(Brep, 
             if let Some(s) = probe.take().filter(inside) {
                 mid = s;
             } else if guesses < GUESSES
-                && let [.., (sa, la), (sb, lb)] = &reached[..]
-                && *sb == lo
+                && let [.., a, b] = &reached[..]
+                && b.share == lo
             {
-                let first = la
+                let aim = |turn: f64| if direct { aimed(turn) } else { tol::LINEAR };
+                let (sa, sb) = (a.share, b.share);
+                let first = a
+                    .lengths
                     .iter()
-                    .zip(lb)
-                    .filter(|(a, b)| b < a && a.is_finite())
-                    .map(|(a, b)| sb + (b - tol::LINEAR) * (sb - sa) / (a - b))
+                    .zip(&b.lengths)
+                    .zip(&turns)
+                    .filter(|((a, b), _)| b < a && a.is_finite())
+                    .map(|((a, b), &turn)| sb + (b - aim(turn)) * (sb - sa) / (a - b))
                     .fold(f64::INFINITY, f64::min);
                 if inside(&first) {
                     mid = first;
@@ -138,9 +259,19 @@ pub(crate) fn through(b: &Brep, paths: &HashMap<FaceId, Path>) -> Result<(Brep, 
             let ok = match at(mid) {
                 Ok(out) => {
                     lo = mid;
-                    reached.push((mid, lengths(&out)));
+                    reached.push(Reached::new(mid, &out));
                     if reached.len() > 2 {
                         reached.remove(0);
+                    }
+                    if direct
+                        && guess.is_some()
+                        && let [a, b] = &reached[..]
+                        && stops(a, b, &out, &turns, hi)
+                    {
+                        #[cfg(test)]
+                        crate::edit::local::count_direct();
+                        near = Some(out);
+                        break;
                     }
                     true
                 }
@@ -169,7 +300,7 @@ pub(crate) fn through(b: &Brep, paths: &HashMap<FaceId, Path>) -> Result<(Brep, 
                 probe = Some(if ok { s + step } else { s - step });
             }
         }
-        let closing = at(lo).ok().and_then(|near| {
+        let closing = near.or_else(|| at(lo).ok()).and_then(|near| {
             // A corner carried onto an edge it did not touch splits the edge there.
             if let Some(split) = splits::split_at_vertices(&near, CLOSED) {
                 return collapse(&split, CLOSED, &HashSet::new());

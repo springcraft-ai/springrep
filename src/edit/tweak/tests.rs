@@ -803,3 +803,179 @@ fn an_extrusion_moved_past_its_radius_of_curvature_is_not_fitted() {
     assert!(offset_fitted(&e, 1.5 * inward, bounds).is_ok());
     assert!(offset_fitted(&e, -2.5 * inward, bounds).is_ok());
 }
+
+/// What `f` builds, which must be the solid it builds with every closing bracketed, and how many
+/// closings its search stopped at short of a bracket.
+fn followed_both_ways(f: impl Fn() -> Result<Brep>) -> (Brep, usize) {
+    use crate::edit::local::{assert_same, counted, general};
+    let (fast, stops) = counted(|| f().unwrap());
+    let (slow, bracketed) = counted(|| general(&f).unwrap());
+    assert_eq!(bracketed, 0);
+    assert_same(&fast, &slow);
+    (fast, stops)
+}
+
+/// A prism 3 tall on the polygon `pts`, its sides named `e0`, `e1`, … from the first edge.
+fn sided(pts: &[(f64, f64)]) -> Brep {
+    let pts: Vec<Vec2> = pts.iter().map(|&(x, y)| Vec2::new(x, y)).collect();
+    let names: Vec<String> = (0..pts.len()).map(|i| format!("e{i}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    sweep::extrude(&Profile::polygon(&pts, &names), &Frame::WORLD, 3.0, "box").unwrap()
+}
+
+#[test]
+fn a_move_stopped_at_each_closing_is_the_move_bracketed_there() {
+    // A riser closed from below and from above, at the end of the move.
+    let step = sided(&[
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (10.0, 2.0),
+        (4.0, 2.0),
+        (4.0, 6.0),
+        (0.0, 6.0),
+    ]);
+    for (name, d) in [("e2", 4.0), ("e4", -4.0)] {
+        let by = HashMap::from([(face(&step, name), d)]);
+        let (out, stops) = followed_both_ways(|| offset_faces(&step, &by));
+        assert_eq!((out.face_count(), stops), (6, 1));
+    }
+    // A slot's walls brought face to face.
+    let slot = sided(&[
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (10.0, 6.0),
+        (7.0, 6.0),
+        (7.0, 2.0),
+        (3.0, 2.0),
+        (3.0, 6.0),
+        (0.0, 6.0),
+    ]);
+    let by = HashMap::from([(face(&slot, "e5"), 4.0)]);
+    let (out, stops) = followed_both_ways(|| offset_faces(&slot, &by));
+    assert_eq!((out.face_count(), stops), (6, 1));
+    // A puck's rounds closed part of the way: arcs stopped at where they are still rebuilt.
+    let c = crate::primitive::cylinder(&up(0.0), 6.0, 10.0, "puck").unwrap();
+    let pairs = [("puck.start", "puck.side"), ("puck.end", "puck.side")];
+    let puck = crate::blend::fillet(&c, &pairs, 2.0, "round").unwrap();
+    for d in [2.0, 3.0] {
+        let by: HashMap<FaceId, f64> = puck.face_ids().map(|f| (f, -d)).collect();
+        let (out, stops) = followed_both_ways(|| offset_faces(&puck, &by));
+        assert_eq!((out.face_count(), stops), (3, 1));
+    }
+    // A cone's side shrunk onto its apex below its top: a circle closed onto a pole.
+    let frustum = crate::primitive::cone(&up(0.0), 6.0, 3.0, 4.0, "frustum").unwrap();
+    let top = FaceName::new("frustum", "top");
+    let by: HashMap<FaceId, f64> = frustum
+        .face_ids()
+        .filter(|&f| !frustum.face(f).names.contains(&top))
+        .map(|f| (f, -2.7))
+        .collect();
+    assert!(followed_both_ways(|| offset_faces(&frustum, &by)).1 > 0);
+    // Walls drafted until they meet: planes turned, their edges shrinking unevenly.
+    let (out, stops) = followed_both_ways(|| drafted_box(&["u_min", "u_max"]));
+    assert_eq!(out.face_count(), 5);
+    assert!(stops > 0);
+    assert!(followed_both_ways(|| drafted_box(&["u_min", "u_max", "v_min", "v_max"])).1 > 0);
+}
+
+#[test]
+fn edges_that_close_together_at_uneven_rates_are_made_one_in_one_step() {
+    use crate::profile::{NamedSegment, ProfileLoop, Segment};
+    // A prism whose corners turn 90°, 90°, 10°, 80° and 90°, each rounded to 1, every face moved
+    // in by 1.5: the rounds close together, the arc of the 10° corner nine times slower than
+    // the others. Where it is short enough to stop at, theirs are still longer than what is made
+    // one, so the search goes on to its bracket's end, where all five close in one step.
+    let (sin, cos) = 100f64.to_radians().sin_cos();
+    let d = Vec2::new(10.0 + 3.0 * cos, 6.0 + 3.0 * sin);
+    let pts = [
+        Vec2::new(0.0, 0.0),
+        Vec2::new(10.0, 0.0),
+        Vec2::new(10.0, 6.0),
+        d,
+        Vec2::new(0.0, d.y),
+    ];
+    let n = pts.len();
+    let mut segments = Vec::new();
+    // Each corner's arc from where it leaves the side before it to where it joins the next.
+    let arcs: Vec<(Vec2, f64, f64, Vec2, Vec2)> = (0..n)
+        .map(|i| {
+            let (p, q, r) = (pts[(i + n - 1) % n], pts[i], pts[(i + 1) % n]);
+            let unit = |w: Vec2| w * (1.0 / w.dot(w).sqrt());
+            let (u, v) = (unit(q - p), unit(r - q));
+            let turn = (u.x * v.y - u.y * v.x).atan2(u.dot(v));
+            let t = (turn / 2.0).tan();
+            let centre = q - u * t + Vec2::new(-u.y, u.x);
+            (
+                centre,
+                u.y.atan2(u.x) - std::f64::consts::FRAC_PI_2,
+                turn,
+                q - u * t,
+                q + v * t,
+            )
+        })
+        .collect();
+    for i in 0..n {
+        let (centre, start, sweep, _, leaves) = arcs[i];
+        segments.push(NamedSegment::new(
+            Segment::Arc {
+                center: centre,
+                radius: 1.0,
+                start,
+                sweep,
+            },
+            format!("r{i}"),
+        ));
+        let joins = arcs[(i + 1) % n].3;
+        let side = Segment::Line {
+            a: leaves,
+            b: joins,
+        };
+        segments.push(NamedSegment::new(side, format!("s{i}")));
+    }
+    let p = Profile {
+        loops: vec![ProfileLoop { segments }],
+    };
+    let b = sweep::extrude(&p, &Frame::WORLD, 6.0, "box").unwrap();
+    assert_eq!(b.face_count(), 12);
+    let by: HashMap<FaceId, f64> = b.face_ids().map(|f| (f, -1.5)).collect();
+    let (out, stops) = followed_both_ways(|| offset_faces(&b, &by));
+    assert_eq!((out.face_count(), stops), (7, 0));
+}
+
+#[test]
+fn an_edge_already_shorter_than_what_is_made_one_closes_no_sooner() {
+    // The step's corner at the origin is cut by a face 7e-7 wide, which the wall beside it,
+    // moved in by 2e-7, narrows a little all the way; the riser closes as the move ends. The
+    // narrow face is not on its way to closing, so nothing stops the search for it, and it is
+    // made one where the riser closes, as with the bracket.
+    let c = 5e-7;
+    let step = sided(&[
+        (c, 0.0),
+        (10.0, 0.0),
+        (10.0, 2.0),
+        (4.0, 2.0),
+        (4.0, 6.0),
+        (0.0, 6.0),
+        (0.0, c),
+    ]);
+    assert!(check::check(&step).is_empty());
+    let by = HashMap::from([(face(&step, "e2"), 4.0), (face(&step, "e5"), -2e-7)]);
+    use crate::edit::local::{assert_same, counted, general};
+    let (fast, stops) = counted(|| offset_faces(&step, &by));
+    let slow = general(|| offset_faces(&step, &by));
+    let (fast, slow) = (fast.unwrap(), slow.unwrap());
+    assert_same(&fast, &slow);
+    assert_eq!((fast.face_count(), stops), (6, 1));
+}
+
+#[test]
+fn a_move_no_edge_closes_on_is_bracketed() {
+    use crate::edit::local::{assert_same, counted, general};
+    // A torus grown until its hole closes folds onto its axis with every edge as long as it was:
+    // the move cannot be followed there, and the grown torus is built from its slab.
+    let ring = crate::primitive::torus(&Frame::WORLD, 4.0, 2.0, "ring").unwrap();
+    let by: HashMap<FaceId, f64> = ring.face_ids().map(|f| (f, 3.0)).collect();
+    let (fast, stops) = counted(|| offset_faces(&ring, &by).unwrap());
+    assert_eq!(stops, 0);
+    assert_same(&fast, &general(|| offset_faces(&ring, &by)).unwrap());
+}

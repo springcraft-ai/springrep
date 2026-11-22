@@ -1323,7 +1323,32 @@ bisection, to a bracket of 1e-15 of the move: a share the move reaches beside on
 edges shrink between the last two shares reached, the bracket is cut not at its middle but where the
 first of them, run on in a straight line, comes down to the shortest length the checker passes, and
 then just to that guess's other side, by a few times what the guesses are still moving by; a guess
-only chooses where the bracket is cut, so what it closes on is the same. There vertices closer than ten times the tolerance are made one, edges that then run
+only chooses where the bracket is cut, so what it closes on is the same.
+
+Many closings need no bracket. An edge that shrinks in proportion to the move (a riser between two
+tops brought level, a slot's floor, a circle about an axis) closes where two shares the move reaches
+say it does, so a guess is aimed where the edge is one and a half times the shortest length the
+checker passes, or, for an arc, where its radius is 1.2 times the tolerance if that leaves it
+longer (an arc is rebuilt down to a radius of about the tolerance), which is just short of where a
+bracket ends. The search stops at a guess the move reaches only where
+what is made one there is shown to be what is made one at the bracket's end:
+
+- an edge that shrank since the share before is no longer than twice the tolerance there (an arc
+  of radius up to one and a half times the tolerance, and never over nine tenths of what is made
+  one) and, run on in a straight line, closes before a share the move is known not
+  to reach, so the bracket's end lies between the guess and that closing;
+- every edge, and every pair of vertices within twice the distance that is made one, is within that
+  distance at both ends of that stretch or beyond it at both, by a tenth either way, its length
+  run on in a straight line: edges that close together at rates so uneven that the fastest is
+  still too long at the guess fail this;
+- no vertex lies within that distance, or twice it, of the inside of an edge it is not on, where
+  the edge would be split first.
+
+Anything else closes its bracket as before: a guess the move does not reach, a search in which no edge shrinks to its closing (a
+torus grown until its hole closes, a ball's cap shrinking through a plane), and an edge already
+shorter than what is made one that is not on its way to closing, which stops nothing.
+
+There vertices closer than ten times the tolerance are made one, edges that then run
 together one, and edges shorter than that dropped; a face left a strip along a single edge (or an
 annulus whose two rims have run together), or lying on another face to face, is taken out, and a
 face left running along an edge and back loses it: the edge goes where nothing else uses it, and is

@@ -20,6 +20,97 @@ use crate::{
     topo::{Brep, CoedgeId, CoedgeSpec, EdgeId, FaceId, LoopId, PCurve, VertexId},
 };
 
+#[cfg(test)]
+thread_local! {
+    static GENERAL_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static DIRECT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Notes that an edit skipped its general way.
+#[cfg(test)]
+pub(crate) fn count_direct() {
+    DIRECT.with(|d| d.set(d.get() + 1));
+}
+
+/// Whether an edit may take a way that skips its general one. Always, outside a test.
+pub(crate) fn direct_allowed() -> bool {
+    #[cfg(test)]
+    if GENERAL_ONLY.with(|g| g.get()) {
+        return false;
+    }
+    true
+}
+
+/// What `f` gives with every edit in it going its general way.
+#[cfg(test)]
+pub(crate) fn general<T>(f: impl FnOnce() -> T) -> T {
+    GENERAL_ONLY.with(|g| g.set(true));
+    let out = f();
+    GENERAL_ONLY.with(|g| g.set(false));
+    out
+}
+
+/// What `f` gives, and how many times an edit in it skipped its general way.
+#[cfg(test)]
+pub(crate) fn counted<T>(f: impl FnOnce() -> T) -> (T, usize) {
+    let before = DIRECT.with(|d| d.get());
+    let out = f();
+    (out, DIRECT.with(|d| d.get()) - before)
+}
+
+/// Asserts `a` and `b` are one solid: face for face the same surface facing the same way with
+/// the same names and area, and the same volume, box, edges and length of edges.
+#[cfg(test)]
+pub(crate) fn assert_same(a: &Brep, b: &Brep) {
+    use crate::{check, measure, topo::radial};
+    let close = |got: f64, want: f64| {
+        assert!(
+            (got - want).abs() <= 1e-9 * want.abs().max(1.0),
+            "{got} against {want}"
+        );
+    };
+    let lengths = |s: &Brep| -> f64 {
+        s.edge_ids()
+            .filter_map(|e| {
+                let x = s.edge(e);
+                x.curve.as_ref().map(|c| radial::length(c, x.range))
+            })
+            .sum()
+    };
+    assert!(check::check(a).is_empty(), "{:?}", check::check(a));
+    assert!(check::check(b).is_empty(), "{:?}", check::check(b));
+    assert_eq!(a.face_count(), b.face_count());
+    assert_eq!(a.edge_ids().count(), b.edge_ids().count());
+    assert_eq!(a.vertex_ids().count(), b.vertex_ids().count());
+    assert_eq!(a.shell_ids().count(), b.shell_ids().count());
+    close(measure::volume(a), measure::volume(b));
+    close(measure::area(a), measure::area(b));
+    close(lengths(a), lengths(b));
+    let (ba, bb) = (measure::bbox(a), measure::bbox(b));
+    assert!(ba.min.dist(bb.min) <= 1e-9 && ba.max.dist(bb.max) <= 1e-9);
+    let mut left: Vec<FaceId> = b.face_ids().collect();
+    for f in a.face_ids() {
+        let face = a.face(f);
+        let p = measure::face_centroid(a, f);
+        let out = |s: &Brep, g: FaceId| {
+            let x = s.face(g);
+            let uv = x.surface.project(p);
+            let n = x.surface.normal(uv.x, uv.y);
+            if x.reversed { -n } else { n }
+        };
+        let at = left.iter().position(|&g| {
+            let other = b.face(g);
+            other.names == face.names
+                && same_domain(&other.surface, &face.surface)
+                && out(a, f).dot(out(b, g)) > 0.0
+                && (measure::face_area(a, f) - measure::face_area(b, g)).abs() <= 1e-9
+                && measure::face_centroid(b, g).dist(p) <= 1e-7
+        });
+        let at = at.unwrap_or_else(|| panic!("no face of the other like {:?}", face.names));
+        left.swap_remove(at);
+    }
+}
+
 /// An edge of a [`Splice`] as a loop uses it. Edges and vertices of the solid keep their indices;
 /// new ones follow them.
 #[derive(Clone, Copy)]
