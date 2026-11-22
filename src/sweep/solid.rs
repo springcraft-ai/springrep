@@ -10,6 +10,7 @@ mod cut;
 mod grazing;
 mod motion;
 mod moving;
+mod orbit;
 mod product;
 mod sheet;
 #[cfg(test)]

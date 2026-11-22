@@ -485,7 +485,7 @@ impl Steady {
 
     /// The span of the motion's own parameter on its paths and sheets: the slide's length, or the
     /// angle turned.
-    fn span(&self) -> f64 {
+    pub(super) fn span(&self) -> f64 {
         match self {
             Steady::Slide { by } => by.norm(),
             Steady::Turn { angle, .. } | Steady::Screw { angle, .. } => *angle,

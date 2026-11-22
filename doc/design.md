@@ -1776,7 +1776,25 @@ built in parts: the body at the start, its faces cut along their curves, united 
 the solid each piece of face in `W` sweeps on its own (its two ends and the faces its boundary
 sweeps). Each part starts on a face of the body and grazes it along its curves there; the boolean
 is told so (each such edge lies on the other's face), as a blend tells it of a round's tangent
-edges. A body that is itself a union, as a ball on a stem, may instead be swept a piece at a time,
+edges.
+
+The checker pairs only faces that share no edge, and never a face with itself, so it cannot see a
+swept face that passes through itself or through a swept face beside it: a body screwed about a
+line close by turns back through what it swept. Those are found before the faces are sewn
+([`orbit.rs`](../src/sweep/solid/orbit.rs)). A steady motion carries each point along its orbit, a
+line, a circle or a helix, and an orbit is named by two lengths the motion keeps: the place in the
+plane square to a slide; the distance from the axis and the height along it for a turn; the
+distance and `z − c·θ` for a screw of rise `c`, read again a whole turn on. Two points of the swept
+curves on one orbit, less than the motion's span apart along it, are one point of two sheets, or
+of one sheet twice. So the curves are drawn in the plane of the two lengths, and the sheets cross
+where two drawings cross, or one crosses itself, at points that close along their orbit. The
+drawings are sampled, and each crossing of their chords is confirmed on the curves by Newton's
+method: two curves that leave a shared end along one line, as a grazing curve and the edge it ends
+on do, have chords that cross beside it, and the steps run to the end. Such a product is invalid,
+and is built in parts or refused as any other overlap is; without this it was a solid that bounded
+the overlap twice.
+
+A body that is itself a union, as a ball on a stem, may instead be swept a piece at a time,
 since the sweep of a union is the union of the sweeps.
 
 The unions look for where each edge meets each face's surface by the signed distance to the

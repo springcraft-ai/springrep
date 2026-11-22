@@ -1091,3 +1091,32 @@ fn a_leaning_drum_or_cone_screwed_far_from_the_axis_is_cut_along_its_steep_curve
         assert!(rel(got, want) < 1e-5, "{got} {want}");
     }
 }
+
+// A cone screwed about a line that grazes it turns back through what it swept: the sheets its rim
+// and its grazing curves sweep pass through themselves and each other, though they share edges.
+// Sewn as they stand they bound the overlap twice, 6% more than the solid.
+#[test]
+fn a_cone_screwed_back_through_its_own_sweep_is_no_product() {
+    let frame = Frame::new(
+        Vec3::new(-1.0, -0.5, -1.0),
+        Vec3::new(1.0, 1.0, 1.0),
+        Vec3::X,
+    )
+    .unwrap();
+    let body = crate::primitive::cone(&frame, 1.0, 0.0, 2.0, "cone").unwrap();
+    let motion = Motion::Screw {
+        screw: screw_z(2.0),
+        from: 0.0,
+        to: 2.2,
+    };
+    let (steady, twist) = (
+        sheet::Steady::of(&motion).unwrap(),
+        motion.steady().unwrap(),
+    );
+    let cut = cut::cut(&body, &move |p| twist.at(p), steady.held()).unwrap();
+    assert!(matches!(
+        product::product(&cut, &steady, "sw", None, None),
+        Err(Error::InvalidResult(_))
+    ));
+    assert!(solid(&body, &motion, "sw").is_err());
+}

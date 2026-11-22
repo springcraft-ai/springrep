@@ -15,7 +15,7 @@ use crate::{
         sew::{self, OutFace, PieceGeom},
     },
     geom::Curve,
-    math::{Point3, Transform, Vec2, Vec3},
+    math::{Aabb, Point3, Transform, Vec2, Vec3},
     tol,
     topo::{Brep, FaceName, pcurve::fit_spline},
 };
@@ -190,6 +190,7 @@ pub(super) fn product(
     let stops = motion.stops();
     // Where each curve's face folds, on the curve at both ends of the motion.
     let mut fold_at: HashMap<usize, Vec<f64>> = HashMap::new();
+    let mut swept_curves: Vec<(Curve, (f64, f64))> = Vec::new();
     for k in keys {
         let us = &uses[&k];
         let inside: Vec<&(usize, bool)> = us.iter().filter(|u| swept(u.0)).collect();
@@ -234,6 +235,7 @@ pub(super) fn product(
             ));
         }
         let sheet = motion.sheet(&placed, cut.whole[k], pg.range)?;
+        swept_curves.push((placed, pg.range));
         let span = sheet.span;
         let mut path =
             |v: usize, pieces: &mut Vec<PieceGeom>, pool: &mut Vec<Point3>| -> Result<Vec<usize>> {
@@ -385,6 +387,15 @@ pub(super) fn product(
     }
     if let Some(reach) = trim {
         return super::trim::assemble(faces, pool, pieces, reach, &fold_at);
+    }
+    // The checker pairs only faces that share no edge, and never a face with itself.
+    let mut bounds = Aabb::EMPTY;
+    cut.pool.iter().for_each(|&p| bounds.add(p));
+    let size = bounds.diagonal();
+    if super::orbit::crossed(motion, &swept_curves, size) {
+        return Err(Error::InvalidResult(vec![
+            "a face a curve sweeps passes through itself or another such face".into(),
+        ]));
     }
     let vtol = vec![tol::LINEAR; pool.len()];
     if only.is_none() {
