@@ -1504,6 +1504,48 @@ belong to a changed face's shell and have the region strictly to one side of its
 that fails any of this, or the checker, or a gap of any other shape, goes the general way, and so
 does a choice between two closings that both pass.
 
+### Walls and slabs
+
+A shell's wall and the slab thickened faces sweep are each a solid less the same solid with some of
+its faces moved: `shell` takes the cavity (every face but the open ones moved in) from the solid,
+or the solid from its outside moved out, and `thicken` the solid from itself with the named faces
+moved out, or itself with them moved in from the solid. The two solids share every face that did
+not move, but for the strip such a face gained or lost beside a moved one, so their difference is
+built from their own faces, with no intersection ([`between.rs`](../src/edit/between.rs)):
+
+- each moved face of the larger solid, as it is;
+- each moved face of the smaller, turned to face the other way, its loops run backwards;
+- for each face that did not move, the strips the larger has of it and the smaller has not. Where
+  a whole loop runs along moved faces (a shell's opening, a cylinder's end beside its thickened
+  side), the strip lies between the larger's loop and the smaller's run backwards: the larger's is
+  the outer one where it was the face's outer loop, and the hole where it was a hole, the strip
+  then lying round it. Elsewhere each run of edges along moved faces bounds a strip of its own,
+  closed at both ends by the stretch of the edge that leads up to the run, between the smaller's
+  corner on it and the larger's. That stretch is new, on the larger's own curve, and one edge of
+  the strips of the two faces it lies between.
+
+The faces must be paired first. Where the move kept the solid's topology, the two solids have the
+same faces, loops and coedges in the same order, and every face that did not move is paired with
+itself: a corner no moved face is at must be the same point in both. Where a wall of a shell closed
+on the way in (rounds thinner than the wall), an open face is paired with the one face of the
+cavity on its surface, facing its way and carrying its names, and only where each has a single loop
+that runs along moved faces all the way round; an open face the cavity has no face on is kept
+whole (a frustum's top above the apex its moved side closes on).
+
+The result is taken only where it is the difference. The faces laid are the two boundaries with
+what they share left out, the smaller's turned over, so a solid they bound is the points in exactly
+one of the two solids; that is the larger less the smaller where the smaller lies in the larger.
+Each strip is laid as a piece the larger has: the smaller's corner must lie on the larger's edge
+short of its corner by more than ten times the tolerance, and a strip or a shell laid where the
+smaller reached out of the larger is turned inside out, which the checker refuses (a loop that runs
+the wrong way, an inner loop outside its face, a void outside its solid, a volume that is not
+positive), as it does two faces that meet away from their edges. The faces must hang together as
+one shell, or, where no face is shared (a ball shelled, a torus's whole face thickened), as the
+larger's faces with the smaller's a void in them. A pairing that fails, a result of more pieces, or
+one the checker refuses goes to the boolean difference, as it always did: so does an opening beside
+a concave edge, where the wall moves in under itself and the cavity's face on the opening's plane
+reaches past the opening as the end of that wall.
+
 ## Sheets
 
 A sheet is faces with no solid behind them: one or more shells, each in no solid

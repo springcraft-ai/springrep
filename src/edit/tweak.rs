@@ -189,11 +189,20 @@ pub(crate) fn offset_faces_closing(
     b: &Brep,
     by: &HashMap<FaceId, f64>,
 ) -> Result<(Brep, Vec<FaceId>)> {
+    offset_faces_traced(b, by).map(|(out, closed, _)| (out, closed))
+}
+
+/// [`offset_faces_closing`], and whether the solid kept its topology: its vertices, edges, loops
+/// and faces are then `b`'s, one for one in `b`'s order.
+pub(crate) fn offset_faces_traced(
+    b: &Brep,
+    by: &HashMap<FaceId, f64>,
+) -> Result<(Brep, Vec<FaceId>, bool)> {
     clear_of_contacts(b, by.keys())?;
     // Where a face closes on the way, a round offset past its radius or a riser between two faces
     // brought level, the offset is followed there.
     offset_kept(b, by)
-        .map(|out| (out, Vec::new()))
+        .map(|out| (out, Vec::new(), true))
         .or_else(|e| {
             let mut paths: HashMap<FaceId, through::Path> = HashMap::new();
             for (&f, &d) in by {
@@ -214,10 +223,11 @@ pub(crate) fn offset_faces_closing(
                 Error::InvalidInput(_) => r,
                 _ => e.clone(),
             };
-            through::through(b, &paths).or_else(|r| match r {
+            let followed = through::through(b, &paths).or_else(|r| match r {
                 Error::InvalidInput(_) => Err(r),
                 _ => slabbed(b, by).map(|out| (out, Vec::new())).map_err(refused),
-            })
+            });
+            followed.map(|(out, closed)| (out, closed, false))
         })
 }
 

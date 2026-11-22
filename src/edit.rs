@@ -20,6 +20,7 @@ use crate::{
 };
 
 mod affine;
+mod between;
 mod delete;
 mod local;
 pub(crate) mod near;
@@ -29,6 +30,7 @@ mod rounded;
 pub(crate) mod tweak;
 
 pub use affine::{Affine, affine};
+use between::{Pairing, between};
 pub use delete::delete_faces;
 pub use parted::draft_parted;
 pub use rounded::shell_rounded;
@@ -67,25 +69,39 @@ pub fn shell(s: &Brep, open: &[FaceId], thickness: f64, wall: Wall, feature: &st
             .map(|f| (f, if open.contains(&f) { open_by } else { by }))
             .filter(|&(_, d)| d != 0.0)
             .collect();
-        let (out, closed) = tweak::offset_faces_closing(s, &by)?;
+        let (out, closed, kept) = tweak::offset_faces_traced(s, &by)?;
         closed_beside(
             s,
             &turned,
             &closed,
             "a shell whose walls close past an edge",
         )?;
-        Ok::<_, Error>(out)
+        Ok::<_, Error>((out, kept))
     };
     // The open faces stay where they are: moved out, they would carry the cut past their plane
     // into a wall that stands beside the opening. The cut lies on them there and leaves no skin.
     match wall {
         Wall::Inward => {
             let sharp = || {
-                let mut cavity = moved(-thickness, 0.0, concave_edges(s)?)?;
+                let (mut cavity, kept) = moved(-thickness, 0.0, concave_edges(s)?)?;
+                let paired = openings(s, &cavity, open, kept);
                 for f in cavity.face_ids().collect::<Vec<_>>() {
                     cavity.set_face_names(f, std::iter::once(inner.clone()).collect());
                 }
-                boolean::difference(s, &cavity)
+                let wall = paired.and_then(|(own_big, own_small, same)| {
+                    between(&Pairing {
+                        big: s,
+                        small: &cavity,
+                        own_big,
+                        own_small,
+                        same,
+                        kept,
+                    })
+                });
+                match wall {
+                    Some(out) => Ok(out),
+                    None => boolean::difference(s, &cavity),
+                }
             };
             // Walls moved through each other leave no cavity: the shell is as thick as the part.
             sharp().or_else(|e| match e {
@@ -94,7 +110,7 @@ pub fn shell(s: &Brep, open: &[FaceId], thickness: f64, wall: Wall, feature: &st
             })
         }
         Wall::Outward => {
-            let mut outer = moved(thickness, 0.0, convex_edges(s)?)?;
+            let (mut outer, kept) = moved(thickness, 0.0, convex_edges(s)?)?;
             for f in outer.face_ids().collect::<Vec<_>>() {
                 if !open.contains(&f) {
                     outer.set_face_names(f, Default::default());
@@ -106,9 +122,58 @@ pub fn shell(s: &Brep, open: &[FaceId], thickness: f64, wall: Wall, feature: &st
                 names.insert(inner.clone());
                 cavity.set_face_names(f, names);
             }
-            boolean::difference(&outer, &cavity)
+            let own: Vec<bool> = s.face_ids().map(|f| !open.contains(&f)).collect();
+            let wall = kept.then(|| Pairing {
+                big: &outer,
+                small: &cavity,
+                own_big: own.clone(),
+                own_small: own,
+                same: open.iter().map(|&f| (f, f)).collect(),
+                kept,
+            });
+            match wall.and_then(|p| between(&p)) {
+                Some(out) => Ok(out),
+                None => boolean::difference(&outer, &cavity),
+            }
         }
     }
+}
+
+/// How `s` and its cavity `moved`, every face but those of `open` moved in, share the open faces:
+/// for each solid's faces whether the face is its own, and the open faces as each has them.
+/// Where a wall closed on the way (not `kept`), an open face is paired with the one face of
+/// `moved` on its surface, which must carry its names; an open face the cavity has no face on
+/// stays whole. `None` where a face has more than one such face, or one of other names.
+#[allow(clippy::type_complexity)]
+fn openings(
+    s: &Brep,
+    moved: &Brep,
+    open: &[FaceId],
+    kept: bool,
+) -> Option<(Vec<bool>, Vec<bool>, Vec<(FaceId, FaceId)>)> {
+    let mut own_s: Vec<bool> = s.face_ids().map(|f| !open.contains(&f)).collect();
+    if kept {
+        let same = s.face_ids().filter(|f| open.contains(f)).map(|f| (f, f));
+        return Some((own_s.clone(), own_s, same.collect()));
+    }
+    let mut own_moved = vec![true; moved.face_count()];
+    let mut same = Vec::new();
+    for f in s.face_ids().filter(|f| open.contains(f)) {
+        let face = s.face(f);
+        let mut on = moved.face_ids().filter(|&g| {
+            let other = moved.face(g);
+            other.surface == face.surface && other.reversed == face.reversed
+        });
+        match (on.next(), on.next()) {
+            (None, _) => own_s[f.index()] = true,
+            (Some(g), None) if moved.face(g).names == face.names && own_moved[g.index()] => {
+                own_moved[g.index()] = false;
+                same.push((f, g));
+            }
+            _ => return None,
+        }
+    }
+    Some((own_s, own_moved, same))
 }
 
 /// The two faces of edge `e`, where two use it.
@@ -346,11 +411,28 @@ fn dimple(o: Point3, up: Vec3, r: f64, d: f64, feature: &str) -> Result<Brep> {
 /// it is negative: `s` with them moved, less `s`, or `s` less `s` with them moved in.
 pub fn thicken(s: &Brep, faces: &[FaceId], thickness: f64) -> Result<Brep> {
     let by: HashMap<FaceId, f64> = faces.iter().map(|&f| (f, thickness)).collect();
-    let moved = tweak::offset_faces(s, &by)?;
-    if thickness > 0.0 {
-        boolean::difference(&moved, s)
+    let (moved, _, kept) = tweak::offset_faces_traced(s, &by)?;
+    let (big, small) = if thickness > 0.0 {
+        (&moved, s)
     } else {
-        boolean::difference(s, &moved)
+        (s, &moved)
+    };
+    let own: Vec<bool> = s.face_ids().map(|f| faces.contains(&f)).collect();
+    let slab = (kept && thickness != 0.0).then(|| Pairing {
+        big,
+        small,
+        own_big: own.clone(),
+        own_small: own,
+        same: s
+            .face_ids()
+            .filter(|f| !faces.contains(f))
+            .map(|f| (f, f))
+            .collect(),
+        kept,
+    });
+    match slab.and_then(|p| between(&p)) {
+        Some(out) => Ok(out),
+        None => boolean::difference(big, small),
     }
 }
 
