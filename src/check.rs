@@ -1221,7 +1221,11 @@ fn sharers_to_search(
                     continue;
                 }
                 let (sf, sg) = (&b.face(f).surface, &b.face(g).surface);
-                if !(analytic(sf) && analytic(sg)) || cache.curves(b, sf, sg).is_none() {
+                // Two planes meet in a line, or are one plane: nothing to ask.
+                let planes = matches!((sf, sg), (Surface::Plane(_), Surface::Plane(_)));
+                let known =
+                    planes || (analytic(sf) && analytic(sg) && cache.curves(b, sf, sg).is_some());
+                if !known {
                     return None;
                 }
                 out.push((f, g, shared));
