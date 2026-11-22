@@ -111,8 +111,18 @@ pub fn shell(s: &Brep, open: &[FaceId], thickness: f64, wall: Wall, feature: &st
         }
         Wall::Outward => {
             let (mut outer, kept) = moved(thickness, 0.0, convex_edges(s)?)?;
+            // Where a face closed on the way the faces after it are renumbered: an opening is
+            // then known by its surface, which no moved face is on.
+            let stays = |outer: &Brep, f: FaceId| {
+                kept && open.contains(&f)
+                    || !kept
+                        && open.iter().any(|&o| {
+                            let (was, is) = (s.face(o), outer.face(f));
+                            was.surface == is.surface && was.reversed == is.reversed
+                        })
+            };
             for f in outer.face_ids().collect::<Vec<_>>() {
-                if !open.contains(&f) {
+                if !stays(&outer, f) {
                     outer.set_face_names(f, Default::default());
                 }
             }

@@ -371,3 +371,37 @@ fn a_smaller_solid_that_reaches_out_of_the_larger_is_not_laid() {
     let ball = primitive::sphere(&Frame::WORLD, 5.0, "ball").unwrap();
     assert!(refused(&ball, &ball.face_ids().collect::<Vec<_>>()));
 }
+
+#[test]
+fn an_outward_wall_whose_faces_close_names_only_its_inside() {
+    // The round at the foot of a boss on a plate closes as the faces move out past its radius,
+    // and the faces after it are renumbered: the wall's outside still carries no name, and the
+    // opening keeps its own.
+    use crate::profile::NamedSegment;
+    let at = |x: f64, y: f64| Vec2::new(x, y);
+    let half = Profile::outline(vec![
+        NamedSegment::line(at(0.0, 0.0), at(8.0, 0.0), "end"),
+        NamedSegment::line(at(8.0, 0.0), at(8.0, 2.0), "rim"),
+        NamedSegment::line(at(8.0, 2.0), at(4.0, 2.0), "top"),
+        NamedSegment::arc(at(4.0, 3.0), 1.0, -PI / 2.0, -PI / 2.0, "root"),
+        NamedSegment::line(at(3.0, 3.0), at(3.0, 6.0), "wall"),
+        NamedSegment::line(at(3.0, 6.0), at(0.0, 6.0), "cap"),
+        NamedSegment::line(at(0.0, 6.0), at(0.0, 0.0), "axis"),
+    ]);
+    let plane = Frame::new(Point3::ZERO, -Vec3::Y, Vec3::X).unwrap();
+    let b = crate::sweep::revolve(&half, &plane, Point3::ZERO, Vec3::Z, 2.0 * PI, "p").unwrap();
+    let open = faces(&b, &["p.end"]);
+    let out = shell(&b, &open, 1.5, Wall::Outward, "s").unwrap();
+    assert!(crate::check::check(&out).is_empty());
+    for f in out.face_ids() {
+        let names: Vec<String> = out.face(f).names.iter().map(|n| n.to_string()).collect();
+        let inside = names.iter().any(|n| n == "s.inner");
+        let opening = names.iter().any(|n| n == "p.end");
+        assert!(
+            names.is_empty() || inside || opening,
+            "an outside face is named {names:?}"
+        );
+    }
+    assert_eq!(faces_named(&out, "s.inner").len(), 5);
+    assert_eq!(faces_named(&out, "p.end").len(), 1);
+}
