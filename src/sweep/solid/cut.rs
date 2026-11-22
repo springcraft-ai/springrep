@@ -663,6 +663,15 @@ fn closed_cuts(
             }
         }
     }
+    let poles: Vec<(usize, Point3)> = b
+        .face(f)
+        .loops
+        .iter()
+        .flat_map(|&lp| &b.lp(lp).coedges)
+        .map(|&c| b.edge(b.coedge(c).edge))
+        .filter(|e| e.curve.is_none())
+        .map(|e| (e.start.index(), b.vertex(e.start).point))
+        .collect();
     let mut out = Vec::new();
     for (run, mut stop) in runs.into_iter().zip(stops) {
         stop.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -705,8 +714,37 @@ fn closed_cuts(
                         (r.vertex, r.point, r.uv)
                     }
                     (None, None) => {
-                        let (v, q) = places.on_boundary(b, f, p)?;
-                        (v, q, uv)
+                        // A run stops where the face's boundary is first within the tolerance.
+                        // A branch that runs into an apex beside a seam is that near the seam
+                        // well short of the apex, and it ends at the apex, not on the seam.
+                        let pole = poles.iter().find_map(|&(v, q)| {
+                            let off = |s: f64| {
+                                closed
+                                    .point(run.branch, s)
+                                    .map_or(f64::INFINITY, |x| x.0.dist(q))
+                            };
+                            let (mut lo, mut hi) = (s - reach, s + reach);
+                            for _ in 0..100 {
+                                let (x, y) = (lo + 0.382 * (hi - lo), lo + 0.618 * (hi - lo));
+                                if off(x) < off(y) {
+                                    hi = y;
+                                } else {
+                                    lo = x;
+                                }
+                            }
+                            let at = 0.5 * (lo + hi);
+                            (off(at) <= 1e-10 * size).then_some((v, q, at))
+                        });
+                        match pole {
+                            Some((v, q, at)) => {
+                                span[k] = at;
+                                (v, q, uv)
+                            }
+                            None => {
+                                let (v, q) = places.on_boundary(b, f, p)?;
+                                (v, q, uv)
+                            }
+                        }
                     }
                 };
             }

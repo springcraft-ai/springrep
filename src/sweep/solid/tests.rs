@@ -1157,3 +1157,28 @@ fn a_swept_top_joins_its_block_where_a_sheet_leaves_the_side_at_a_corner() {
     let want = measure::volume(&start) + measure::volume(&piece);
     assert!(rel(measure::volume(&both), want) < 1e-12);
 }
+
+// A cone lying nearly across a far screw's axis grazes along a curve that runs into its apex a
+// few thousandths of a radian from the seam: within the tolerance of the seam well short of the
+// apex, and it ends at the apex all the same.
+#[test]
+fn a_grazing_curve_beside_a_cones_seam_runs_on_to_the_apex() {
+    let frame = Frame::new(
+        Vec3::new(10.0, -2.0, 0.0),
+        Vec3::new(1.0, 0.0, 0.2),
+        Vec3::X,
+    )
+    .unwrap();
+    let body = crate::primitive::cone(&frame, 1.0, 0.0, 2.0, "cone").unwrap();
+    let motion = Motion::Screw {
+        screw: screw_z(10.0),
+        from: 0.0,
+        to: 1.0,
+    };
+    let b = solid(&body, &motion, "sw").unwrap();
+    assert!(check::check(&b).is_empty());
+    let field = |p: Vec3| Vec3::Z.cross(p) + Vec3::Z * (10.0 / (2.0 * PI));
+    let want = measure::volume(&body) + frustum_outflow(&frame, (1.0, 0.0, 2.0), &field);
+    let got = measure::volume(&b);
+    assert!(rel(got, want) < 1e-5, "{got} {want}");
+}
