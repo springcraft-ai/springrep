@@ -946,6 +946,40 @@ asymptote, and each is given the parameter in which it starts and ends at unit s
 parameter is close to arc length and the first derivative is continuous across the double knots.
 The fitted curve remains only where a middle weight would not be positive.
 
+A spline surface swept by a steady motion keeps, in a private field, the curve it was swept from
+and the motion ([`geom/steady.rs`](../src/geom/steady.rs)): a line and how fast a point turns about
+it and moves along it, so a slide, a turn and a screw are one form. The surface at `(u, v)` is the
+curve's point at `v` after `u` of the motion, within `SCREW_FIT`, all over its own domain. It
+keeps them through a copy, through a rigid move, which moves the curve and the line with it, and
+through a cut to a rectangle of its parameters, which keeps the parameters; a surface made from
+its parts or from new control points starts without them, since it may be any shape.
+
+Two such sheets of one motion, `A = M(u)·g(v)` and `B = M(u′)·h(v′)`, meet along the motion's orbits
+([`ssi/orbits.rs`](../src/boolean/ssi/orbits.rs)): lines under a slide, circles under a turn,
+helices under a screw (a surface the motions of a one-parameter group carry along itself;
+Pottmann and Wallner 2001). A common point stays common as `u` and `u′` fall together, until one
+reaches the start of its range, so every piece of the intersection is an orbit that starts on
+`A`'s first curve where it meets `B`, or on `B`'s first curve where it meets `A`, and runs while
+both parameters stay in range: no curve leaves either sheet's rectangle. Those starts are
+curve–surface meetings against the stored surfaces, in closed form where the curve is a line. A
+start may lie on the other sheet at several of its parameters, where that sheet passes through
+itself, and each bounds its own run; they are found on the other sheet's curve, as its points at
+the orbit's distance from the axis (under a slide, in a plane along it through the start) that the
+motion carries to the start. A meeting the curve–surface search reports on a spline surface run
+on past its edge has none, and starts nothing. Runs of one orbit that overlap are joined. A sheet
+against a surface the motion carries onto itself whole (a cylinder about a screw's axis; a plane,
+cylinder, cone, sphere, torus or revolution about a turn's; a plane, cylinder or extrusion along a
+slide) meets it in the orbits from its own first curve, each as long as the sheet. An orbit is
+emitted as a line, an arc of a circle, or a helix in the same Hermite pieces as a screw sheet's
+columns, so it lies within `SCREW_FIT` of the true orbit and twice that of each sheet. Where the
+first curve touches the other surface the orbit is one the surfaces touch along, and is marked
+tangent. The pair is traced instead wherever that is not certain to be the whole intersection: the
+motions differ by more than `SCREW_FIT` over the region; a first curve lies in the other surface
+(two parts of one sheet); a touch has another meeting within 3e-4 mm, which is one touch found
+twice; an orbit passes the axis; the other sheet's curve runs along the orbit's cylinder where it
+crosses it, so its parameters there are not sharp; the sheet's own nearest point to a start is not
+among the parameters found; or a turn comes round to its start.
+
 Curve–surface meetings in closed form: a line against a plane, cylinder, sphere, cone or ring torus;
 a circle or ellipse against a plane, a circle against a cylinder whose axis is square to it, and a
 circle against a sphere (the sphere's section in the circle's plane). A line against a torus is the
@@ -1697,6 +1731,10 @@ at the end, and the paths of its two ends. It is exact where the motion has a cl
   points, as [`helix`](../src/sweep/helix.rs) builds a screwed face, within its `SCREW_FIT`; a
   line along the screw's axis sweeps the exact cylinder.
 
+A B-spline sheet keeps the curve and the motion that swept it, so that two sheets of one sweep, and
+a sheet and a cone or cylinder of the same sweep, meet in closed form along the motion's orbits
+(see [Analytic contact](#analytic-contact)).
+
 Under a turn or a screw, a curve that stays at one distance from the axis sweeps a strip of the
 cylinder about the axis at that distance. The path of a vertex under a screw is a helix, cut at each
 whole turn, so that no edge of the result runs more than once round the axis.
@@ -2252,6 +2290,8 @@ The papers this document and the source cite by author and year.
 - **Piegl and Tiller 1997.** L. Piegl and W. Tiller, _The NURBS Book_, 2nd ed., Springer, 1997.
 - **Piessens et al. 1983.** R. Piessens, E. de Doncker-Kapenga, C. W. Überhuber and D. K. Kahaner,
   _QUADPACK: A Subroutine Package for Automatic Integration_, Springer, 1983.
+- **Pottmann and Wallner 2001.** H. Pottmann and J. Wallner, _Computational Line Geometry_,
+  Springer, 2001.
 - **Rossignac and Requicha 1984.** J. R. Rossignac and A. A. G. Requicha, "Constant-radius blending
   in solid modelling", _Computers in Mechanical Engineering_ 3(1), 1984, pp. 65–73.
 - **Rossignac and Requicha 1986.** J. R. Rossignac and A. A. G. Requicha, "Offsetting operations
