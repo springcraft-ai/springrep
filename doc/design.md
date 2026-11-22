@@ -1722,13 +1722,30 @@ The product is a solid only where the sweep does not run into itself. It does wh
 a plane past the line it grazes along: the plane where it starts and where it ends cross beyond
 that line, and the envelope between them lies inside the solid. It does where a concave edge of `W`
 sweeps a sheet into the body, and where a long turn or screw brings the body back over where it
-was. The checker finds each of these as faces that meet without sharing an edge. Then the sweep is
+was. The checker finds each of these as faces that meet without sharing an edge. The whole
+product's refusal is asked only whether it is one, so its faces are sewn by
+`sew::assemble_or_refuse`, whose check (`check::check_to_first`) ends the search for such faces
+at the first pair found that does not merely touch; a product with no such pair is searched to the
+end, as any result is. Then the sweep is
 built in parts: the body at the start, its faces cut along their curves, united one by one with
 the solid each piece of face in `W` sweeps on its own (its two ends and the faces its boundary
 sweeps). Each part starts on a face of the body and grazes it along its curves there; the boolean
 is told so (each such edge lies on the other's face), as a blend tells it of a round's tangent
 edges. A body that is itself a union, as a ball on a stem, may instead be swept a piece at a time,
 since the sweep of a union is the union of the sweeps.
+
+The unions look for where each edge meets each face's surface by the signed distance to the
+surface along the edge ([`csi::Tracker`](../src/boolean/csi.rs)). A turn's sheets are surfaces of
+revolution, and the point of one nearest a point lies in the half-plane through the point and the
+axis, among the curve's samples there and Newton's steps from each sampled least distance. The
+samples and their places in that half-plane (`geom::Meridian`) are the same for every point, so
+they are worked out once for an edge, and `Surface::project_on` projects each point from them: a
+seed turned to the point's angle lies as far from the point as its place in the half-plane lies
+from the point's, so only the seeds within rounding of the nearest there are placed on the surface
+and compared, and the seed chosen is the one `Surface::project` chooses. A projection is not
+continued from the last point's: a curve that lies in no half-plane through the axis has an image
+there that turns back on itself, the surface's two sheets meet along that fold, and no step is
+short enough to say the last foot's sheet is still the nearer.
 
 ### Folds
 
@@ -2196,6 +2213,8 @@ The papers this document and the source cite by author and year.
 - **Blackmore, Leu and Wang 1997.** D. Blackmore, M. C. Leu and L. P. Wang, "The sweep-envelope
   differential equation algorithm and its application to NC machining verification",
   _Computer-Aided Design_ 29(9), 1997, pp. 629–637.
+- **Brent 1973.** R. P. Brent, _Algorithms for Minimization without Derivatives_, Prentice-Hall,
+  1973.
 - **Choi and Ju 1989.** B. K. Choi and S. Y. Ju, "Constant-radius blending in surface modelling",
   _Computer-Aided Design_ 21(4), 1989, pp. 213–220.
 - **Coons 1967.** S. A. Coons, _Surfaces for Computer-Aided Design of Space Forms_, MIT Project MAC
