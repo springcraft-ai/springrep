@@ -154,20 +154,20 @@ fn carried(s: &Surface, p: Vec2, q: Vec2) -> f64 {
 /// faces within the tolerance, as two pieces of a cut that meet at a point do; one passing into
 /// another or lying inside it makes it invalid.
 pub fn check(b: &Brep) -> Vec<Issue> {
-    checked(b, false, true, false, true)
+    checked(b, false, true, false, true, false)
 }
 
 /// [`check`] without the search for faces passing through each other: the structure, the geometry
 /// each entity lies on, and every loop's closure and direction. An imported solid is refused for
 /// these; one passing through itself is kept and reported by [`self_crossings`].
 pub(crate) fn check_structure(b: &Brep) -> Vec<Issue> {
-    checked(b, false, false, false, false)
+    checked(b, false, false, false, false, false)
 }
 
 /// Where two faces of one solid of `b` that share no edge meet, and how far they pass through each
 /// other there: an imported mesh stitched with small folds passes through itself by microns.
 pub fn self_crossings(b: &Brep) -> Vec<SelfCrossing> {
-    crossings(b, true, &mut PairCache::default(), None)
+    crossings(b, true, &mut PairCache::default(), None, &|_| false)
         .into_iter()
         .map(|x| SelfCrossing {
             a: x.a,
@@ -217,7 +217,14 @@ fn depth(b: &Brep, fa: FaceId, fb: FaceId) -> f64 {
 /// assembly's placed solids, where a part seated on a board shares the board's corners within
 /// the tolerance. Within any one solid it finds everything [`check`] does.
 pub fn check_each(b: &Brep) -> Vec<Issue> {
-    checked(b, true, true, false, true)
+    checked(b, true, true, false, true, false)
+}
+
+/// As [`check`], for a caller that asks only whether the result is valid: the search for faces
+/// passing through each other stops at the first pair found, so an invalid result may list fewer
+/// issues, and a valid one lists none either way.
+pub(crate) fn check_to_first(b: &Brep) -> Vec<Issue> {
+    checked(b, false, true, false, true, true)
 }
 
 /// The shell each vertex belongs to, by the faces whose edges end there.
@@ -240,14 +247,22 @@ fn vertex_shells(b: &Brep) -> HashMap<VertexId, ShellId> {
 /// once, on the sheet's boundary, or twice, by coedges that run opposite ways in faces of one shell;
 /// everything else [`check`] finds of faces, loops, edges and vertices holds as for a solid.
 pub fn check_sheet(b: &Brep) -> Vec<Issue> {
-    checked(b, false, true, true, false)
+    checked(b, false, true, true, false, false)
 }
 
 /// With `rays`, the sign of a one-sheet solid's volume is settled by a ray where
 /// [`faces_outward`] finds one, and by the integral otherwise; without, by the integral alone.
 /// Both give the same issues: a ray settles only a solid whose volume is positive, and whenever
 /// any issue is found after a ray settled a solid, the whole check is made again by the integral.
-fn checked(b: &Brep, each: bool, crossing: bool, sheet: bool, rays: bool) -> Vec<Issue> {
+/// With `first`, the search for faces passing through each other ends at the first pair found.
+fn checked(
+    b: &Brep,
+    each: bool,
+    crossing: bool,
+    sheet: bool,
+    rays: bool,
+    first: bool,
+) -> Vec<Issue> {
     let mut out = Vec::new();
     let domains = Domains::new(b);
     let found = std::cell::Cell::new(0usize);
@@ -593,7 +608,9 @@ fn checked(b: &Brep, each: bool, crossing: bool, sheet: bool, rays: bool) -> Vec
         };
         cache.domains.extend(domains.built());
         let mut open: HashSet<SolidId> = HashSet::new();
-        let found = crossings(b, each, &mut cache, Some(&mut open));
+        let found = crossings(b, each, &mut cache, Some(&mut open), &|x| {
+            first && !touching(x)
+        });
         // A solid a ray settled, two of whose faces could not be searched for a crossing no edge
         // shows, is settled by its volume after all.
         let unproven = |s: &SolidId| {
@@ -601,7 +618,7 @@ fn checked(b: &Brep, each: bool, crossing: bool, sheet: bool, rays: bool) -> Vec
             v.is_nan() || v <= 0.0
         };
         if outward.intersection(&open).any(unproven) {
-            return checked(b, each, crossing, sheet, false);
+            return checked(b, each, crossing, sheet, false, first);
         }
         for x in found.into_iter().filter(|x| !touching(x)) {
             out.push(Issue {
@@ -638,7 +655,7 @@ fn checked(b: &Brep, each: bool, crossing: bool, sheet: bool, rays: bool) -> Vec
     // The ray proved nothing if faces pass through each other, lie outside their shell or nest:
     // what the integral would have reported first is reported.
     if !out.is_empty() && !outward.is_empty() {
-        return checked(b, each, crossing, sheet, false);
+        return checked(b, each, crossing, sheet, false, first);
     }
     out
 }
@@ -1718,12 +1735,14 @@ impl PairCache {
 /// apart by its edges alone is searched again only where its surfaces' curves can be asked for,
 /// and otherwise leaves its solid in `open`. Faces cut from one input of a boolean are searched
 /// as any others: a contact the input held must still be held. With `each`, only faces of one
-/// solid are paired, as an import's parts may rest on one another.
+/// solid are paired, as an import's parts may rest on one another. The search ends at the first
+/// pair that is `enough`.
 fn crossings(
     b: &Brep,
     each: bool,
     cache: &mut PairCache,
     mut open: Option<&mut HashSet<SolidId>>,
+    enough: &dyn Fn(&Crossing) -> bool,
 ) -> Vec<Crossing> {
     let hidden = open.is_some();
     let faces: Vec<FaceId> = b.face_ids().collect();
@@ -1848,12 +1867,19 @@ fn crossings(
                 }
             }
             match hit {
-                Some(at) => out.push(Crossing {
-                    a: fa,
-                    b: fb,
-                    at,
-                    through,
-                }),
+                Some(at) => {
+                    let x = Crossing {
+                        a: fa,
+                        b: fb,
+                        at,
+                        through,
+                    };
+                    let done = enough(&x);
+                    out.push(x);
+                    if done {
+                        return out;
+                    }
+                }
                 None => {
                     apart(ma, mb);
                     if proven {
@@ -2573,7 +2599,7 @@ mod tests {
     /// The issues [`check`] finds in `b`, which are those the volume integral alone gives.
     fn cut_issues(b: &Brep) -> Vec<String> {
         let issues: Vec<String> = check(b).into_iter().map(|i| i.message).collect();
-        let by_integral = checked(b, false, true, false, false);
+        let by_integral = checked(b, false, true, false, false, false);
         let by_integral: Vec<String> = by_integral.into_iter().map(|i| i.message).collect();
         assert_eq!(issues, by_integral);
         issues
@@ -2906,7 +2932,13 @@ mod tests {
         let faces: Vec<FaceId> = b.face_ids().collect();
         assert!(one_sheet(&b, &faces));
         let mut open = HashSet::new();
-        let found = crossings(&b, false, &mut PairCache::default(), Some(&mut open));
+        let found = crossings(
+            &b,
+            false,
+            &mut PairCache::default(),
+            Some(&mut open),
+            &|_| false,
+        );
         assert!(found.is_empty() && open.is_empty());
         // The rays off the outward block's edges see nothing.
         assert!(seen_off_edges(&b).contains(&Some(true)));
@@ -2974,7 +3006,7 @@ mod tests {
                 "{issues:?}"
             );
             let each: Vec<Issue> = check_each(b);
-            assert_eq!(each, checked(b, true, true, false, false));
+            assert_eq!(each, checked(b, true, true, false, false, false));
         }
     }
 
@@ -3130,11 +3162,12 @@ mod tests {
             false,
             &mut PairCache::default(),
             Some(&mut HashSet::new()),
+            &|_| false,
         );
         assert_eq!(found.len(), 1);
         assert!(found[0].through);
         // What the edges and the shared vertices alone show is nothing.
-        assert!(crossings(&b, false, &mut PairCache::default(), None).is_empty());
+        assert!(crossings(&b, false, &mut PairCache::default(), None, &|_| false).is_empty());
     }
 
     #[test]
@@ -3267,7 +3300,7 @@ mod tests {
     fn two_curved_faces_that_cross_along_a_closed_curve_inside_both_are_found() {
         let b = two_balls();
         // No edge of either ball meets the other, and they share no vertex.
-        assert!(crossings(&b, false, &mut PairCache::default(), None).is_empty());
+        assert!(crossings(&b, false, &mut PairCache::default(), None, &|_| false).is_empty());
         let issues = cut_issues(&b);
         assert_eq!(issues.len(), 1, "{issues:?}");
         assert!(

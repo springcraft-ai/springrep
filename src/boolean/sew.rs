@@ -658,6 +658,27 @@ pub(crate) fn assemble(
     vtol: &[f64],
     pieces: &[PieceGeom],
 ) -> Result<Brep> {
+    assemble_checked(faces, pool, vtol, pieces, false)
+}
+
+/// As [`assemble`], for a caller that builds the solid another way where this one is refused: an
+/// invalid result is refused at the first pair of faces found passing through each other.
+pub(crate) fn assemble_or_refuse(
+    faces: Vec<OutFace>,
+    pool: &[Point3],
+    vtol: &[f64],
+    pieces: &[PieceGeom],
+) -> Result<Brep> {
+    assemble_checked(faces, pool, vtol, pieces, true)
+}
+
+fn assemble_checked(
+    faces: Vec<OutFace>,
+    pool: &[Point3],
+    vtol: &[f64],
+    pieces: &[PieceGeom],
+    to_first: bool,
+) -> Result<Brep> {
     if faces.is_empty() {
         return Ok(Brep::new());
     }
@@ -834,7 +855,11 @@ pub(crate) fn assemble(
             b.set_beside(c, d);
         }
     }
-    let issues = check::check(&b);
+    let issues = if to_first {
+        check::check_to_first(&b)
+    } else {
+        check::check(&b)
+    };
     if issues.is_empty() {
         Ok(b)
     } else {

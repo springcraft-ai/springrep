@@ -387,6 +387,11 @@ pub(super) fn product(
         return super::trim::assemble(faces, pool, pieces, reach, &fold_at);
     }
     let vtol = vec![tol::LINEAR; pool.len()];
+    if only.is_none() {
+        // Where the whole product is refused the sweep is built in parts, whatever the refusal
+        // lists.
+        return sew::assemble_or_refuse(faces, &pool, &vtol, &pieces);
+    }
     sew::assemble(faces, &pool, &vtol, &pieces)
 }
 

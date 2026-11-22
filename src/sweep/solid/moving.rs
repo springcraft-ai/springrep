@@ -576,6 +576,11 @@ impl<'a> Ctx<'a> {
             }
         }
         let vtol = vec![tol::LINEAR; self.pool.len()];
+        if only.is_none() {
+            // Where the whole is refused the sweep is built face by face, whatever the refusal
+            // lists.
+            return sew::assemble_or_refuse(out, &self.pool, &vtol, &self.pieces);
+        }
         sew::assemble(out, &self.pool, &vtol, &self.pieces)
     }
 }

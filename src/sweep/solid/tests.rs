@@ -417,6 +417,25 @@ fn a_box_turned_about_a_line_beside_it_is_built_in_parts() {
     assert!(rel(got, want) < 1e-9, "{got} {want}");
 }
 
+// The same box's whole product passes through itself at more than one pair of faces. It is
+// refused at the first pair found, which is all the sweep in parts needs of it.
+#[test]
+fn a_product_that_passes_through_itself_is_refused_at_the_first_pair_found() {
+    let (a, b, c, h, angle) = (10.0, 13.0, 2.0, 3.0, PI / 3.0);
+    let corner = Frame::WORLD.translated(Vec3::new(a, -c, 0.0));
+    let cube = block(&corner, Vec3::new(b - a, 2.0 * c, h), "box").unwrap();
+    let motion = about_z(angle);
+    let (steady, twist) = (
+        sheet::Steady::of(&motion).unwrap(),
+        motion.steady().unwrap(),
+    );
+    let cut = cut::cut(&cube, &move |p| twist.at(p), steady.held()).unwrap();
+    match product::product(&cut, &steady, "sw", None, None) {
+        Err(Error::InvalidResult(issues)) => assert_eq!(issues.len(), 1, "{issues:?}"),
+        other => panic!("{:?}", other.map(|b| b.face_count())),
+    }
+}
+
 /// The right-hand screw about the z axis that rises `lead` a turn.
 fn screw_z(lead: f64) -> crate::sweep::Helix {
     crate::sweep::Helix {
