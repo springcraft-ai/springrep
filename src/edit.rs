@@ -724,6 +724,18 @@ mod tests {
         let h = revolve(&meridian, &plane, Point3::ZERO, Vec3::Z, TAU, "p").unwrap();
         let out = thicken(&h, &[face(&h, "sheet")], -5.0).unwrap();
         close(measure::volume(&out), 250.0 * PI / 3.0);
+        // The dome moved in closes to a point and is gone: no face is left smaller than the
+        // tolerance.
+        assert!(crate::check::check(&out).is_empty());
+        for f in out.face_ids() {
+            let face = out.face(f);
+            assert!(
+                measure::face_area(&out, f) > crate::tol::LINEAR,
+                "{:?}",
+                face.surface
+            );
+        }
+        assert_eq!(out.face_count(), 2);
     }
 
     #[test]

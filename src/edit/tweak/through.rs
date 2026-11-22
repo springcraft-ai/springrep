@@ -239,8 +239,18 @@ fn passing<'a>(near: &Brep, path_of: impl Fn(FaceId) -> Option<&'a Path<'a>>) ->
             }),
         }
     };
+    // A ball or a tube shrunk to nothing has closed on its own centre: every point of it is a
+    // pole within the tolerance, and tracing its boundary for a point inside finds none.
+    let closed_on_itself = |f: FaceId| match &near.face(f).surface {
+        Surface::Sphere(s) => s.radius <= CLOSED,
+        Surface::Torus(t) => t.minor <= CLOSED,
+        _ => false,
+    };
     near.face_ids().any(|f| {
-        let (Some(path), Some(p)) = (path_of(f), point(f)) else {
+        let Some(path) = path_of(f).filter(|_| !closed_on_itself(f)) else {
+            return false;
+        };
+        let Some(p) = point(f) else {
             return false;
         };
         let left = path(1.0).map_or(0.0, |end| signed_distance(&end, p).abs());
