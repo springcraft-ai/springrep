@@ -2623,6 +2623,21 @@ impl<'a> Work<'a> {
                     })
                 })
             };
+            // The pieces of each edge the face uses on both sides, as it does a contact it holds.
+            let held: HashSet<usize> = {
+                let b = self.breps[face.side];
+                let mut uses: HashMap<EdgeId, usize> = HashMap::new();
+                for &lp in &b.face(face.id).loops {
+                    for &c in &b.lp(lp).coedges {
+                        *uses.entry(b.coedge(c).edge).or_default() += 1;
+                    }
+                }
+                let twice = uses.into_iter().filter(|&(_, n)| n == 2);
+                twice
+                    .flat_map(|(e, _)| &self.base_pieces[self.edge_base[face.side][e.index()]])
+                    .map(|&pi| self.canon[pi])
+                    .collect()
+            };
             let regions = arrange::split(
                 &face.dom.surface,
                 face.dom.reversed,
@@ -2630,6 +2645,7 @@ impl<'a> Work<'a> {
                 trims,
                 &vertex_tol,
                 &slit,
+                &|pi| held.contains(&pi),
             )
             .map_err(|e| self.at_faces(e, &[fi]))?;
             intact.push(match before {

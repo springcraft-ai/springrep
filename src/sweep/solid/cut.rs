@@ -464,6 +464,7 @@ pub(super) fn cut_by(
             cuts,
             &|_| tol::LINEAR,
             &|_| false,
+            &|_| false,
         )?;
         for loops in regions {
             let front = if still[i] {

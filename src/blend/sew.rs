@@ -522,7 +522,7 @@ pub(super) fn sewn(
     }
     out.pair_radial();
 
-    let issues = check::check_cut(&out, &sides);
+    let issues = check::check(&out);
     if !issues.is_empty() {
         let first: Vec<String> = issues.iter().take(3).map(|i| i.to_string()).collect();
         return Err(format!("the sewn solid is invalid: {}", first.join("; ")));

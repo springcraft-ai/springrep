@@ -562,7 +562,7 @@ pub(crate) fn assemble_as_cut(
     pieces: &[PieceGeom],
 ) -> Result<Brep> {
     let plan: Vec<SolidPlan> = vec![(vec![(0..faces.len()).collect()], 1)];
-    let (b, _, _) = build(&faces, &plan, pool, vtol, pieces, true);
+    let (b, _) = build(&faces, &plan, pool, vtol, pieces, true);
     let issues = check::check(&b);
     if issues.is_empty() {
         Ok(b)
@@ -583,9 +583,8 @@ fn build(
     vtol: &[f64],
     pieces: &[PieceGeom],
     share: bool,
-) -> (Brep, Vec<Option<usize>>, HashMap<Use, CoedgeId>) {
+) -> (Brep, HashMap<Use, CoedgeId>) {
     let mut b = Brep::new();
-    let mut sides = Vec::new();
     let mut coedge_of: HashMap<Use, CoedgeId> = HashMap::new();
     // One vertex per solid at each point: pieces of a solid that touch at a point share it, while
     // separate solids that touch there close round their own.
@@ -640,14 +639,13 @@ fn build(
                 if let Some(m) = &f.memo {
                     b.share_memo(id, m.clone());
                 }
-                sides.push(f.side);
                 face_ids.push(id);
             }
             shell_ids.push(b.add_shell(face_ids));
         }
         b.add_solid_of(shell_ids, *outer);
     }
-    (b, sides, coedge_of)
+    (b, coedge_of)
 }
 
 /// The average thickness below which a separate sheet of a result holds no material.
@@ -825,7 +823,7 @@ pub(crate) fn assemble(
             }
         }
     }
-    let (mut b, sides, coedge_of) = build(&faces, &solids, pool, vtol, pieces, true);
+    let (mut b, coedge_of) = build(&faces, &solids, pool, vtol, pieces, true);
     for (u, p) in &partners {
         if let (Some(&c), Some(&d)) = (coedge_of.get(u), coedge_of.get(p)) {
             b.pair(c, d);
@@ -836,7 +834,7 @@ pub(crate) fn assemble(
             b.set_beside(c, d);
         }
     }
-    let issues = check::check_cut(&b, &sides);
+    let issues = check::check(&b);
     if issues.is_empty() {
         Ok(b)
     } else {

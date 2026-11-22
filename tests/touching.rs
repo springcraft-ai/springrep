@@ -447,6 +447,27 @@ fn a_face_a_rod_touches_through_a_hole_splits_round_the_hole() {
     let kept = intersection(&touched, &left).unwrap();
     assert!(check::check(&kept).is_empty());
     assert_eq!(kept.solid_ids().count(), 1);
+    // The contact is still held where the rod ends and where it meets the hole: the front face
+    // has a vertex at each, as the faces of the rod there do.
+    for z in [5.0, 8.0, 12.0, 20.0] {
+        let at = Vec3::new(20.0, 0.0, z);
+        let holds = |f: &springrep::topo::FaceId| {
+            kept.face(*f).loops.iter().any(|&lp| {
+                let ends = |c: &springrep::topo::CoedgeId| {
+                    kept.vertex(kept.coedge_start(*c)).point.dist(at) < 1e-9
+                };
+                kept.lp(lp).coedges.iter().any(ends)
+            })
+        };
+        let front = |f: &springrep::topo::FaceId| {
+            kept.face(*f)
+                .names
+                .iter()
+                .any(|n| n.feature == "block" && n.face == "v_min")
+        };
+        assert!(kept.face_ids().filter(front).any(|f| holds(&f)), "{z}");
+        assert!(kept.face_ids().filter(holds).count() >= 2, "{z}");
+    }
     // 30 · 20 · 20 of block, less the hole π · 2² · 20, and the rod π · 3² · 15.
     let want = 12_000.0 - 80.0 * PI + 135.0 * PI;
     let got = measure::volume(&kept);

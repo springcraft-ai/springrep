@@ -222,17 +222,20 @@ fn retraces(a: &Trim, b: &Trim, g: &Graph) -> bool {
 /// `lp` without the spikes in it: trims that run out along a piece and straight back. A boundary
 /// tangent to itself at a corner (a circle meeting a line it touches) bounds a sliver no wider than
 /// the tolerance between them; once a vertex of the other solid lands in that sliver, the line and
-/// the circle up to it are one edge, and the loop runs out along it and back.
-fn without_spikes(lp: Vec<Trim>, g: &Graph) -> Vec<Trim> {
+/// the circle up to it are one edge, and the loop runs out along it and back. A piece `held`
+/// names is no spike: the face came with an edge there that it uses on both sides, a contact it
+/// holds, and its loop runs out along it and back to keep holding it.
+fn without_spikes(lp: Vec<Trim>, g: &Graph, held: &dyn Fn(usize) -> bool) -> Vec<Trim> {
+    let spike = |a: &Trim, b: &Trim| retraces(a, b, g) && !held(a.piece);
     let mut out: Vec<Trim> = Vec::with_capacity(lp.len());
     for t in lp {
-        if out.last().is_some_and(|l| retraces(l, &t, g)) {
+        if out.last().is_some_and(|l| spike(l, &t)) {
             out.pop();
         } else {
             out.push(t);
         }
     }
-    while out.len() >= 2 && retraces(&out[out.len() - 1], &out[0], g) {
+    while out.len() >= 2 && spike(&out[out.len() - 1], &out[0]) {
         out.pop();
         out.remove(0);
     }
@@ -242,7 +245,8 @@ fn without_spikes(lp: Vec<Trim>, g: &Graph) -> Vec<Trim> {
 /// The pieces of a face with `boundary` loops cut by `cuts` (each given in one direction), each as
 /// its loops, outer first. A cut `slit` names may end where nothing else does: a contact, where
 /// another solid touches the face along a curve. The face's loop then runs along it and back, or
-/// it is a loop of its own inside the face, both ways along it.
+/// it is a loop of its own inside the face, both ways along it. A boundary piece `held` names is
+/// a contact the face already held, which its loop keeps running along and back.
 pub(crate) fn split(
     surface: &Surface,
     reversed: bool,
@@ -250,6 +254,7 @@ pub(crate) fn split(
     cuts: Vec<Trim>,
     vertex_tol: &dyn Fn(usize) -> f64,
     slit: &dyn Fn(usize) -> bool,
+    held: &dyn Fn(usize) -> bool,
 ) -> Result<Vec<Vec<Vec<Trim>>>> {
     if cuts.is_empty() {
         return Ok(vec![boundary]);
@@ -262,7 +267,7 @@ pub(crate) fn split(
     };
     let boundary: Vec<Vec<Trim>> = boundary
         .into_iter()
-        .map(|lp| without_spikes(lp, &g))
+        .map(|lp| without_spikes(lp, &g, held))
         .filter(|lp| !lp.is_empty())
         .collect();
     let mut hs: Vec<Trim> = Vec::new();
