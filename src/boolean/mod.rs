@@ -2241,7 +2241,11 @@ impl<'a> Work<'a> {
             if r != v {
                 let gap = self.pool[r].dist(self.pool[v]) + self.vtol[v];
                 if gap > self.vtol[r] {
-                    self.vtol[r] = gap.min(self.cap);
+                    // A grazing meeting is known only to its reach, as where a curve passes one.
+                    let met = [r, v].map(|m| self.meetings.get(&m));
+                    let reach = met.into_iter().flatten().flatten().map(|m| m.2);
+                    let cap = self.cap.max(reach.fold(0.0, f64::max));
+                    self.vtol[r] = self.vtol[r].max(gap.min(cap));
                     self.widest = self.widest.max(self.vtol[r]);
                     if self.vtol[r] > tol::LINEAR && !self.tolerant.contains(&r) {
                         self.tolerant.push(r);
@@ -2250,9 +2254,35 @@ impl<'a> Work<'a> {
             }
         }
         for ((bi, ts, vs), short) in plans.into_iter().zip(shorts) {
-            let vs: Vec<usize> = vs.into_iter().map(|v| root(&mut parent, v)).collect();
+            let met = vs;
+            let vs: Vec<usize> = met.iter().map(|&v| root(&mut parent, v)).collect();
+            let mut ts = ts;
+            // Two vertices that another curve made one may lie over the tolerance apart along
+            // this one. The piece between them, no longer than they are apart, would join the
+            // vertex to itself: the curve passes the vertex once, where it comes nearest.
             for k in 0..ts.len().saturating_sub(1) {
-                if vs[k] == vs[k + 1] && short[k] {
+                let (a, b) = (met[k], met[k + 1]);
+                if a == b || vs[k] != vs[k + 1] || short[k] {
+                    continue;
+                }
+                let Some(c) = &self.bases[bi].curve else {
+                    continue;
+                };
+                let reach =
+                    self.pool[a].dist(self.pool[b]) + tol::between(self.vtol[a], self.vtol[b]);
+                let (from, to) = (c.eval(ts[k]), c.eval(ts[k + 1]));
+                if from.dist(to) <= reach && from.dist(c.eval(0.5 * (ts[k] + ts[k + 1]))) <= reach {
+                    let at = self.pool[vs[k]];
+                    let t = if from.dist(at) <= to.dist(at) {
+                        ts[k]
+                    } else {
+                        ts[k + 1]
+                    };
+                    (ts[k], ts[k + 1]) = (t, t);
+                }
+            }
+            for k in 0..ts.len().saturating_sub(1) {
+                if vs[k] == vs[k + 1] && (short[k] || ts[k] == ts[k + 1]) {
                     continue;
                 }
                 self.add_piece(bi, (ts[k], ts[k + 1]), vs[k], vs[k + 1]);

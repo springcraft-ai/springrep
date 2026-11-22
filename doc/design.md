@@ -642,8 +642,11 @@ test between two entities uses the sum of their tolerances (`tol::between`).
   and a meeting on a tolerant edge (an edge crossing a face, two edges crossing) that edge's. Two
   vertices within the sum of theirs are one; where either is tolerant the one kept grows to hold the
   other's sphere, and a curve split at a vertex its piece ends short of grows it to that distance.
-  No tolerance grows past the widest of the inputs', which an import keeps within its file's
-  uncertainty; past that, the checker refuses the result and names the gap.
+  Two vertices that split one curve within `LINEAR` of each other along it are one, and a piece of
+  any other curve between the two, no longer than they lie apart, is dropped: that curve passes
+  the vertex once. No tolerance grows past the widest of the inputs', which an import keeps within
+  its file's uncertainty, or the reach of a grazing meeting at the vertex; past that, the checker
+  refuses the result and names the gap.
 - **Edges.** A tolerant edge lies on a face of the other solid where it stays within its own
   tolerance of the face's surface; it is split at every vertex within the sum of the two tolerances;
   and two pieces between the same vertices that run within the sum of theirs are one.

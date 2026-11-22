@@ -775,3 +775,136 @@ fn a_line_through_the_axis_sweeps_each_piece_on_its_own_nappe() {
         }
     }
 }
+
+/// The volume a block sweeps turned through `angle` about the z axis, integrated over height and
+/// radius: at each, the arcs of the circle inside the block, each widened by the turn. Each
+/// integral is cut where the arcs change (a corner, a side the circle touches), and its points
+/// crowd toward the cuts, where the arcs grow as square roots.
+fn turned_block_volume(frame: &Frame, size: Vec3, angle: f64) -> f64 {
+    let sides: Vec<(Vec3, f64)> = [(frame.x, size.x), (frame.y, size.y), (frame.z, size.z)]
+        .into_iter()
+        .flat_map(|(axis, s)| {
+            let d = axis.dot(frame.origin);
+            [(axis, d), (axis, d + s)]
+        })
+        .collect();
+    let inside = |p: Vec3| {
+        let l = frame.to_local(p);
+        (0.0..=size.x).contains(&l.x)
+            && (0.0..=size.y).contains(&l.y)
+            && (0.0..=size.z).contains(&l.z)
+    };
+    // ∫f between the cuts by five-point Gauss panels in u, where x = mid + half·(3u − u³)/2.
+    let integral = |cuts: &mut Vec<f64>, panels: usize, f: &dyn Fn(f64) -> f64| {
+        const GAUSS: [(f64, f64); 5] = [
+            (0.0, 0.568_888_888_888_888_9),
+            (-0.538_469_310_105_683_1, 0.478_628_670_499_366_5),
+            (0.538_469_310_105_683_1, 0.478_628_670_499_366_5),
+            (-0.906_179_845_938_664, 0.236_926_885_056_189_1),
+            (0.906_179_845_938_664, 0.236_926_885_056_189_1),
+        ];
+        cuts.sort_by(f64::total_cmp);
+        let h = 1.0 / panels as f64;
+        let mut sum = 0.0;
+        for w in cuts.windows(2) {
+            let (mid, half) = ((w[0] + w[1]) / 2.0, (w[1] - w[0]) / 2.0);
+            for k in 0..panels {
+                for (node, weight) in GAUSS {
+                    let u = -1.0 + (2.0 * k as f64 + 1.0 + node) * h;
+                    let x = mid + half * (3.0 * u - u * u * u) / 2.0;
+                    sum += f(x) * half * 1.5 * (1.0 - u * u) * weight * h;
+                }
+            }
+        }
+        sum
+    };
+    let covered = |r: f64, z: f64| {
+        // The circle crosses a side's plane where a cos φ + b sin φ = c.
+        let mut cuts = vec![-PI, PI];
+        for &(axis, d) in &sides {
+            let c = d - axis.z * z;
+            let (a, b) = (axis.x * r, axis.y * r);
+            let m = a.hypot(b);
+            if c.abs() < m {
+                let (mid, half) = (b.atan2(a), (c / m).acos());
+                for phi in [mid - half, mid + half] {
+                    cuts.push((phi + PI).rem_euclid(2.0 * PI) - PI);
+                }
+            }
+        }
+        cuts.sort_by(f64::total_cmp);
+        let (mut covered, mut reach) = (0.0, f64::MIN);
+        for w in cuts.windows(2) {
+            let mid = (w[0] + w[1]) / 2.0;
+            if inside(Vec3::new(r * mid.cos(), r * mid.sin(), z)) {
+                covered += w[1] + angle - w[0].max(reach);
+                reach = w[1] + angle;
+            }
+        }
+        covered.min(2.0 * PI)
+    };
+    let area = |z: f64| {
+        let mut radii = vec![0.0];
+        for (i, &(p, dp)) in sides.iter().enumerate() {
+            let (cp, lp) = (dp - p.z * z, p.x.hypot(p.y));
+            if lp > 1e-12 {
+                radii.push(cp.abs() / lp);
+            }
+            for &(q, dq) in &sides[..i] {
+                let (cq, det) = (dq - q.z * z, p.x * q.y - p.y * q.x);
+                if det.abs() > 1e-12 {
+                    radii.push(((cp * q.y - cq * p.y) / det).hypot((p.x * cq - q.x * cp) / det));
+                }
+            }
+        }
+        integral(&mut radii, 6, &|r| r * covered(r, z))
+    };
+    let mut heights: Vec<f64> = (0..8)
+        .map(|i| {
+            let on = |bit: usize, s: f64| if i >> bit & 1 == 1 { s } else { 0.0 };
+            let corner =
+                frame.x * on(0, size.x) + frame.y * on(1, size.y) + frame.z * on(2, size.z);
+            frame.origin.z + corner.z
+        })
+        .collect();
+    integral(&mut heights, 40, &area)
+}
+
+// A block that leans, no side of it square to a line through the axis, turned about the z axis:
+// it is built in parts, and a part's sheet meets a corner the parts before it left on an end.
+#[test]
+fn a_leaning_block_turned_about_a_line_beside_it() {
+    let size = Vec3::new(2.0, 1.0, 3.0);
+    for lean in [Vec3::new(0.2, 0.4, 1.0), Vec3::new(0.4, 0.2, 1.0)] {
+        let frame = Frame::new(Vec3::new(10.0, -2.0, 0.0), lean, Vec3::X).unwrap();
+        let leaning = block(&frame, size, "block").unwrap();
+        for angle in [0.5, 2.2] {
+            let b = solid(&leaning, &about_z(angle), "sw").unwrap();
+            assert!(check::check(&b).is_empty(), "{lean:?} {angle}");
+            let (got, want) = (
+                measure::volume(&b),
+                turned_block_volume(&frame, size, angle),
+            );
+            assert!(rel(got, want) < 1e-7, "{lean:?} {angle} {got} {want}");
+        }
+    }
+}
+
+// The same block slid adds the prism of its shadow, the sum over its three pairs of sides.
+#[test]
+fn a_leaning_block_slid_adds_the_prism_of_its_shadow() {
+    let (size, d) = (Vec3::new(2.0, 1.0, 3.0), Vec3::new(3.0, 4.0, 1.0));
+    let lean = Vec3::new(0.2, 0.4, 1.0);
+    let frame = Frame::new(Vec3::new(10.0, -2.0, 0.0), lean, Vec3::X).unwrap();
+    let b = solid(
+        &block(&frame, size, "block").unwrap(),
+        &Motion::Slide(d),
+        "sw",
+    )
+    .unwrap();
+    assert!(check::check(&b).is_empty());
+    let (x, y, z) = (frame.x * size.x, frame.y * size.y, frame.z * size.z);
+    let shadow = d.dot(x.cross(y)).abs() + d.dot(y.cross(z)).abs() + d.dot(z.cross(x)).abs();
+    let got = measure::volume(&b);
+    assert!(rel(got, size.x * size.y * size.z + shadow) < 1e-12, "{got}");
+}
