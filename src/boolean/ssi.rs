@@ -1,6 +1,6 @@
 //! Surface–surface intersection. Planes against the analytic surfaces, coaxial surfaces of
-//! revolution, parallel cylinders and equal crossing cylinders have closed forms; every other pair
-//! is traced by [`super::march`].
+//! revolution, parallel cylinders, equal crossing cylinders and sheets swept by one steady motion
+//! have closed forms; every other pair is traced by [`super::march`].
 //!
 //! Curves come back over a range that covers the region asked about; the caller cuts them at the
 //! faces' boundaries. A curve along which the surfaces are tangent is marked, and isolated points
@@ -11,6 +11,7 @@ use std::f64::consts::TAU;
 use super::{domain::Domain, march};
 
 mod conic;
+mod orbits;
 mod sweep;
 use crate::{
     Result,
@@ -18,6 +19,8 @@ use crate::{
     math::{Aabb, Frame, Point3, Vec2, Vec3},
     tol,
 };
+#[cfg(test)]
+pub(crate) use orbits::{TEST_LOCK, TRACE_ONLY};
 
 #[derive(Clone, Debug)]
 pub(crate) struct SsiCurve {
@@ -1063,6 +1066,9 @@ fn plane_patch(p: &Frame, n: &crate::geom::NurbsSurface) -> Option<Ssi> {
 fn closed_form(a: &Surface, b: &Surface, region: &Aabb, fitted: bool) -> Option<Ssi> {
     let sweep = |a: &Surface, b: &Surface| fitted.then(|| sweep::intersect(a, b, region)).flatten();
     if let Some(r) = swept(a, b, region) {
+        return Some(r);
+    }
+    if let Some(r) = orbits::intersect(a, b, region) {
         return Some(r);
     }
     match (a, b) {

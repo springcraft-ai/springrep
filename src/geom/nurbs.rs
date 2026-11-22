@@ -10,6 +10,7 @@ use std::{
     },
 };
 
+use super::steady::Swept;
 use crate::{
     Result,
     error::invalid,
@@ -962,6 +963,8 @@ pub struct NurbsSurface {
     weights: Option<Vec<f64>>,
     u_period: Option<f64>,
     v_period: Option<f64>,
+    /// The curve and steady motion that swept the surface, where it was made so and not changed.
+    swept: Option<Arc<Swept>>,
     /// What is worked out from the fields above on first use, shared with the surface's copies.
     kept: Arc<Kept>,
 }
@@ -1066,6 +1069,7 @@ impl NurbsSurface {
             weights,
             u_period: None,
             v_period: None,
+            swept: None,
             kept: Arc::default(),
         };
         let ((u0, u1), (v0, v1)) = (s.bu.domain(), s.bv.domain());
@@ -1103,6 +1107,7 @@ impl NurbsSurface {
             weights,
             u_period: periods.0,
             v_period: periods.1,
+            swept: None,
             kept: Arc::default(),
         })
     }
@@ -1391,6 +1396,18 @@ impl NurbsSurface {
         out
     }
 
+    /// The curve and steady motion the surface was swept by, where it keeps them: it does through
+    /// a copy and a rigid move, which moves them with it, and not once its shape may have changed.
+    pub(crate) fn swept(&self) -> Option<&Swept> {
+        self.swept.as_deref()
+    }
+
+    /// The surface, known to be `generator` at its `v` carried through its `u` of `motion`.
+    pub(crate) fn swept_by(mut self, swept: Swept) -> NurbsSurface {
+        self.swept = Some(Arc::new(swept));
+        self
+    }
+
     /// The same surface with its control points moved to `ctrl`.
     pub fn with_control_points(&self, ctrl: Vec<Point3>) -> Result<NurbsSurface> {
         NurbsSurface::new(
@@ -1448,6 +1465,7 @@ impl NurbsSurface {
             weights: self.weights.clone(),
             u_period: self.u_period,
             v_period: self.v_period,
+            swept: self.swept.as_ref().map(|s| Arc::new(s.transformed(t))),
             kept: Arc::new(Kept {
                 seeds,
                 polys,
@@ -3084,6 +3102,68 @@ pub(crate) mod tests {
             dist(got, p)
         );
         assert!(dist(got, p) <= dist(s.project(p), p));
+    }
+
+    // A swept surface is its curve carried by its motion, within the fit of a screw's columns.
+    #[test]
+    fn a_swept_surface_keeps_its_curve_and_motion_until_its_shape_may_change() {
+        use crate::{geom::Circle, geom::Curve, loft::rail::Rail, math::Frame, sweep};
+        let fit = 2.0 * sweep::SCREW_FIT;
+        let follows = |s: &NurbsSurface| {
+            let swept = s.swept().expect("a swept surface");
+            let ((u0, u1), (v0, v1)) = s.domain();
+            (0..=20).all(|i| {
+                (0..=8).all(|j| {
+                    let (u, v) = (
+                        u0 + (u1 - u0) * i as f64 / 20.0,
+                        v0 + (v1 - v0) * j as f64 / 8.0,
+                    );
+                    let carried = swept.motion.pose(u).point(swept.generator.eval(v));
+                    carried.dist(s.eval(u, v)) <= fit
+                })
+            })
+        };
+        let arc = Curve::Circle(Circle {
+            frame: Frame::new(
+                Point3::new(3.0, 1.0, 0.5),
+                Vec3::new(0.0, 1.0, 0.2),
+                Vec3::X,
+            )
+            .unwrap(),
+            radius: 1.5,
+        });
+        let rail = Rail::of_curve(&arc, 0.2, 2.9).unwrap();
+        for (rise, sign) in [(0.4, 1.0), (-0.7, -1.0), (0.0, 1.0)] {
+            let screw = sweep::Helix {
+                origin: Point3::new(0.5, -0.5, 1.0),
+                axis: Vec3::new(0.6, 0.0, 0.8),
+                rise,
+                sign,
+            };
+            let s = sweep::screw_sheet(&rail, &screw, 3.0).unwrap();
+            assert!(follows(&s));
+            // A copy keeps them, and a rigid move moves them with the surface.
+            assert!(follows(&s.clone()));
+            let t = Transform::rotation(Point3::new(1.0, 2.0, 3.0), Vec3::new(0.0, 0.6, 0.8), 1.1)
+                .then(&Transform::translation(Vec3::new(4.0, -2.0, 1.0)));
+            let moved = s.transformed(&t);
+            assert!(follows(&moved));
+            let axis = moved.swept().unwrap().motion.axis;
+            assert!(axis.dist(t.vector(screw.axis)) <= 1e-15);
+            // A surface made from parts or control points may be any shape.
+            let same = s.with_control_points(s.control_points().to_vec()).unwrap();
+            assert!(same == s && same.swept().is_none());
+            let (ku, kv) = s.knots();
+            let rebuilt = NurbsSurface::new(
+                s.degrees(),
+                (ku.to_vec(), kv.to_vec()),
+                s.counts(),
+                s.control_points().to_vec(),
+                s.weights().map(|w| w.to_vec()),
+            )
+            .unwrap();
+            assert!(rebuilt == s && rebuilt.swept().is_none());
+        }
     }
 
     #[test]

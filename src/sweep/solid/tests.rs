@@ -989,3 +989,46 @@ fn a_leaning_block_slid_adds_the_prism_of_its_shadow() {
     let got = measure::volume(&b);
     assert!(rel(got, size.x * size.y * size.z + shadow) < 1e-12, "{got}");
 }
+
+// A bar leaning across a turn, or lying across a screw's axis, sweeps its edges into spline
+// sheets, which meet each other and the sweep's cones and cylinders along the motion's orbits.
+#[test]
+fn a_sweep_built_on_orbits_is_the_one_built_on_traces() {
+    use crate::boolean::ssi::{TEST_LOCK, TRACE_ONLY};
+    use std::sync::atomic::Ordering;
+    let _held = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (s, c) = 20f64.to_radians().sin_cos();
+    let (v, n) = (Vec3::new(0.0, c, -s), Vec3::new(0.0, s, c));
+    let leaning = Frame::new(Vec3::X * 10.0 - v * 2.0 - n * 4.0, n, Vec3::X).unwrap();
+    let turned = (
+        block(&leaning, Vec3::new(3.0, 4.0, 8.0), "bar").unwrap(),
+        Motion::Turn {
+            origin: Vec3::ZERO,
+            axis: Vec3::Z,
+            from: -1.0,
+            to: 1.0,
+        },
+    );
+    let across = Frame::WORLD.translated(Vec3::new(4.0, -1.5, -1.0));
+    let screwed = (
+        block(&across, Vec3::new(8.0, 3.0, 2.0), "bar").unwrap(),
+        Motion::Screw {
+            screw: screw_z(6.0),
+            from: -1.0,
+            to: 3.0,
+        },
+    );
+    for (bar, motion) in [turned, screwed] {
+        let built = solid(&bar, &motion, "sw").unwrap();
+        assert!(check::check(&built).is_empty());
+        let swept = |f| match &built.face(f).surface {
+            crate::geom::Surface::Nurbs(n) => n.swept().is_some(),
+            _ => false,
+        };
+        assert!(built.face_ids().any(swept));
+        TRACE_ONLY.store(true, Ordering::Relaxed);
+        let traced = solid(&bar, &motion, "sw");
+        TRACE_ONLY.store(false, Ordering::Relaxed);
+        assert_same_solid(&built, &traced.unwrap(), 1e-7);
+    }
+}

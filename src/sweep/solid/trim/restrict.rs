@@ -112,7 +112,12 @@ fn nurbs(n: &NurbsSurface, u: (f64, f64), v: (f64, f64)) -> Option<NurbsSurface>
     }
     let ctrl = net.iter().map(point).collect();
     let weights = w.map(|_| net.iter().map(|p| p[3]).collect());
-    NurbsSurface::new((du, dv), (ku, kv), (nu, nv), ctrl, weights).ok()
+    let cut = NurbsSurface::new((du, dv), (ku, kv), (nu, nv), ctrl, weights).ok()?;
+    // The cut keeps the parameters, so it is the same sweep of the same curve over less of each.
+    Some(match n.swept() {
+        Some(swept) => cut.swept_by(swept.clone()),
+        None => cut,
+    })
 }
 
 /// The curve `c` over `range` of its parameter, where it is a spline that is not periodic.

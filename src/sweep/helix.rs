@@ -15,7 +15,7 @@ use crate::{
     boolean::csi,
     check,
     error::invalid,
-    geom::{Curve, Cylinder, NurbsCurve, NurbsSurface, Plane, Surface},
+    geom::{Curve, Cylinder, NurbsCurve, NurbsSurface, Plane, Steady, Surface, Swept},
     loft::rail::{Hom, Rail, hom, point},
     math::{Frame, Point3, Transform, Vec2, Vec3},
     profile::{Names, Profile},
@@ -27,7 +27,7 @@ use crate::{
 /// cone about it, at its lead angle or less, a hundredth of a radian on a fine thread, and its
 /// crossing slides along it by its error over that angle: a ten-thousandth of the linear
 /// tolerance keeps the crossing within a hundredth of the tolerance of the true one.
-const SCREW_FIT: f64 = tol::LINEAR * 1e-4;
+pub(crate) const SCREW_FIT: f64 = tol::LINEAR * 1e-4;
 pub(super) const DEGREE: usize = 7;
 
 /// A screw motion: a turn of `sign·θ` about the axis through `origin` along `axis`, and a rise of
@@ -152,6 +152,59 @@ pub(super) fn nodes(angle: f64, radius: f64) -> Vec<f64> {
     let h = 2.0 * (40320.0 * SCREW_FIT / radius.max(tol::LINEAR)).powf(1.0 / 8.0);
     let n = (angle / h).ceil().max(1.0) as usize;
     (0..=n).map(|k| angle * k as f64 / n as f64).collect()
+}
+
+/// What `rail` sweeps carried through `angle` of `screw`, whose axis is a unit vector: the
+/// rational B-spline whose columns follow its control points' helices, `u` the turn and `v` the
+/// rail's own parameter. It keeps the rail and the screw as the curve and motion it was swept by.
+pub(crate) fn sheet(rail: &Rail, screw: &Helix, angle: f64) -> Result<NurbsSurface> {
+    let radius = rail
+        .pw
+        .iter()
+        .map(|&h| {
+            let q = point(h) - screw.origin;
+            (q - screw.axis * q.dot(screw.axis)).norm()
+        })
+        .fold(0.0, f64::max);
+    let nodes = nodes(angle, radius);
+    let cols: Vec<Vec<Point3>> = rail
+        .pw
+        .iter()
+        .map(|&h| column(screw, point(h), &nodes))
+        .collect();
+    let (nu, nv) = (cols[0].len(), cols.len());
+    let mut net = Vec::with_capacity(nu * nv);
+    for row in 0..nu {
+        net.extend(cols.iter().map(|c| c[row]));
+    }
+    let w: Vec<f64> = rail.pw.iter().map(|h| h[3]).collect();
+    let rational = w.iter().any(|&x| (x - 1.0).abs() > 1e-15);
+    let weights = rational.then(|| (0..nu).flat_map(|_| w.iter().copied()).collect());
+    let spline = NurbsSurface::new(
+        (DEGREE, rail.degree),
+        (knots(&nodes), rail.knots.clone()),
+        (nu, nv),
+        net,
+        weights,
+    )?;
+    // The surface is a mean of its columns, and so as near the swept one as they are to their
+    // helices, only where every weight is positive.
+    if !w.iter().all(|&x| x > 0.0) {
+        return Ok(spline);
+    }
+    let generator = NurbsCurve::new(
+        rail.degree,
+        rail.knots.clone(),
+        rail.pw.iter().map(|&h| point(h)).collect(),
+        rational.then_some(w),
+    )?;
+    let motion = Steady {
+        origin: screw.origin,
+        axis: screw.axis,
+        turn: screw.sign,
+        rise: screw.rise,
+    };
+    Ok(spline.swept_by(Swept { generator, motion }))
 }
 
 fn coedge(edge: EdgeId, reversed: bool, pcurve: PCurve) -> CoedgeSpec {

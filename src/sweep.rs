@@ -10,6 +10,9 @@ mod solid;
 mod until;
 
 pub use curve::along_curve;
+pub(crate) use helix::SCREW_FIT;
+#[cfg(test)]
+pub(crate) use helix::sheet as screw_sheet;
 pub use helix::{Helix, helix};
 pub use solid::{Motion, solid};
 pub use until::{Meet, extrude_to_next, revolve_to_next};

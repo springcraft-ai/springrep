@@ -8,8 +8,8 @@ use super::motion::Motion;
 use crate::{
     Error, Result,
     geom::{
-        Circle, Cone, Curve, Cylinder, Extrusion, Line, NurbsCurve, NurbsSurface, Plane,
-        Revolution, Sphere, Surface, Torus,
+        Circle, Cone, Curve, Cylinder, Extrusion, Line, NurbsCurve, Plane, Revolution, Sphere,
+        Surface, Torus,
     },
     loft::rail::{Rail, point},
     math::{Frame, Point3, Transform, Vec2, Vec3},
@@ -679,36 +679,8 @@ fn screwed(curve: &Curve, range: (f64, f64), screw: &Helix, angle: f64) -> Resul
         return Ok(sheet);
     }
     let rail = Rail::of_curve(curve, range.0, range.1)?;
-    let radius = rail
-        .pw
-        .iter()
-        .map(|&h| {
-            let q = point(h) - screw.origin;
-            (q - screw.axis * q.dot(screw.axis)).norm()
-        })
-        .fold(0.0, f64::max);
-    let nodes = helix::nodes(angle, radius);
-    let cols: Vec<Vec<Point3>> = rail
-        .pw
-        .iter()
-        .map(|&h| helix::column(screw, point(h), &nodes))
-        .collect();
-    let nu = cols[0].len();
-    let nv = cols.len();
-    let mut net = Vec::with_capacity(nu * nv);
-    for row in 0..nu {
-        net.extend(cols.iter().map(|c| c[row]));
-    }
+    let surface = Surface::Nurbs(Box::new(helix::sheet(&rail, screw, angle)?));
     let w: Vec<f64> = rail.pw.iter().map(|h| h[3]).collect();
-    let rational = w.iter().any(|&x| (x - 1.0).abs() > 1e-15);
-    let weights = rational.then(|| (0..nu).flat_map(|_| w.iter().copied()).collect());
-    let surface = Surface::Nurbs(Box::new(NurbsSurface::new(
-        (helix::DEGREE, rail.degree),
-        (helix::knots(&nodes), rail.knots.clone()),
-        (nu, nv),
-        net,
-        weights,
-    )?));
     let width = range.1 - range.0;
     // A spline's rail runs with its own parameter; a conic's rational parameter does not run with
     // its angle, so a point's is found on the rail.

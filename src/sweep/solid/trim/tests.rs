@@ -354,3 +354,43 @@ fn a_trimmed_sweep_is_the_one_the_plain_searches_trim() {
         super::super::tests::assert_same_solid(&fast, &plain.unwrap(), 1e-9);
     }
 }
+
+// A swept sheet cut to a rectangle of its parameters is the same sweep over less of each.
+#[test]
+fn a_swept_sheet_cut_to_a_rectangle_keeps_its_curve_and_motion() {
+    use crate::{
+        geom::{Curve, Line, Surface},
+        loft::rail::Rail,
+        math::Vec2,
+        sweep,
+    };
+    let line = Curve::Line(Line {
+        origin: Point3::new(2.0, -3.0, 0.0),
+        dir: Vec3::new(0.0, 0.6, 0.8),
+    });
+    let screw = sweep::Helix {
+        origin: Point3::new(0.0, 0.0, 0.0),
+        axis: Vec3::Z,
+        rise: 0.3,
+        sign: 1.0,
+    };
+    let rail = Rail::of_curve(&line, 0.0, 5.0).unwrap();
+    let whole = Surface::Nurbs(Box::new(sweep::screw_sheet(&rail, &screw, 4.0).unwrap()));
+    let (lo, hi) = (Vec2::new(0.7, 0.25), Vec2::new(2.9, 0.8));
+    let Some(Surface::Nurbs(cut)) = super::restrict::restricted(&whole, lo, hi) else {
+        panic!("a spline sheet is cut to a spline sheet");
+    };
+    assert_eq!(cut.domain(), ((lo.x, hi.x), (lo.y, hi.y)));
+    let swept = cut.swept().expect("the cut keeps what swept it");
+    for i in 0..=20 {
+        for j in 0..=8 {
+            let (u, v) = (
+                lo.x + (hi.x - lo.x) * i as f64 / 20.0,
+                lo.y + (hi.y - lo.y) * j as f64 / 8.0,
+            );
+            let carried = swept.motion.pose(u).point(swept.generator.eval(v));
+            assert!(carried.dist(cut.eval(u, v)) <= 2.0 * sweep::SCREW_FIT);
+            assert!(cut.eval(u, v).dist(whole.eval(u, v)) <= 1e-12);
+        }
+    }
+}

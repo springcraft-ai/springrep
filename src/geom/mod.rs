@@ -4,6 +4,7 @@ mod bspline;
 mod curve;
 mod intersection;
 mod nurbs;
+mod steady;
 #[cfg(test)]
 pub(crate) use nurbs::tests::octant;
 mod surface;
@@ -16,5 +17,6 @@ pub(crate) use intersection::{
 };
 pub(crate) use nurbs::Bezier;
 pub use nurbs::{IsoLine, NurbsCurve, NurbsSurface, Patch};
+pub(crate) use steady::{Steady, Swept};
 pub(crate) use surface::Meridian;
 pub use surface::{Cone, Cylinder, Extrusion, Plane, Revolution, Ruled, Sphere, Surface, Torus};
