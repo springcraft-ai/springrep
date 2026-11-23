@@ -115,12 +115,22 @@ def leaderboard(offline):
     return json.dumps(d, separators=(",", ":")).replace("</", "<\\/")
 
 
+def version():
+    """The crate's version, from the package table that opens Cargo.toml."""
+    manifest = (HERE.parent / "Cargo.toml").read_text()
+    m = re.search(r'^version = "([^"]+)"$', manifest.split("\n[", 1)[0], flags=re.M)
+    if not m:
+        sys.exit("Cargo.toml: no package version")
+    return m.group(1)
+
+
 def main():
     t = (HERE / "template.html").read_text()
     t = t.replace("{{GH}}", GH)
     t = t.replace("{{SC_CSS}}", f'@import url("{SC}/sc.css") layer(sc);')
     t = t.replace("{{SC}}", SC)
     t = t.replace("{{PART}}", (HERE / "data/flanged_tube.json").read_text().strip())
+    t = t.replace("{{VERSION}}", html.escape(version()))
     t = t.replace("{{LEADERBOARD_URL}}", LEADERBOARD_URL)
     t = t.replace("{{LEADERBOARD}}", leaderboard("--offline" in sys.argv[1:]))
     t = t.replace("{{MAIN_RS}}", highlight((HERE.parent / "examples/bracket.rs").read_text()))

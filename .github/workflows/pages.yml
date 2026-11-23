@@ -8,6 +8,7 @@ on:
     paths:
       - site/**
       - examples/bracket.rs
+      - Cargo.toml
       - .github/workflows/pages.yml
   schedule:
     - cron: "23 7 * * *"

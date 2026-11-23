@@ -10,6 +10,7 @@ tokens, fonts and logos from that system's published build on the CDN, at an imm
 build.py. It is built from:
 
 - [template.html](template.html) — the page, its styles and its scripts.
+- [Cargo.toml](../Cargo.toml) — the crate's version, shown in the footer.
 - [bracket.rs](../examples/bracket.rs) — the getting-started example, shown on the page as code.
 - brep-conformance's
   [leaderboard.json](https://springcraft-ai.github.io/brep-conformance/leaderboard.json), fetched
