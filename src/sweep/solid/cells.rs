@@ -454,9 +454,14 @@ impl Cells {
     pub(super) fn hits(&self, cut: &Cut, o: Vec2) -> Vec<Hit> {
         let orbit = self.axis.orbit(o);
         let mut out = Vec::new();
+        let mut roots: Vec<Option<Vec<f64>>> = vec![None; self.domains.len()];
         for (part, dom) in self.domains.iter().enumerate() {
-            let found = csi::curve_surface(&orbit, (-PI, PI), &dom.surface);
-            for &phase in &found.ts {
+            // One face's parts lie on one surface, crossed once.
+            let face = cut.parts[part].face;
+            let found = roots[face]
+                .get_or_insert_with(|| crossings(&orbit, &dom.surface))
+                .clone();
+            for phase in found {
                 let p = orbit.eval(phase);
                 if let Where::Inside(uv) = dom.locate(p) {
                     let n = dom.surface.normal(uv.x, uv.y);
@@ -473,6 +478,35 @@ impl Cells {
         out.sort_by(|a, b| a.phase.total_cmp(&b.phase));
         out
     }
+}
+
+/// The angles at which `orbit` passes through `surface`: the changes of sign of its signed
+/// distance from the surface round the whole orbit, each pinned by bisection. An orbit that
+/// skims a face crosses it twice close together and shallowly, and both crossings are wanted;
+/// a touching, where the distance comes to nothing without changing sign, is none.
+fn crossings(orbit: &Curve, surface: &Surface) -> Vec<f64> {
+    let n = 4096;
+    let gap = |t: f64| csi::signed_distance(surface, orbit.eval(t));
+    let at = |k: usize| -PI + 2.0 * PI * k as f64 / n as f64;
+    let mut out = Vec::new();
+    let mut last = gap(at(0));
+    for k in 1..=n {
+        let next = gap(at(k));
+        if (last > 0.0) != (next > 0.0) {
+            let (mut lo, mut hi) = (at(k - 1), at(k));
+            for _ in 0..60 {
+                let mid = 0.5 * (lo + hi);
+                if (gap(mid) > 0.0) == (last > 0.0) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            out.push(0.5 * (lo + hi));
+        }
+        last = next;
+    }
+    out
 }
 
 /// The point of piece `piece` at `t`. A characteristic curve is fitted to within a hundredth of

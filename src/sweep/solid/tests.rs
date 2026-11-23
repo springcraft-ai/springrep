@@ -1273,3 +1273,75 @@ fn a_ring_turned_half_a_turn_beside_a_far_axis() {
         measure::volume(&b)
     );
 }
+
+/// Whether no face of `b` lies inside a body as it turns about z through `angle`: `held` says
+/// whether the body, where it started, holds a point by a margin, and each face is sampled over
+/// its window of parameters. The boundary of what a body sweeps touches the body and never lies
+/// in it.
+fn no_face_inside(b: &Brep, angle: f64, held: &dyn Fn(Vec3) -> bool) -> bool {
+    let reached = |p: Vec3| {
+        (0..=400).map(|k| angle * f64::from(k) / 400.0).any(|t| {
+            let (s, c) = t.sin_cos();
+            held(Vec3::new(c * p.x + s * p.y, c * p.y - s * p.x, p.z))
+        })
+    };
+    b.face_ids().all(|f| {
+        let d = crate::boolean::face_domain(b, f);
+        (0..12).all(|i| {
+            (0..12).all(|j| {
+                let at = |lo: f64, hi: f64, k: usize| lo + (hi - lo) * (k as f64 + 0.5) / 12.0;
+                let uv = crate::math::Vec2::new(at(d.lo.x, d.hi.x, i), at(d.lo.y, d.hi.y, j));
+                d.winding(uv) == 0 || !reached(d.surface.eval(uv.x, uv.y))
+            })
+        })
+    })
+}
+
+// A leaning ring turned a radian beside a far axis hides part of itself along the orbits: its
+// near rim's outline casts a shadow on the far side of the hole, the faces at each end of the
+// sweep are cut along that shadow, and a wall of orbit arcs stands between outline and shadow,
+// closing to nothing at each fold of the outline.
+#[test]
+fn a_leaning_ring_turned_beside_a_far_axis_is_cut_along_its_own_shadow() {
+    let frame = Frame::new(
+        Vec3::new(10.0, -2.0, 0.0),
+        Vec3::new(0.3, 0.0, 1.0),
+        Vec3::X,
+    )
+    .unwrap();
+    let (big, small) = (2.0, 0.5);
+    let ring = crate::primitive::torus(&frame, big, small, "ring").unwrap();
+    let b = solid(&ring, &about_z(1.0), "sw").unwrap();
+    assert!(check::check(&b).is_empty());
+    let held = |p: Vec3| {
+        let l = frame.to_local(p);
+        (l.x.hypot(l.y) - big).hypot(l.z) <= small - 0.02
+    };
+    assert!(no_face_inside(&b, 1.0, &held));
+    let ring_volume = 2.0 * PI * PI * big * small * small;
+    assert!(measure::volume(&b) > ring_volume);
+}
+
+// A leaning drum turned a radian about a line close beside it turns back through what it swept.
+// Read off its orbits, each orbit's intervals merged, the overlap is bounded once: less than the
+// count of all the drum's faces carry outward, which bounds it twice.
+#[test]
+fn a_leaning_drum_turned_beside_a_near_axis_bounds_its_overlap_once() {
+    let frame = Frame::new(Vec3::new(3.0, 1.0, -1.0), Vec3::new(0.4, 0.2, 1.0), Vec3::X).unwrap();
+    let (r, h) = (1.0, 3.0);
+    let drum = cylinder(&frame, r, h, "drum").unwrap();
+    let b = solid(&drum, &about_z(1.0), "sw").unwrap();
+    assert!(check::check(&b).is_empty());
+    let held = |p: Vec3| {
+        let l = frame.to_local(p);
+        (0.02..=h - 0.02).contains(&l.z) && l.x.hypot(l.y) <= r - 0.02
+    };
+    assert!(no_face_inside(&b, 1.0, &held));
+    let field = |p: Vec3| Vec3::Z.cross(p);
+    let twice = measure::volume(&drum) + frustum_outflow(&frame, (r, r, h), &field);
+    let got = measure::volume(&b);
+    assert!(
+        got > measure::volume(&drum) && got < twice - 1e-3,
+        "{got} {twice}"
+    );
+}
