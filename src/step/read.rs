@@ -34,6 +34,7 @@ pub struct ReadOptions {
 }
 
 impl ReadOptions {
+    #[deprecated(since = "2.1.0", note = "use `ReadOptions::default().strict(..)`")]
     pub const fn new(strict: bool) -> ReadOptions {
         ReadOptions { strict }
     }
