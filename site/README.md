@@ -41,8 +41,12 @@ board from it, so a new run shows here once that site has deployed it, with no c
 folder. Until the fetch answers, and when it fails or returns a board the page cannot draw, the page
 shows the board build.py wrote into it: the same leaderboard.json, as it stood when the page was
 built. The daily build keeps that copy within a day of the current run, so a reader rarely sees the
-figures change. A build fails on a board the page cannot draw, which leaves the last page published.
-The headline and prose around the board are fixed text, and do not follow the figures.
+figures change. A build fails on a board the page cannot draw, or when the results site does not
+answer after a few tries, which leaves the last page published. The headline and prose around the
+board are fixed text, and do not follow the figures.
+
+GitHub turns a scheduled workflow off after 60 days with no activity in the repository. If the daily
+build has stopped, re-enable the pages workflow on the repository's Actions page.
 
 The hero shows only the board's first four kernels, with springrep in the last place if it ranks
 lower, and its link gives the number of kernels on the full board below.

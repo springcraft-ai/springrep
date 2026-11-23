@@ -1333,16 +1333,25 @@ function fromLive(d) {
   }))
   const run = (d.kernels.find((k) => k.maintainers) || d.kernels[0]).run
   const unix = Date.parse(run.date) / 1000
-  const bad = !rows.length || !(d.cases > 0) || !(unix > 0) || !run.cores || !run.tolerance ||
-    rows.some((k) => k.n.reduce((a, b) => a + b, 0) !== d.cases || k.ms.some((v) => !(v >= 0)))
+  const text = (...v) => v.every((s) => typeof s === "string")
+  const above = (v, least) => typeof v === "number" && v >= least
+  const bad = !rows.length || !above(d.cases, 1) || !(unix > 0) || !above(run.cores, 1) ||
+    !(above(run.tolerance, 0) && run.tolerance > 0) || !text(d.suite, run.os, run.arch) ||
+    d.kernels.some((k) => !text(k.kernel, k.version, k.license) ||
+      [k.time.median, k.time.q1, k.time.q3].some((v) => !above(v, 0))) ||
+    rows.some((k) => k.n.reduce((a, b) => a + b, 0) !== d.cases)
   if (bad) throw new Error("leaderboard.json: not a board this page can draw")
   const { os, arch, cores, tolerance } = run
   return [rows, { suite: d.suite, unix, os, arch, cores, tolerance }, d.cases]
 }
-;[BOARD, RUN, TOTAL] = fromLive({{LEADERBOARD}})
+// build.py refuses a board fromLive would, so this throws only if the two have drifted apart; the
+// rest of the page then still runs, and the live board draws if it can.
+try {
+  ;[BOARD, RUN, TOTAL] = fromLive({{LEADERBOARD}})
+} catch {}
 // Taken before drawing, which adds each row's rate to it.
-const drawn = JSON.stringify([BOARD, RUN, TOTAL])
-drawBoard()
+const drawn = BOARD ? JSON.stringify([BOARD, RUN, TOTAL]) : ""
+if (BOARD) drawBoard()
 fetch(LIVE)
   .then((r) => r.ok ? r.json() : Promise.reject(new Error("leaderboard.json: " + r.status)))
   .then((d) => {
