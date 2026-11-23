@@ -425,6 +425,7 @@ footer { border-top: 1px solid var(--rule-soft); padding-block: 28px; }
   .figure { height: min(420px, max(240px, env(viewport-segment-height 0 1, 50vh) - 120px)); }
 }
 </style>
+<noscript><style>.hbench.wait a.more { visibility: visible; }</style></noscript>
 </head>
 <body>
 
@@ -1353,8 +1354,14 @@ function fromLive(d) {
   const { os, arch, cores, tolerance } = run
   return [rows, { suite: d.suite, unix, os, arch, cores, tolerance }, d.cases]
 }
-// Both boards say the leaderboard did not load. The hero's keeps the height its rows held.
-function boardFailed() {
+// Both boards say the leaderboard did not load, and nothing drawn from one stays. The hero's keeps
+// the height its rows held.
+function boardFailed(error) {
+  console.error(error)
+  document.getElementById("hsuite").textContent = "brep-conformance"
+  document.getElementById("hrun").textContent = ""
+  document.getElementById("run-id").textContent = ""
+  document.getElementById("hmore").textContent = "see the benchmark ↓"
   const note = () => {
     const el = document.createElement("span")
     el.className = "lb-off"
@@ -1379,9 +1386,14 @@ function boardFailed() {
   document.getElementById("board").replaceChildren(tr)
   document.getElementById("legend").replaceChildren()
 }
-fetch(LIVE)
+// A results site that never answers counts as one that failed, so the rows do not wait for good.
+const LIVE_TIMEOUT_MS = 8000
+const stalled = new AbortController()
+const stallTimer = setTimeout(() => stalled.abort(), LIVE_TIMEOUT_MS)
+fetch(LIVE, { signal: stalled.signal })
   .then((r) => r.ok ? r.json() : Promise.reject(new Error("leaderboard.json: " + r.status)))
   .then((d) => {
+    clearTimeout(stallTimer)
     ;[BOARD, RUN, TOTAL] = fromLive(d)
     drawBoard()
   })
