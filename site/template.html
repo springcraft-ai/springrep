@@ -1192,6 +1192,7 @@ const HERO_ROWS = 4
 function drawBoard() {
   const [ry, rm, rd] = new Date(RUN.unix * 1000).toISOString().slice(0, 10).split("-")
   const runDate = rm + "-" + rd + "-" + ry
+  document.getElementById("hsuite").textContent = "brep-conformance " + RUN.suite
   document.getElementById("hrun").textContent = runDate + " run"
   document.getElementById("run-id").textContent = runDate + " run · brep-conformance " + RUN.suite +
     " · " + TOTAL + " cases · " + RUN.os + " " + RUN.arch + ", " + RUN.cores + " cores · " +
