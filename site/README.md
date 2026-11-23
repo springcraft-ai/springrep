@@ -34,7 +34,7 @@ The leaderboard follows brep-conformance's results site. When the page loads it 
 [leaderboard.json](https://springcraft-ai.github.io/brep-conformance/leaderboard.json) and draws the
 board from it, so a new run shows here once that site has deployed it, with no change to this
 folder. Until the fetch answers, and when it fails or returns a board the page cannot draw, the page
-shows the copy in the template's `BOARD`, `RUN` and `TOTAL`: the verified run of 11-18-2026. Keep
+shows the copy in the template's `BOARD`, `RUN` and `TOTAL`: the verified run of 11-23-2026. Keep
 that copy near the current run, so a reader rarely sees the figures change. The headline and prose
 around the board are fixed text, and do not follow the figures.
 
