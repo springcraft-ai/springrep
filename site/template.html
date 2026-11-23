@@ -118,7 +118,7 @@ header.chrome { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 9
 .hrow.us .lic { color: var(--accent); }
 .hrow[data-tip] { cursor: default; }
 .hrow[data-tip] .t i { transition: width 700ms var(--ease-mech), filter var(--dur) linear; }
-.hrow[data-tip]:hover .n, .hrow[data-tip]:hover b { color: var(--ink-1); }
+.hrow[data-tip]:not(.us):hover .n, .hrow[data-tip]:not(.us):hover b { color: var(--ink-1); }
 .hrow[data-tip]:hover .t i { filter: brightness(1.4); }
 #hbench:hover .hrow[data-tip]:not(:hover) { opacity: .5; }
 .hrow { transition: opacity var(--dur) linear; }
