@@ -356,6 +356,7 @@ tr.us .tbar [data-g="1e-7"] { --c: var(--accent); }
 .board th .lower { display: block; margin-top: 6px; color: var(--fg-3); }
 .board .mt { cursor: default; }
 .board .mt b { border-bottom: 1px dotted var(--fg-3); }
+.board .mt b.none { border-bottom: 0; }
 .tip {
   position: fixed; z-index: 10; pointer-events: none; min-width: min-content; max-width: 280px;
   padding: 8px 10px;
@@ -1255,7 +1256,7 @@ function drawBoard() {
       '<td class="p7"><span data-to="' + atOrBetter(k, 0) + '" data-dp="1" data-unit="%"></span></td>' +
       '<td class="px"><span data-to="' + atOrBetter(k, 2) + '" data-dp="1" data-unit="%"></span></td>' +
       (k.ms ? '<td class="mt"><b><span data-to="' + k.ms[0] + '" data-dp="' + (k.ms[0] < 100 ? 1 : 0) +
-      '"></span><small>ms</small></b></td>' : '<td class="mt">–</td>')
+      '"></span><small>ms</small></b></td>' : '<td class="mt"><b class="none">–</b></td>')
     tr.querySelector(".k b").textContent = k.label
     tr.querySelector(".k small").textContent = k.ver + " · " + k.license
     const bar = tr.querySelector(".tbar")
@@ -1310,11 +1311,13 @@ function drawBoard() {
     requestAnimationFrame(step)
   }
   figures.forEach((el) => show(el, reduce ? 1 : 0))
+  // Watches the first row, not the whole board: a long board stacked on a short screen never has
+  // a set share of itself in view.
   new IntersectionObserver(([en], io) => {
     if (!en.isIntersecting) return
     io.disconnect()
     lightBoard()
-  }, { threshold: 0.35 }).observe(board)
+  }, { threshold: 0.5 }).observe(board.firstElementChild)
 
   const legend = document.getElementById("legend")
   legend.replaceChildren()
@@ -1336,25 +1339,25 @@ function fromLive(d) {
   const text = (...v) => v.every((s) => typeof s === "string")
   const above = (v, least) => typeof v === "number" && v >= least
   const BANDED = ["1e-7", "1e-6", "1e-5", "1e-3", "fail", "unsupported"]
+  const QUIET = ["refused", "timeout", "crash"]
   const at = (k, g) => k.counts[d.grades.indexOf(g)] || 0
-  // Every other grade counts with refused, timeout and crash, so one the suite adds later does
-  // not cost the page its board.
-  const rest = (k) => d.grades.reduce((a, g, i) => BANDED.includes(g) ? a : a + (k.counts[i] || 0), 0)
   const times = (k) => [k.time?.median, k.time?.q1, k.time?.q3]
   const rows = d.kernels.map((k) => ({
     label: k.kernel,
     ver: k.version,
     license: shortLicense(k.license),
-    n: [...BANDED.map((g) => at(k, g)), rest(k)],
+    n: [...BANDED.map((g) => at(k, g)), QUIET.reduce((a, g) => a + at(k, g), 0)],
     // Null for a kernel without all three times, which is then drawn without a speed.
     ms: times(k).every((v) => above(v, 0)) ? times(k).map(shortMs) : null,
     ...(k.maintainers ? { us: true } : {}),
   }))
   const run = (d.kernels.find((k) => k.maintainers) || d.kernels[0]).run
   const unix = Date.parse(run.date) / 1000
+  // The counts add up only when every case is in a grade this page names, so a grade the suite
+  // adds later costs the board only once a kernel has cases in it: they could not be drawn truly.
   const bad = !rows.length || !above(d.cases, 1) || !(unix > 0) || !above(run.cores, 1) ||
     !(above(run.tolerance, 0) && run.tolerance > 0) || !text(d.suite, run.os, run.arch) ||
-    d.kernels.some((k) => !text(k.kernel, k.version, k.license)) ||
+    !d.grades.includes("1e-7") || d.kernels.some((k) => !text(k.kernel, k.version, k.license)) ||
     rows.some((k) => k.n.reduce((a, b) => a + b, 0) !== d.cases)
   if (bad) throw new Error("leaderboard.json: not a board this page can draw")
   const { os, arch, cores, tolerance } = run
