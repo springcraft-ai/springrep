@@ -496,7 +496,7 @@ impl Cells {
             // One face's parts lie on one surface, crossed once.
             let face = cut.parts[part].face;
             let found = roots[face]
-                .get_or_insert_with(|| crossings(&orbit, &dom.surface))
+                .get_or_insert_with(|| crossings(&orbit, o.x, &dom.surface))
                 .clone();
             for phase in found {
                 let p = orbit.eval(phase);
@@ -517,31 +517,201 @@ impl Cells {
     }
 }
 
-/// The angles at which `orbit` passes through `surface`: the changes of sign of its signed
-/// distance from the surface round the whole orbit, each pinned by bisection. An orbit that
-/// skims a face crosses it twice close together and shallowly, and both crossings are wanted;
-/// a touching, where the distance comes to nothing without changing sign, is none.
-fn crossings(orbit: &Curve, surface: &Surface) -> Vec<f64> {
-    let n = 4096;
+/// The angles at which `orbit` passes through `surface`, in order. A touching, where the orbit
+/// comes to the surface without passing through, is none.
+///
+/// On a plane, a cylinder, a cone, a sphere or a torus the surface is where a polynomial in the
+/// point vanishes which, round a circle, is a constant, a sine and cosine of the angle and a sine
+/// and cosine of twice it, nothing more: eight values round the orbit give those five numbers
+/// exactly, and its changes of sign are the real roots of a quartic in the tangent of the half
+/// angle. On any other surface the distance from the orbit's point to the surface changes no
+/// faster than the point moves, so a stretch of orbit whose middle is farther from the surface
+/// than half the stretch is long holds no crossing, and the rest is halved until it does or is
+/// a hair long. Neither way is a pair of crossings missed for lying between two samples.
+pub(super) fn crossings(orbit: &Curve, radius: f64, surface: &Surface) -> Vec<f64> {
+    let Some(gap) = polynomial(surface) else {
+        return bounded(orbit, radius, surface);
+    };
+    let at = |t: f64| gap(orbit.eval(t));
+    let n = 8;
+    let (mut a0, mut a1, mut b1, mut a2, mut b2) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for k in 0..n {
+        let t = 2.0 * PI * f64::from(k) / f64::from(n);
+        let v = at(t);
+        a0 += v / f64::from(n);
+        a1 += 2.0 * v * t.cos() / f64::from(n);
+        b1 += 2.0 * v * t.sin() / f64::from(n);
+        a2 += 2.0 * v * (2.0 * t).cos() / f64::from(n);
+        b2 += 2.0 * v * (2.0 * t).sin() / f64::from(n);
+    }
+    let series =
+        |t: f64| a0 + a1 * t.cos() + b1 * t.sin() + a2 * (2.0 * t).cos() + b2 * (2.0 * t).sin();
+    // The half angle's tangent runs off to infinity half a turn from where it is read from: that
+    // place is put where the series is farthest from nothing.
+    let from = (0..8)
+        .map(|k| PI * f64::from(k) / 4.0)
+        .max_by(|x, y| series(x + PI).abs().total_cmp(&series(y + PI).abs()))
+        .expect("eight places");
+    let (s1, c1) = from.sin_cos();
+    let (s2, c2) = (2.0 * from).sin_cos();
+    let (ra1, rb1) = (a1 * c1 + b1 * s1, b1 * c1 - a1 * s1);
+    let (ra2, rb2) = (a2 * c2 + b2 * s2, b2 * c2 - a2 * s2);
+    let quartic = [
+        a0 + ra1 + ra2,
+        2.0 * rb1 + 4.0 * rb2,
+        2.0 * a0 - 6.0 * ra2,
+        2.0 * rb1 - 4.0 * rb2,
+        a0 - ra1 + ra2,
+    ];
+    let mut out: Vec<f64> = real_roots(&quartic)
+        .into_iter()
+        .map(|w| {
+            let t = from + 2.0 * w.atan();
+            settled(
+                orbit,
+                surface,
+                t - 2.0 * PI * ((t + PI) / (2.0 * PI)).floor(),
+            )
+        })
+        .collect();
+    out.sort_by(f64::total_cmp);
+    out
+}
+
+/// The crossing at `t` settled on the surface itself: the quartic places it to its own rounding,
+/// which the polynomial's size and a shallow crossing both magnify, and the distance to the
+/// surface, bisected between the nearest angles either side that it differs in sign at, to the
+/// distance's.
+fn settled(orbit: &Curve, surface: &Surface, t: f64) -> f64 {
     let gap = |t: f64| csi::signed_distance(surface, orbit.eval(t));
-    let at = |k: usize| -PI + 2.0 * PI * k as f64 / n as f64;
-    let mut out = Vec::new();
-    let mut last = gap(at(0));
-    for k in 1..=n {
-        let next = gap(at(k));
-        if (last > 0.0) != (next > 0.0) {
-            let (mut lo, mut hi) = (at(k - 1), at(k));
-            for _ in 0..60 {
+    let mut reach = 1e-13;
+    while reach < 1e-5 {
+        let (mut lo, mut hi) = (t - reach, t + reach);
+        let below = gap(lo) > 0.0;
+        if below != (gap(hi) > 0.0) {
+            for _ in 0..80 {
                 let mid = 0.5 * (lo + hi);
-                if (gap(mid) > 0.0) == (last > 0.0) {
+                if (gap(mid) > 0.0) == below {
                     lo = mid;
                 } else {
                     hi = mid;
                 }
             }
-            out.push(0.5 * (lo + hi));
+            return 0.5 * (lo + hi);
         }
-        last = next;
+        reach *= 4.0;
+    }
+    t
+}
+
+/// A polynomial in a point that vanishes on `surface`, of degree two, or four on a torus as the
+/// square of one of degree two less a multiple of another.
+fn polynomial(surface: &Surface) -> Option<Box<dyn Fn(Point3) -> f64 + '_>> {
+    Some(match surface {
+        Surface::Plane(s) => Box::new(|p| s.frame.to_local(p).z),
+        Surface::Cylinder(s) => Box::new(|p| {
+            let l = s.frame.to_local(p);
+            l.x * l.x + l.y * l.y - s.radius * s.radius
+        }),
+        Surface::Sphere(s) => Box::new(|p| {
+            let l = s.frame.to_local(p);
+            l.dot(l) - s.radius * s.radius
+        }),
+        Surface::Cone(s) => Box::new(|p| {
+            let l = s.frame.to_local(p);
+            let (sa, ca) = s.half_angle.sin_cos();
+            (l.x * l.x + l.y * l.y) * ca * ca - (s.radius * ca + l.z * sa).powi(2)
+        }),
+        Surface::Torus(s) => Box::new(|p| {
+            let l = s.frame.to_local(p);
+            let k = l.dot(l) + s.major * s.major - s.minor * s.minor;
+            k * k - 4.0 * s.major * s.major * (l.x * l.x + l.y * l.y)
+        }),
+        _ => return None,
+    })
+}
+
+/// The real roots of the polynomial with coefficients `c`, constant first, at which it changes
+/// sign: between each two neighbouring roots of its derivative it runs one way, so it changes
+/// sign there at most once, found by bisection.
+fn real_roots(c: &[f64]) -> Vec<f64> {
+    let scale = c.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    let mut c = c.to_vec();
+    while c.last().is_some_and(|x| x.abs() <= 1e-14 * scale) {
+        c.pop();
+    }
+    if c.len() < 2 {
+        return Vec::new();
+    }
+    let value = |x: f64| c.iter().rev().fold(0.0, |acc, k| acc * x + k);
+    let lead = c[c.len() - 1];
+    if c.len() == 2 {
+        return vec![-c[0] / lead];
+    }
+    let slope: Vec<f64> = c
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(k, x)| k as f64 * x)
+        .collect();
+    // Every root lies within Cauchy's bound.
+    let bound = 1.0
+        + c[..c.len() - 1]
+            .iter()
+            .fold(0.0f64, |m, x| m.max((x / lead).abs()));
+    let mut stops = vec![-bound];
+    stops.extend(real_roots(&slope).into_iter().filter(|x| x.abs() < bound));
+    stops.push(bound);
+    stops.sort_by(f64::total_cmp);
+    let mut out = Vec::new();
+    for w in stops.windows(2) {
+        let (mut lo, mut hi) = (w[0], w[1]);
+        let (flo, fhi) = (value(lo), value(hi));
+        if flo == 0.0 || fhi == 0.0 || (flo > 0.0) == (fhi > 0.0) {
+            continue;
+        }
+        for _ in 0..200 {
+            let mid = 0.5 * (lo + hi);
+            if mid <= lo || mid >= hi {
+                break;
+            }
+            if (value(mid) > 0.0) == (flo > 0.0) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        out.push(0.5 * (lo + hi));
+    }
+    out
+}
+
+/// [`crossings`] by the bound on how fast the distance to the surface can change.
+fn bounded(orbit: &Curve, radius: f64, surface: &Surface) -> Vec<f64> {
+    let gap = |t: f64| csi::signed_distance(surface, orbit.eval(t));
+    let mut out = Vec::new();
+    let mut stack: Vec<(f64, f64)> = (0..8)
+        .rev()
+        .map(|k| {
+            (
+                -PI + PI * f64::from(k) / 4.0,
+                -PI + PI * f64::from(k + 1) / 4.0,
+            )
+        })
+        .collect();
+    while let Some((a, b)) = stack.pop() {
+        let mid = 0.5 * (a + b);
+        if gap(mid).abs() > radius * 0.5 * (b - a) {
+            continue;
+        }
+        if b - a <= 1e-9 {
+            if (gap(a) > 0.0) != (gap(b) > 0.0) {
+                out.push(mid);
+            }
+            continue;
+        }
+        stack.push((mid, b));
+        stack.push((a, mid));
     }
     out
 }
@@ -622,4 +792,33 @@ fn crossing(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::Torus;
+
+    // An orbit that skims the top of a ring a ten-thousandth below its crest goes in and out of
+    // it twice, each pair a hundredth of a radian apart. Both ways of finding the crossings give
+    // all four.
+    #[test]
+    fn an_orbit_skimming_a_ring_crosses_it_four_times() {
+        let ring = Surface::Torus(Torus {
+            frame: Frame::WORLD.translated(Vec3::new(10.0, -2.0, 0.0)),
+            major: 2.0,
+            minor: 0.5,
+        });
+        let axis = Axis::new(Vec3::ZERO, Vec3::Z).unwrap();
+        let o = Vec2::new(12.1736, 0.49993);
+        let orbit = axis.orbit(o);
+        let exact = crossings(&orbit, o.x, &ring);
+        let slow = bounded(&orbit, o.x, &ring);
+        assert_eq!(exact.len(), 4, "{exact:?}");
+        assert_eq!(slow.len(), 4, "{slow:?}");
+        for (a, b) in exact.iter().zip(&slow) {
+            assert!((a - b).abs() < 1e-8, "{a} {b}");
+            assert!(csi::signed_distance(&ring, orbit.eval(*a)).abs() < 1e-12);
+        }
+    }
 }

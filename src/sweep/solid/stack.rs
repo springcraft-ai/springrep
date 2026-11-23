@@ -8,10 +8,9 @@
 //! say it is there.
 
 use std::collections::{BTreeSet, HashMap};
-use std::f64::consts::PI;
 use std::rc::Rc;
 
-use super::cells::{Axis, Cells, Gen, Hit};
+use super::cells::{Axis, Cells, Gen, Hit, crossings};
 use super::cut::Cut;
 use super::grazing::fit_exact;
 use super::moving::graph::{self, Link};
@@ -840,11 +839,35 @@ fn shadow(
     let roots = |f: f64| -> Vec<Point3> {
         let o = cells.axis.drawn(on_link(f), 0.0).0;
         let orbit = cells.axis.orbit(o);
-        csi::curve_surface(&orbit, (-PI, PI), &dom.surface)
-            .ts
+        crossings(&orbit, o.x, &dom.surface)
             .into_iter()
             .map(|t| orbit.eval(t))
             .collect()
+    };
+    // The meeting nearest `near`. Where a shadow runs out at a fold of the part its orbit's two
+    // meetings there close up and, within rounding of the fold, are no crossing at all: the
+    // meeting is then where the orbit comes nearest the part, beside the last one found.
+    let nearest = |f: f64, near: Point3| -> Point3 {
+        if let Some(p) = roots(f)
+            .into_iter()
+            .min_by(|a, b| a.dist(near).total_cmp(&b.dist(near)))
+        {
+            return p;
+        }
+        let o = cells.axis.drawn(on_link(f), 0.0).0;
+        let orbit = cells.axis.orbit(o);
+        let about = cells.axis.drawn(near, 0.0).1;
+        let off = |t: f64| csi::signed_distance(&dom.surface, orbit.eval(t)).abs();
+        let (mut lo, mut hi) = (about - 0.05, about + 0.05);
+        for _ in 0..80 {
+            let (x, y) = (lo + 0.382 * (hi - lo), lo + 0.618 * (hi - lo));
+            if off(x) < off(y) {
+                hi = y;
+            } else {
+                lo = x;
+            }
+        }
+        orbit.eval(0.5 * (lo + hi))
     };
     // The shadow is followed from the link's middle to each end, each point the meeting nearest
     // the one before: in even steps, then closing in on the end, where the part's other sheets
@@ -856,14 +879,7 @@ fn shadow(
         steps.extend((1..40).map(|j| 1.0 - 0.5f64.powi(j) / 49.0));
         for x in steps {
             let f = middle + (toward - middle) * x;
-            let Some(next) = roots(f)
-                .into_iter()
-                .min_by(|a, b| a.dist(last).total_cmp(&b.dist(last)))
-            else {
-                return Err(Error::Numerical(
-                    "an orbit through a link of a turn's drawing misses the face under it".into(),
-                ));
-            };
+            let next = nearest(f, last);
             track.push((f, next));
             last = next;
         }
@@ -940,9 +956,7 @@ fn shadow(
         let (a, b) = (track[i - 1], track[i]);
         let near =
             a.1.lerp(b.1, ((f - a.0) / (b.0 - a.0).max(1e-300)).clamp(0.0, 1.0));
-        roots(f)
-            .into_iter()
-            .min_by(|x, y| x.dist(near).total_cmp(&y.dist(near)))
+        Some(nearest(f, near))
             .map(|p| apart(f, p))
             .map(|p| (p, Vec2::ZERO))
     };
@@ -982,7 +996,7 @@ fn shadow(
         }
     };
     let (pa, pb) = (end(link.a, 0.0, 1e-6)?, end(link.b, 1.0, 1.0 - 1e-6)?);
-    let at = |f: f64| meet(f).map_or(pa, |x| x.0);
+    let at = |f: f64| meet(f).map_or(if f < 0.5 { pa } else { pb }, |x| x.0);
     let (curve, range) = fit_exact(&at, (0.0, 1.0), (pa, pb), cells.size)?;
     // Each end's parameters on the face, carried out from the middle, which is inside the face
     // and so in its own window of a periodic parameter.
