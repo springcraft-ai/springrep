@@ -15,7 +15,7 @@ use crate::{
         csi,
         domain::{Domain, Where},
     },
-    geom::{Circle, Curve},
+    geom::{Circle, Curve, Surface},
     math::{Frame, Point3, Vec2, Vec3},
 };
 
@@ -81,6 +81,10 @@ pub(super) struct Cells {
     pub nodes: Vec<Vec2>,
     pub links: Vec<Link>,
     pub gens: Vec<Vec<Gen>>,
+    /// Where along its first stretch each point of each link's polyline is, from 0 to 1.
+    pub fracs: Vec<Vec<f64>>,
+    /// The face each characteristic curve of the cut body lies on, by piece.
+    grazes: Vec<Option<Surface>>,
     pub regions: Vec<Region>,
     pub domains: Vec<Domain>,
     pub size: f64,
@@ -94,6 +98,10 @@ struct Drawing {
 }
 
 impl Drawing {
+    fn last(&self) -> &Vec2 {
+        &self.pts[self.pts.len() - 1]
+    }
+
     fn length(&self) -> f64 {
         self.pts.windows(2).map(|w| w[0].dist(w[1])).sum()
     }
@@ -116,12 +124,15 @@ impl Cells {
         cut.pool.iter().for_each(|&p| bounds.add(p));
         let size = bounds.diagonal();
         let near = 1e-9 * size;
+        // The face each characteristic curve lies on: its points are read on the face itself.
+        let mut grazes: Vec<Option<Surface>> = vec![None; cut.pieces.len()];
+        for part in &cut.parts {
+            for &k in &cut.curves[part.face] {
+                grazes[k] = Some(part.surface.clone());
+            }
+        }
         let at = |piece: usize, t: f64| -> Vec2 {
-            let c = cut.pieces[piece]
-                .curve
-                .as_ref()
-                .expect("a drawn piece has a curve");
-            axis.drawn(c.eval(t), 0.0).0
+            axis.drawn(exact(cut, &axis, &grazes, piece, t), 0.0).0
         };
         let mut nodes: Vec<Vec2> = Vec::new();
         let node = |p: Vec2, nodes: &mut Vec<Vec2>| -> usize {
@@ -145,10 +156,31 @@ impl Cells {
             .enumerate()
             .filter(|(_, pg)| pg.curve.is_some())
             .map(|(piece, pg)| {
-                let ts: Vec<f64> = (0..=SAMPLES)
+                // Even steps, then each chord halved while the drawing strays from it: a
+                // drawing turns sharply where its curve runs along an orbit.
+                let mut ts: Vec<f64> = (0..=SAMPLES)
                     .map(|k| pg.range.0 + (pg.range.1 - pg.range.0) * k as f64 / SAMPLES as f64)
                     .collect();
-                let pts = ts.iter().map(|&t| at(piece, t)).collect();
+                let mut pts: Vec<Vec2> = ts.iter().map(|&t| at(piece, t)).collect();
+                for _ in 0..12 {
+                    let (mut nt, mut np) = (vec![ts[0]], vec![pts[0]]);
+                    let mut grew = false;
+                    for i in 1..ts.len() {
+                        let tm = 0.5 * (ts[i - 1] + ts[i]);
+                        let pm = at(piece, tm);
+                        if pm.dist(pts[i - 1].lerp(pts[i], 0.5)) > 1e-5 * size {
+                            nt.push(tm);
+                            np.push(pm);
+                            grew = true;
+                        }
+                        nt.push(ts[i]);
+                        np.push(pts[i]);
+                    }
+                    (ts, pts) = (nt, np);
+                    if !grew {
+                        break;
+                    }
+                }
                 Drawing { piece, ts, pts }
             })
             .filter(|d| d.length() > 1e-7 * size)
@@ -165,9 +197,9 @@ impl Cells {
                     continue;
                 }
                 let (a, b) = (&drawings[i], &drawings[j]);
-                for m in 0..SAMPLES {
+                for m in 0..a.pts.len() - 1 {
                     let from = if i == j { m + 2 } else { 0 };
-                    for n in from..SAMPLES {
+                    for n in from..b.pts.len() - 1 {
                         let (p, q) = (a.pts[m], b.pts[n]);
                         let (dp, dq) = (a.pts[m + 1] - p, b.pts[n + 1] - q);
                         let det = dp.cross(dq);
@@ -185,7 +217,7 @@ impl Cells {
                         let Some((x, ts)) = crossing(&at, [a, b], seed, size) else {
                             continue;
                         };
-                        let ends = [a.pts[0], a.pts[SAMPLES], b.pts[0], b.pts[SAMPLES]];
+                        let ends = [a.pts[0], *a.last(), b.pts[0], *b.last()];
                         if ends.iter().any(|e| e.dist(x) <= 1e-6 * size) {
                             continue;
                         }
@@ -199,21 +231,68 @@ impl Cells {
                 }
             }
         }
+        // A drawing turns back on itself where its curve runs along an orbit: the surface the
+        // curve sweeps folds there, and which side of it the body lies on changes, so the place
+        // is a node. The velocity crossed with the curve's direction turns over there.
+        for (i, d) in drawings.iter().enumerate() {
+            let pg = &cut.pieces[d.piece];
+            let h = 1e-6 * (pg.range.1 - pg.range.0);
+            let cross = |t: f64| {
+                let p = exact(cut, &axis, &grazes, d.piece, t);
+                let dp = (exact(cut, &axis, &grazes, d.piece, t + h)
+                    - exact(cut, &axis, &grazes, d.piece, t - h))
+                    / (2.0 * h);
+                let v = axis.velocity(p);
+                (v.cross(dp), v.norm() * dp.norm())
+            };
+            let mut last: Option<(f64, Vec3)> = None;
+            for &t in &d.ts[1..d.ts.len() - 1] {
+                let (w, scale) = cross(t);
+                if w.norm() <= 1e-9 * scale {
+                    continue;
+                }
+                if let Some((a, l)) = last
+                    && l.dot(w) < 0.0
+                {
+                    let (mut lo, mut hi) = (a, t);
+                    for _ in 0..80 {
+                        let mid = 0.5 * (lo + hi);
+                        if cross(mid).0.dot(l) > 0.0 {
+                            lo = mid;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    let at_fold = 0.5 * (lo + hi);
+                    let x = at(d.piece, at_fold);
+                    if d.pts[0].dist(x) > 1e-6 * size && d.last().dist(x) > 1e-6 * size {
+                        let k = node(x, &mut nodes);
+                        if !cuts[i].iter().any(|c| c.1 == k) {
+                            cuts[i].push((at_fold, k));
+                        }
+                    }
+                }
+                last = Some((t, w));
+            }
+        }
         // A node on a drawing away from its ends cuts it too: a vertex on another curve's orbit,
         // as where two circles about one line are drawn along each other.
         for (i, d) in drawings.iter().enumerate() {
             for (k, &p) in nodes.iter().enumerate() {
-                if d.pts[0].dist(p) <= near || d.pts[SAMPLES].dist(p) <= near {
+                if d.pts[0].dist(p) <= near || d.last().dist(p) <= near {
                     continue;
                 }
                 if off(&d.pts, p) > 1e-3 * size || cuts[i].iter().any(|c| c.1 == k) {
                     continue;
                 }
                 // The nearest sample, then the nearest point of the drawing by golden section.
-                let m = (0..=SAMPLES)
+                let m = (0..d.pts.len())
                     .min_by(|&x, &y| d.pts[x].dist(p).total_cmp(&d.pts[y].dist(p)))
                     .expect("a drawing has samples");
-                let (mut lo, mut hi) = (d.ts[m.saturating_sub(1)], d.ts[(m + 1).min(SAMPLES)]);
+                let (mut lo, mut hi) = (
+                    d.ts[m.saturating_sub(1)],
+                    d.ts[(m + 1).min(d.pts.len() - 1)],
+                );
                 for _ in 0..100 {
                     let (x, y) = (lo + 0.382 * (hi - lo), lo + 0.618 * (hi - lo));
                     if at(d.piece, x).dist(p) < at(d.piece, y).dist(p) {
@@ -230,6 +309,7 @@ impl Cells {
         }
         let mut links: Vec<Link> = Vec::new();
         let mut gens: Vec<Vec<Gen>> = Vec::new();
+        let mut fracs: Vec<Vec<f64>> = Vec::new();
         for (i, d) in drawings.iter().enumerate() {
             let pg = &cut.pieces[d.piece];
             let forward = pg.range.1 >= pg.range.0;
@@ -246,24 +326,56 @@ impl Cells {
             all.push((pg.range.1, of_vertex[pg.v1]));
             for w in all.windows(2) {
                 let ((t0, a), (t1, b)) = (w[0], w[1]);
-                let n = SAMPLES / 4;
-                let mut pts: Vec<Vec2> = (0..=n)
-                    .map(|k| at(d.piece, t0 + (t1 - t0) * k as f64 / n as f64))
-                    .collect();
-                pts[0] = nodes[a];
-                pts[n] = nodes[b];
+                // The drawing's own samples between the two ends, and a few even ones.
+                let mut at_t: Vec<f64> = (1..8).map(|k| t0 + (t1 - t0) * k as f64 / 8.0).collect();
+                let within = |t: f64| (t - t0) * (t - t1) < 0.0;
+                at_t.extend(d.ts.iter().copied().filter(|&t| within(t)));
+                at_t.sort_by(|x, y| ((x - t0).abs()).total_cmp(&(y - t0).abs()));
+                at_t.dedup();
+                let mut pts = vec![nodes[a]];
+                pts.extend(at_t.iter().map(|&t| at(d.piece, t)));
+                pts.push(nodes[b]);
+                let mut frac = vec![0.0];
+                frac.extend(at_t.iter().map(|&t| (t - t0) / (t1 - t0)));
+                frac.push(1.0);
                 // A stretch drawn along a link already made, end to end, is that link again.
-                let twin = links.iter().position(|l| {
+                // The polylines agree to their sag; then the stretch's own points at a few places
+                // lie on the link's curve as it is drawn, to rounding.
+                let on_drawing = |g: &Gen, q: Vec2| {
+                    let n = 32;
+                    let t_at = |i: usize| g.t.0 + (g.t.1 - g.t.0) * i as f64 / n as f64;
+                    let m = (0..=n)
+                        .min_by(|&x, &y| {
+                            at(g.piece, t_at(x))
+                                .dist(q)
+                                .total_cmp(&at(g.piece, t_at(y)).dist(q))
+                        })
+                        .expect("samples");
+                    let (mut lo, mut hi) = (t_at(m.saturating_sub(1)), t_at((m + 1).min(n)));
+                    for _ in 0..80 {
+                        let (x, y) = (lo + 0.382 * (hi - lo), lo + 0.618 * (hi - lo));
+                        if at(g.piece, x).dist(q) < at(g.piece, y).dist(q) {
+                            hi = y;
+                        } else {
+                            lo = x;
+                        }
+                    }
+                    at(g.piece, 0.5 * (lo + hi)).dist(q) <= 1e-8 * size
+                };
+                let twin = links.iter().zip(&gens).position(|(l, list)| {
                     ((l.a == a && l.b == b) || (l.a == b && l.b == a))
-                        && pts.iter().all(|&q| off(&l.pts, q) <= 1e-6 * size)
-                        && l.pts.iter().all(|&q| off(&pts, q) <= 1e-6 * size)
+                        && pts.iter().all(|&q| off(&l.pts, q) <= 1e-4 * size)
+                        && l.pts.iter().all(|&q| off(&pts, q) <= 1e-4 * size)
+                        && [0.2, 0.5, 0.8]
+                            .iter()
+                            .all(|&f| on_drawing(&list[0], at(d.piece, t0 + (t1 - t0) * f)))
                 });
                 match twin {
                     Some(k) => {
                         let along = links[k].a == a
                             && (a != b || {
                                 let m = pts.len() / 4;
-                                pts[m].dist(links[k].pts[m]) <= 1e-6 * size
+                                off(&links[k].pts[..links[k].pts.len() / 2], pts[m]) <= 1e-4 * size
                             });
                         gens[k].push(Gen {
                             piece: d.piece,
@@ -271,6 +383,7 @@ impl Cells {
                         });
                     }
                     None => {
+                        fracs.push(frac);
                         links.push(Link { a, b, pts });
                         gens.push(vec![Gen {
                             piece: d.piece,
@@ -291,10 +404,18 @@ impl Cells {
             nodes,
             links,
             gens,
+            fracs,
+            grazes,
             regions,
             domains,
             size,
         })
+    }
+
+    /// The point of piece `piece` of the cut body at `t`: a characteristic curve's on its face
+    /// exactly, where the fitted curve is a hair off.
+    pub(super) fn point(&self, cut: &Cut, piece: usize, t: f64) -> Point3 {
+        exact(cut, &self.axis, &self.grazes, piece, t)
     }
 
     /// A point well inside cell `r`: of the points a step to the left of its links' chords, the
@@ -354,6 +475,45 @@ impl Cells {
     }
 }
 
+/// The point of piece `piece` at `t`. A characteristic curve is fitted to within a hundredth of
+/// the tolerance, and an orbit through a point that far off the face's true outline no longer
+/// touches the face: beside a fold of the outline, where three of the orbit's meetings with the
+/// face close up, they are a thousandth apart or missing. So a characteristic curve's point is
+/// moved onto the outline itself, where the velocity lies in the face, by Newton's method across
+/// the outline in the face's parameters.
+fn exact(cut: &Cut, axis: &Axis, grazes: &[Option<Surface>], piece: usize, t: f64) -> Point3 {
+    let c = cut.pieces[piece]
+        .curve
+        .as_ref()
+        .expect("a drawn piece has a curve");
+    let p = c.eval(t);
+    let Some(s) = &grazes[piece] else {
+        return p;
+    };
+    let rate = |uv: Vec2| s.normal(uv.x, uv.y).dot(axis.velocity(s.eval(uv.x, uv.y)));
+    let mut uv = s.project(p);
+    for _ in 0..4 {
+        let h = 1e-6;
+        let r = rate(uv);
+        let grad = Vec2::new(
+            (rate(uv + Vec2::new(h, 0.0)) - rate(uv - Vec2::new(h, 0.0))) / (2.0 * h),
+            (rate(uv + Vec2::new(0.0, h)) - rate(uv - Vec2::new(0.0, h))) / (2.0 * h),
+        );
+        let g2 = grad.dot(grad);
+        if g2 <= 0.0 {
+            return p;
+        }
+        uv = uv - grad * (r / g2);
+    }
+    let q = s.eval(uv.x, uv.y);
+    // The curve is on the outline already to the fit; a step farther is no correction.
+    if q.dist(p) <= 1e-6 * (1.0 + p.norm()) {
+        q
+    } else {
+        p
+    }
+}
+
 /// Where two drawings cross near where their chords do, and the two pieces' parameters there:
 /// Newton's method on the two parameters. Chords cross where the drawings only touch; there the
 /// steps run to an end, or nowhere.
@@ -363,7 +523,7 @@ fn crossing(
     seed: [f64; 2],
     size: f64,
 ) -> Option<(Vec2, [f64; 2])> {
-    let range = |k: usize| (d[k].ts[0], d[k].ts[SAMPLES]);
+    let range = |k: usize| (d[k].ts[0], d[k].ts[d[k].ts.len() - 1]);
     let inside = |k: usize, t: f64| {
         let (a, b) = range(k);
         t >= a.min(b) && t <= a.max(b)
