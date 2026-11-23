@@ -21,7 +21,8 @@ build.py. It is built from:
 [build.py](build.py) fills the template's `{{…}}` slots and writes springrep.html into a git-ignored
 dist folder here. The crate's manifest excludes this folder, so the site never ships with the crate.
 For a host that loads nothing from other origins, such as a sandboxed preview, `--preview` fetches
-the CDN files at build time and writes them into springrep.preview.html instead.
+the CDN files at build time and writes them into springrep.preview.html instead. That page cannot
+fetch the leaderboard, so its boards say it did not load.
 
 The [pages workflow](../.github/workflows/pages.yml) publishes the page to GitHub Pages. The API
 docs link points to docs.rs, which documents the version published on crates.io.

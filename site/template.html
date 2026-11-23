@@ -1223,12 +1223,12 @@ function drawBoard() {
     const row = document.createElement("div")
     row.className = "hrow" + (k.us ? " us" : "")
     row.innerHTML = '<span class="n"></span><span class="lic"></span><span class="t"><i></i></span><b>' + k.rate.toFixed(1) + "%</b>" +
-      '<span class="ms">' + k.ms[0] + " ms</span>"
+      '<span class="ms">' + (k.ms ? k.ms[0] + " ms" : "–") + "</span>"
     row.querySelector(".n").textContent = k.label
     row.querySelector(".lic").textContent = k.license
     row.dataset.tip = k.label + " " + k.ver + " · " + k.license + "|" + k.n[0] + " of " + TOTAL +
-      " cases hold to 1e-7 mm. Median " + k.ms[0] + " ms per case; half take " + k.ms[1] + " to " +
-      k.ms[2] + " ms."
+      " cases hold to 1e-7 mm." + (k.ms ? " Median " + k.ms[0] + " ms per case; half take " +
+      k.ms[1] + " to " + k.ms[2] + " ms." : "")
     hbench.appendChild(row)
   })
   requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -1254,8 +1254,8 @@ function drawBoard() {
       '<td class="bar-cell"><div class="tbar" role="img"></div><div class="ruler"><span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div></td>' +
       '<td class="p7"><span data-to="' + atOrBetter(k, 0) + '" data-dp="1" data-unit="%"></span></td>' +
       '<td class="px"><span data-to="' + atOrBetter(k, 2) + '" data-dp="1" data-unit="%"></span></td>' +
-      '<td class="mt"><b><span data-to="' + k.ms[0] + '" data-dp="' + (k.ms[0] < 100 ? 1 : 0) +
-      '"></span><small>ms</small></b></td>'
+      (k.ms ? '<td class="mt"><b><span data-to="' + k.ms[0] + '" data-dp="' + (k.ms[0] < 100 ? 1 : 0) +
+      '"></span><small>ms</small></b></td>' : '<td class="mt">–</td>')
     tr.querySelector(".k b").textContent = k.label
     tr.querySelector(".k small").textContent = k.ver + " · " + k.license
     const bar = tr.querySelector(".tbar")
@@ -1285,8 +1285,10 @@ function drawBoard() {
       return [k.label + " " + k.ver + " · " + shown[hot].says, rows.join("\n")]
     }
     cell.addEventListener("pointerleave", () => bar.classList.remove("picking"))
-    tr.querySelector(".mt").dataset.tip = k.label + " · median " + k.ms[0] + " ms per case|" +
-      "half of its cases take " + k.ms[1] + " to " + k.ms[2] + " ms. Timed only on cases every kernel answered."
+    if (k.ms) {
+      tr.querySelector(".mt").dataset.tip = k.label + " · median " + k.ms[0] + " ms per case|" +
+        "half of its cases take " + k.ms[1] + " to " + k.ms[2] + " ms. Timed only on cases every kernel answered."
+    }
     board.appendChild(tr)
   })
 
@@ -1331,24 +1333,28 @@ const shortLicense = (spdx) =>
 const shortMs = (v) => v < 100 ? Math.round(v * 10) / 10 : Math.round(v)
 // The results site's leaderboard.json in this page's terms. Throws on data the board cannot draw.
 function fromLive(d) {
-  const at = (k, ...grades) => grades.reduce((a, g) => a + (k.counts[d.grades.indexOf(g)] || 0), 0)
+  const text = (...v) => v.every((s) => typeof s === "string")
+  const above = (v, least) => typeof v === "number" && v >= least
+  const BANDED = ["1e-7", "1e-6", "1e-5", "1e-3", "fail", "unsupported"]
+  const at = (k, g) => k.counts[d.grades.indexOf(g)] || 0
+  // Every other grade counts with refused, timeout and crash, so one the suite adds later does
+  // not cost the page its board.
+  const rest = (k) => d.grades.reduce((a, g, i) => BANDED.includes(g) ? a : a + (k.counts[i] || 0), 0)
+  const times = (k) => [k.time?.median, k.time?.q1, k.time?.q3]
   const rows = d.kernels.map((k) => ({
     label: k.kernel,
     ver: k.version,
     license: shortLicense(k.license),
-    n: [...["1e-7", "1e-6", "1e-5", "1e-3", "fail", "unsupported"].map((g) => at(k, g)),
-      at(k, "refused", "timeout", "crash")],
-    ms: [k.time.median, k.time.q1, k.time.q3].map(shortMs),
+    n: [...BANDED.map((g) => at(k, g)), rest(k)],
+    // Null for a kernel without all three times, which is then drawn without a speed.
+    ms: times(k).every((v) => above(v, 0)) ? times(k).map(shortMs) : null,
     ...(k.maintainers ? { us: true } : {}),
   }))
   const run = (d.kernels.find((k) => k.maintainers) || d.kernels[0]).run
   const unix = Date.parse(run.date) / 1000
-  const text = (...v) => v.every((s) => typeof s === "string")
-  const above = (v, least) => typeof v === "number" && v >= least
   const bad = !rows.length || !above(d.cases, 1) || !(unix > 0) || !above(run.cores, 1) ||
     !(above(run.tolerance, 0) && run.tolerance > 0) || !text(d.suite, run.os, run.arch) ||
-    d.kernels.some((k) => !text(k.kernel, k.version, k.license) ||
-      [k.time.median, k.time.q1, k.time.q3].some((v) => !above(v, 0))) ||
+    d.kernels.some((k) => !text(k.kernel, k.version, k.license)) ||
     rows.some((k) => k.n.reduce((a, b) => a + b, 0) !== d.cases)
   if (bad) throw new Error("leaderboard.json: not a board this page can draw")
   const { os, arch, cores, tolerance } = run
@@ -1385,20 +1391,21 @@ function boardFailed(error) {
   tr.append(td)
   document.getElementById("board").replaceChildren(tr)
   document.getElementById("legend").replaceChildren()
+  document.querySelector(".hbench").classList.remove("wait")
 }
-// A results site that never answers counts as one that failed, so the rows do not wait for good.
-const LIVE_TIMEOUT_MS = 8000
-const stalled = new AbortController()
-const stallTimer = setTimeout(() => stalled.abort(), LIVE_TIMEOUT_MS)
-fetch(LIVE, { signal: stalled.signal })
+// After this long without an answer the boards say so, and no longer wait. The request goes on,
+// and a board that lands later is still drawn.
+const LIVE_SLOW_MS = 8000
+const slow = setTimeout(() => boardFailed(new Error("leaderboard.json: no answer yet")), LIVE_SLOW_MS)
+fetch(LIVE)
   .then((r) => r.ok ? r.json() : Promise.reject(new Error("leaderboard.json: " + r.status)))
   .then((d) => {
-    clearTimeout(stallTimer)
     ;[BOARD, RUN, TOTAL] = fromLive(d)
     drawBoard()
+    document.querySelector(".hbench").classList.remove("wait")
   })
   .catch(boardFailed)
-  .finally(() => document.querySelector(".hbench").classList.remove("wait"))
+  .finally(() => clearTimeout(slow))
 
 function alignDeck() {
   const h = document.querySelector("#bench .sh h2")
