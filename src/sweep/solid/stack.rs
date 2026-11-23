@@ -10,7 +10,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
-use super::cells::{Axis, Cells, Gen, Hit, crossings};
+use super::cells::{Axis, Cells, Gen, Hit, Meet, crossings};
 use super::cut::Cut;
 use super::grazing::fit_exact;
 use super::moving::graph::{self, Link};
@@ -21,20 +21,13 @@ use crate::{
         csi,
         domain::{Trim, UvMap, Where},
         sew::{self, OutFace, PieceGeom},
+        ssi::{self, Ssi},
     },
-    geom::Curve,
+    geom::{Curve, Line},
     math::{Point3, Transform, Vec2},
     tol,
     topo::{Brep, FaceName},
 };
-
-/// What the body sweeps over a cell: from where an orbit first goes into it to where the orbit
-/// last leaves it, a turn on.
-#[derive(Clone, Copy, Debug)]
-struct Swept {
-    lo: Hit,
-    hi: Hit,
-}
 
 /// A curve of the result over a link: a stretch of a piece of the cut body, where the turn
 /// starts or where it ends, from the link's `a` to its `b`.
@@ -58,10 +51,10 @@ struct Out {
 }
 
 /// The curve of a lift's piece where the turn starts: a piece of the cut body, or a shadow.
-fn source(cut: &Cut, out: &Out, piece: usize) -> Rc<Curve> {
-    match piece.checked_sub(cut.pieces.len()) {
+fn source(cells: &Cells, out: &Out, piece: usize) -> Rc<Curve> {
+    match piece.checked_sub(cells.pieces.len()) {
         Some(k) => out.shadows[k].0.clone(),
-        None => cut.pieces[piece].curve.clone().expect("a drawn piece"),
+        None => cells.pieces[piece].curve.clone().expect("a drawn piece"),
     }
 }
 
@@ -102,26 +95,40 @@ pub(super) fn sweep(cut: &Cut, motion: &Steady, feature: &str) -> Result<Brep> {
         return unsupported("only a turn is read off its orbits");
     };
     let frame = Axis::new(origin, axis)?;
-    let cells = Cells::new(cut, frame)?;
     let turn = Transform::rotation(origin, axis, span);
-    let stacks: Vec<Vec<Hit>> = (0..cells.regions.len())
-        .map(|r| {
-            let o = cells
-                .middle(r)
-                .ok_or_else(|| Error::Numerical("a cell of a turn's drawing is empty".into()))?;
-            Ok(cells.hits(cut, o))
-        })
-        .collect::<Result<_>>()?;
-    let swept: Vec<Option<Swept>> = stacks
-        .iter()
-        .map(|hits| merged(hits, span))
-        .collect::<Result<_>>()?;
-    // What follows merges every orbit's intervals into one, which is so where no gap in the body
-    // along an orbit is as long as the turn. A gap is shorter than the whole angle the body takes
-    // up about the axis, and that is the spread of its edges and characteristic curves, since
-    // the body's surface is farthest round where an orbit touches or leaves it. So either the
-    // turn is at least that spread, or no cell has a gap at all; otherwise an orbit somewhere
-    // may have a gap the turn does not close, which the cells' middles need not show.
+    let back = Transform::rotation(origin, axis, -span);
+    let stacked = |cells: &Cells| -> Result<Vec<Vec<Hit>>> {
+        (0..cells.regions.len())
+            .map(|r| {
+                let o = cells.middle(r).ok_or_else(|| {
+                    Error::Numerical("a cell of a turn's drawing is empty".into())
+                })?;
+                Ok(cells.hits(cut, o))
+            })
+            .collect()
+    };
+    let mut cells = Cells::new(cut, frame, Vec::new())?;
+    // The drawing has a cell for every orbit that meets the body only if the axis passes beside
+    // the body, and a line passes through a bounded body only by crossing its surface.
+    let line = Curve::Line(Line { origin, dir: axis });
+    let reach = cut.pool.iter().fold(0.0, |r: f64, p| r.max(p.dist(origin))) + cells.size;
+    let through = cells.domains.iter().any(|d| {
+        let hits = csi::curve_surface(&line, (-reach, reach), &d.surface);
+        hits.on_surface
+            || hits
+                .ts
+                .iter()
+                .any(|&t| !matches!(d.locate(line.eval(t)), Where::Outside))
+    });
+    if through {
+        return unsupported("a turn about a line through the body");
+    }
+    let mut stacks = stacked(&cells)?;
+    // A gap along an orbit is closed by the turn or it is not, and which can change inside a
+    // cell: across the curve where the end of the turn meets its start. A gap is shorter than the
+    // whole angle the body takes up about the axis, the spread of its edges and characteristic
+    // curves, so a turn of at least that closes every gap; a shorter one has those curves drawn
+    // too, and then each cell's gaps are closed or open all over it.
     let mut spread = (f64::INFINITY, f64::NEG_INFINITY);
     for (k, pg) in cut.pieces.iter().enumerate() {
         if pg.curve.is_none() {
@@ -135,10 +142,17 @@ pub(super) fn sweep(cut: &Cut, motion: &Steady, feature: &str) -> Result<Brep> {
     }
     let gapped = stacks.iter().any(|hits| hits.len() > 2);
     if gapped && span < spread.1 - spread.0 + 1e-2 {
-        return unsupported("a body with gaps along its orbits, turned less than it spans");
+        let meets = meetings(cut, &cells, &turn)?;
+        cells = Cells::new(cut, frame, meets)?;
+        stacks = stacked(&cells)?;
     }
+    let cells = cells;
+    let groups: Vec<Vec<(usize, usize)>> = stacks
+        .iter()
+        .map(|hits| grouped(hits, span))
+        .collect::<Result<_>>()?;
     let overs: Vec<Over> = (0..cells.links.len())
-        .map(|k| over(cut, &cells, k))
+        .map(|k| over(cut, &cells, k, &back))
         .collect();
     // The cell on each side of each link: on its left as it runs from `a` to `b`, and its right.
     let mut sides: Vec<[Option<usize>; 2]> = vec![[None, None]; cells.links.len()];
@@ -147,22 +161,25 @@ pub(super) fn sweep(cut: &Cut, motion: &Steady, feature: &str) -> Result<Brep> {
             sides[k][usize::from(!fwd)] = Some(r);
         }
     }
-    let mut ends: HashMap<(usize, usize, bool), (usize, Beside)> = HashMap::new();
-    // The angle of each such end at the link's middle, a turn on for a high end.
-    let mut angles: HashMap<(usize, usize, bool), f64> = HashMap::new();
+    // What each face of each cell's order comes to at each of the cell's links.
+    let mut at_link: HashMap<(usize, usize), Vec<(Beside, f64)>> = HashMap::new();
     for (k, side) in sides.iter().enumerate() {
         for (i, r) in side.iter().enumerate() {
-            let Some(r) = *r else { continue };
-            if swept[r].is_none() {
-                continue;
-            }
-            for high in [false, true] {
-                let (part, end, angle) = end_at(cut, &cells, k, &overs[k], &stacks[r], high)?;
-                ends.insert((k, i, high), (part, end));
-                angles.insert((k, i, high), angle + if high { span } else { 0.0 });
+            if let Some(r) = *r
+                && !stacks[r].is_empty()
+            {
+                at_link.insert((k, i), align(cut, &overs[k], &stacks[r])?);
             }
         }
     }
+    // Each end of each cell's swept intervals: the place in the cell's order, and whether it is
+    // a high end.
+    let ends_of = |r: usize| -> Vec<(usize, bool)> {
+        groups[r]
+            .iter()
+            .flat_map(|&(lo, hi)| [(lo, false), (hi, true)])
+            .collect()
+    };
     let mut out = Out {
         pool: Vec::new(),
         pieces: Vec::new(),
@@ -171,118 +188,164 @@ pub(super) fn sweep(cut: &Cut, motion: &Steady, feature: &str) -> Result<Brep> {
         shadows: Vec::new(),
         near: 1e-7 * cells.size,
     };
-    // The lift each side of each link ends on, low and high, where the cells there are of
-    // different faces.
-    let mut lifts: HashMap<(usize, usize, bool), Lift> = HashMap::new();
-    for high in [false, true] {
-        let role = |s: &Swept| if high { s.hi } else { s.lo };
-        // Cells whose ends lie on one part, with no curve of its boundary between them, are one
-        // face.
-        let mut group: Vec<usize> = (0..cells.regions.len()).collect();
-        for (k, side) in sides.iter().enumerate() {
-            let [Some(l), Some(r)] = *side else { continue };
-            let (Some(a), Some(b)) = (swept[l], swept[r]) else {
+    // Ends of cells either side of a link that are one meeting of the link's own orbit with a
+    // face are ends on one face of the result.
+    let first: Vec<usize> = stacks
+        .iter()
+        .scan(0, |sum, hits| {
+            let at = *sum;
+            *sum += hits.len();
+            Some(at)
+        })
+        .collect();
+    let mut face_of: Vec<usize> = (0..stacks.iter().map(Vec::len).sum()).collect();
+    for (k, side) in sides.iter().enumerate() {
+        let [Some(l), Some(r)] = *side else { continue };
+        for (jl, high) in ends_of(l) {
+            let Beside::Through(i) = at_link[&(k, 0)][jl].0 else {
                 continue;
             };
-            let _ = (a, b);
-            let (x, y) = (ends[&(k, 0, high)], ends[&(k, 1, high)]);
-            if x == y && matches!(x.1, Beside::Through(_)) {
-                let (x, y) = (find(&mut group, l), find(&mut group, r));
-                group[x] = y;
-            }
-        }
-        let roots: BTreeSet<usize> = (0..cells.regions.len())
-            .filter(|&r| swept[r].is_some())
-            .map(|r| find(&mut group, r))
-            .collect();
-        for root in roots {
-            let member = |r: usize, group: &mut Vec<usize>| find(group, r) == root;
-            let part = role(&swept[root].expect("a face's cells are swept")).part;
-            // The links with the face on one side only, as a graph of their own: its regions that
-            // hold a cell of the face are the face.
-            let mut edge: Vec<usize> = Vec::new();
-            for (k, side) in sides.iter().enumerate() {
-                let within: Vec<bool> = side
-                    .iter()
-                    .map(|s| s.is_some_and(|r| member(r, &mut group)))
-                    .collect();
-                let one = within[0]
-                    && within[1]
-                    && ends[&(k, 0, high)] == ends[&(k, 1, high)]
-                    && matches!(ends[&(k, 0, high)].1, Beside::Through(_));
-                if within[0] != within[1] || (within[0] && within[1] && !one) {
-                    edge.push(k);
+            for (jr, other) in ends_of(r) {
+                if other == high && at_link[&(k, 1)][jr].0 == Beside::Through(i) {
+                    let (x, y) = (
+                        find(&mut face_of, first[l] + jl),
+                        find(&mut face_of, first[r] + jr),
+                    );
+                    face_of[x] = y;
                 }
-            }
-            let sub: Vec<Link> = edge
-                .iter()
-                .map(|&k| Link {
-                    a: cells.links[k].a,
-                    b: cells.links[k].b,
-                    pts: cells.links[k].pts.clone(),
-                })
-                .collect();
-            let regions = graph::regions(&cells.nodes, &sub, 1e-3 * cells.size)?;
-            let mids: Vec<Vec2> = (0..cells.regions.len())
-                .filter(|&r| member(r, &mut group))
-                .filter_map(|r| cells.middle(r))
-                .collect();
-            for region in &regions {
-                if !mids.iter().any(|&m| graph::holds(&sub, region, m)) {
-                    continue;
-                }
-                let mut loops = Vec::new();
-                for lp in &region.loops {
-                    let mut trims = Vec::new();
-                    for &(i, fwd) in lp {
-                        let k = edge[i];
-                        // The face's cell beside the link here.
-                        let side = usize::from(!fwd);
-                        let lift = match ends[&(k, side, high)].1 {
-                            Beside::Own(i) => Lift {
-                                piece: cells.gens[k][i].piece,
-                                t: cells.gens[k][i].t,
-                                end: high,
-                            },
-                            Beside::Through(i) => {
-                                let h = &overs[k].through[i];
-                                let seed = cut.parts[h.part].surface.eval(h.uv.x, h.uv.y);
-                                shadow(cut, &cells, &mut out, k, part, high, (overs[k].frac, seed))?
-                            }
-                        };
-                        lifts.insert((k, side, high), lift);
-                        trims.push(trim_on_part(cut, &mut out, &turn, part, lift, fwd)?);
-                    }
-                    loops.push(trims);
-                }
-                let p = &cut.parts[part];
-                let mut face = OutFace {
-                    surface: if high {
-                        p.surface.transformed(&turn)
-                    } else {
-                        p.surface.clone()
-                    },
-                    reversed: p.reversed,
-                    names: p.names.clone(),
-                    loops,
-                    memo: None,
-                    side: Some(usize::from(high)),
-                };
-                // Seen along the orbits, a face the body enters by keeps the drawing's turn sense
-                // and one it leaves by has it mirrored.
-                if high {
-                    for l in &mut face.loops {
-                        l.reverse();
-                        for t in l.iter_mut() {
-                            *t = t.reversed();
-                        }
-                    }
-                }
-                out.faces.push(face);
             }
         }
     }
-    walls(cut, &cells, &angles, &lifts, &turn, feature, &mut out)?;
+    let mut members: HashMap<usize, Vec<(usize, usize, bool)>> = HashMap::new();
+    for (r, &at) in first.iter().enumerate().take(cells.regions.len()) {
+        for (j, high) in ends_of(r) {
+            let root = find(&mut face_of, at + j);
+            members.entry(root).or_default().push((r, j, high));
+        }
+    }
+    let mut roots: Vec<usize> = members.keys().copied().collect();
+    roots.sort_unstable();
+    // The lift each end ends on at each link where its face stops, with its angle there, and
+    // the angles between which each side of each link is swept.
+    let mut events: HashMap<usize, Vec<(f64, Lift, usize)>> = HashMap::new();
+    let mut spans: HashMap<(usize, usize), Vec<(f64, f64)>> = HashMap::new();
+    for (&(k, side), list) in &at_link {
+        let r = sides[k][side].expect("an aligned side has a cell");
+        let swept = groups[r]
+            .iter()
+            .map(|&(lo, hi)| (list[lo].1, list[hi].1 + span))
+            .collect();
+        spans.insert((k, side), swept);
+    }
+    for root in roots {
+        let list = &members[&root];
+        let (r0, j0, high) = list[0];
+        let part = stacks[r0][j0].part;
+        let place: HashMap<usize, usize> = list.iter().map(|&(r, j, _)| (r, j)).collect();
+        // The links with the face on one side only, or on both but not carried across, as a
+        // graph of their own: its regions that hold a cell of the face are the face.
+        let mut edge: Vec<usize> = Vec::new();
+        for (k, side) in sides.iter().enumerate() {
+            let on: Vec<Option<usize>> = side
+                .iter()
+                .map(|s| s.and_then(|r| place.get(&r).copied()))
+                .collect();
+            let carried = match (on[0], on[1]) {
+                (Some(a), Some(b)) => {
+                    let (x, y) = (at_link[&(k, 0)][a].0, at_link[&(k, 1)][b].0);
+                    x == y && matches!(x, Beside::Through(_))
+                }
+                _ => false,
+            };
+            if (on[0].is_some() || on[1].is_some()) && !carried {
+                edge.push(k);
+            }
+        }
+        let sub: Vec<Link> = edge
+            .iter()
+            .map(|&k| Link {
+                a: cells.links[k].a,
+                b: cells.links[k].b,
+                pts: cells.links[k].pts.clone(),
+            })
+            .collect();
+        let regions = graph::regions(&cells.nodes, &sub, 1e-3 * cells.size)?;
+        let mids: Vec<Vec2> = place.keys().filter_map(|&r| cells.middle(r)).collect();
+        for region in &regions {
+            if !mids.iter().any(|&m| graph::holds(&sub, region, m)) {
+                continue;
+            }
+            let mut loops = Vec::new();
+            for lp in &region.loops {
+                let mut trims = Vec::new();
+                for &(i, fwd) in lp {
+                    let k = edge[i];
+                    // The face's cell beside the link here.
+                    let side = usize::from(!fwd);
+                    let j = sides[k][side]
+                        .and_then(|r| place.get(&r).copied())
+                        .ok_or_else(|| {
+                            Error::Numerical(
+                                "a face of a turn's sweep has no cell beside its edge".into(),
+                            )
+                        })?;
+                    let (end, angle) = at_link[&(k, side)][j];
+                    let lift = match end {
+                        Beside::Own(i) => {
+                            let g = cells.gens[k][i];
+                            Lift {
+                                piece: g.piece,
+                                t: g.t,
+                                // A curve where the turn's end meets its start is drawn where it
+                                // lies, for the face at the end as for the face at the start.
+                                end: high && g.piece < cells.first_meet,
+                            }
+                        }
+                        Beside::Through(i) => {
+                            let h = &overs[k].through[i];
+                            let seed = cut.parts[h.part].surface.eval(h.uv.x, h.uv.y);
+                            shadow(cut, &cells, &mut out, k, part, high, (overs[k].frac, seed))?
+                        }
+                    };
+                    events.entry(k).or_default().push((
+                        angle + if high { span } else { 0.0 },
+                        lift,
+                        side,
+                    ));
+                    let turns = (&turn, &back);
+                    trims.push(trim_on_part(
+                        cut, &cells, &mut out, turns, part, lift, fwd, high, &overs[k],
+                    )?);
+                }
+                loops.push(trims);
+            }
+            let p = &cut.parts[part];
+            let mut face = OutFace {
+                surface: if high {
+                    p.surface.transformed(&turn)
+                } else {
+                    p.surface.clone()
+                },
+                reversed: p.reversed,
+                names: p.names.clone(),
+                loops,
+                memo: None,
+                side: Some(usize::from(high)),
+            };
+            // Seen along the orbits, a face the body enters by keeps the drawing's turn sense
+            // and one it leaves by has it mirrored.
+            if high {
+                for l in &mut face.loops {
+                    l.reverse();
+                    for t in l.iter_mut() {
+                        *t = t.reversed();
+                    }
+                }
+            }
+            out.faces.push(face);
+        }
+    }
+    walls(&cells, &events, &spans, &turn, feature, &mut out)?;
     let vtol = vec![tol::LINEAR; out.pool.len()];
     let mut b = sew::assemble(out.faces, &out.pool, &vtol, &out.pieces)?;
     b.transform(&motion.pose0());
@@ -304,11 +367,12 @@ fn find(p: &mut [usize], i: usize) -> usize {
     r
 }
 
-/// The one interval the body sweeps along an orbit that meets it at `hits`, or `None` where the
-/// orbit misses it.
-fn merged(hits: &[Hit], span: f64) -> Result<Option<Swept>> {
+/// The intervals the body sweeps along an orbit that meets it at `hits`, each as the places in
+/// `hits` of its low and high ends: each of the body's own intervals a turn longer, and joined
+/// to the next where the gap between them is shorter than the turn.
+fn grouped(hits: &[Hit], span: f64) -> Result<Vec<(usize, usize)>> {
     if hits.is_empty() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let alternate = hits.len().is_multiple_of(2)
         && hits
@@ -318,17 +382,24 @@ fn merged(hits: &[Hit], span: f64) -> Result<Option<Swept>> {
     if !alternate {
         return unsupported("an orbit that does not go in and out of the body in turn");
     }
-    for w in hits.chunks(2).collect::<Vec<_>>().windows(2) {
-        let gap = w[1][0].phase - w[0][1].phase;
-        if gap >= span - 1e-6 {
-            return unsupported("a gap in the body along an orbit as long as the turn");
+    let mut out = vec![(0, 1)];
+    for i in (2..hits.len()).step_by(2) {
+        let gap = hits[i].phase - hits[i - 1].phase;
+        if (gap - span).abs() <= 1e-9 {
+            return Err(Error::Numerical(
+                "a cell's middle lies where the end of a turn meets its start".into(),
+            ));
+        }
+        if gap < span {
+            out.last_mut().expect("one interval").1 = i + 1;
+        } else {
+            out.push((i, i + 1));
         }
     }
-    let (lo, hi) = (hits[0], hits[hits.len() - 1]);
-    if hi.phase + span - lo.phase >= std::f64::consts::TAU - 1e-6 {
+    if hits[hits.len() - 1].phase + span - hits[0].phase >= std::f64::consts::TAU - 1e-6 {
         return unsupported("a sweep that closes round the axis");
     }
-    Ok(Some(Swept { lo, hi }))
+    Ok(out)
 }
 
 /// What the end of a cell's swept interval comes to at a link of the cell.
@@ -369,122 +440,256 @@ fn drawn_at(cut: &Cut, cells: &Cells, g: &Gen, o: Vec2) -> f64 {
     0.5 * (lo + hi)
 }
 
-/// A link's own orbit, at the link's middle: where it is drawn, how far along the link's first
-/// stretch that is, the point of each of the link's curves on it, and its meetings with the body
-/// away from those points, in order of angle. At the link's curves the orbit touches the body or
-/// runs through an edge of it; everywhere else it passes through a face as the orbits of the
-/// cells either side do.
+/// A face beside one of a link's curves: on the link's own orbit it is met at the curve, touched
+/// or run through at its edge, and a cell's orbits may meet it or not.
+#[derive(Clone, Copy, Debug)]
+struct Item {
+    /// The curve's place in the link's list.
+    curve: usize,
+    part: usize,
+    enters: bool,
+    at: Point3,
+    angle: f64,
+    /// The face's parameters there, where the orbit passes through it at the curve.
+    uv: Option<Vec2>,
+}
+
+/// A link's own orbit, at the link's middle: how far along the link's first stretch that is, the
+/// faces beside the link's curves where those lie on it, and its meetings with the body away from
+/// those, in order of angle. Everywhere but at the link's curves it passes through the faces as
+/// the orbits of the cells either side do.
 struct Over {
     frac: f64,
-    on: Vec<Point3>,
+    items: Vec<Item>,
     through: Vec<Hit>,
 }
 
-fn over(cut: &Cut, cells: &Cells, k: usize) -> Over {
+fn over(cut: &Cut, cells: &Cells, k: usize, back: &Transform) -> Over {
     let m = cells.links[k].pts.len() / 2;
     let frac = cells.fracs[k][m];
     let g = cells.gens[k][0];
     let first = cells.point(cut, g.piece, g.t.0 + (g.t.1 - g.t.0) * frac);
-    let o = cells.axis.drawn(first, 0.0).0;
-    let on: Vec<Point3> = cells.gens[k]
-        .iter()
-        .enumerate()
-        .map(|(i, g)| match i {
+    let (o, near) = cells.axis.drawn(first, 0.0);
+    let hits = cells.hits(cut, o);
+    let mut items: Vec<Item> = Vec::new();
+    for (i, g) in cells.gens[k].iter().enumerate() {
+        let on = match i {
             0 => first,
             _ => cells.point(cut, g.piece, drawn_at(cut, cells, g, o)),
-        })
-        .collect();
-    let through = cells
-        .hits(cut, o)
+        };
+        // A piece of the cut body lies on the parts it bounds; a curve where the turn's end
+        // meets its start lies on the face the orbits come back in by, and a turn back from it
+        // on the face they left by.
+        let mut sides: Vec<(usize, Point3)> = Vec::new();
+        match g.piece.checked_sub(cells.first_meet) {
+            None => {
+                for (part, p) in cut.parts.iter().enumerate() {
+                    if p.loops.iter().flatten().any(|t| t.piece == g.piece) {
+                        sides.push((part, on));
+                    }
+                }
+            }
+            Some(n) => {
+                let meet = &cells.meets[n];
+                for (part, p) in cut.parts.iter().enumerate() {
+                    if p.face == meet.enter && !p.front {
+                        sides.push((part, on));
+                    }
+                    if p.face == meet.exit && p.front {
+                        sides.push((part, back.point(on)));
+                    }
+                }
+            }
+        }
+        for (part, at) in sides {
+            let uv = hits
+                .iter()
+                .filter(|h| h.part == part)
+                .find(|h| {
+                    let q = cut.parts[part].surface.eval(h.uv.x, h.uv.y);
+                    q.dist(at) <= 1e-5 * cells.size
+                })
+                .map(|h| h.uv);
+            items.push(Item {
+                curve: i,
+                part,
+                enters: !cut.parts[part].front,
+                at,
+                angle: cells.axis.drawn(at, near).1,
+                uv,
+            });
+        }
+    }
+    let through = hits
         .into_iter()
         .filter(|h| {
             let q = cut.parts[h.part].surface.eval(h.uv.x, h.uv.y);
-            !cells.gens[k].iter().zip(&on).any(|(g, p)| {
-                p.dist(q) <= 1e-5 * cells.size
-                    && cut.parts[h.part]
-                        .loops
-                        .iter()
-                        .flatten()
-                        .any(|t| t.piece == g.piece)
-            })
+            !items
+                .iter()
+                .any(|it| it.part == h.part && it.at.dist(q) <= 1e-5 * cells.size)
         })
         .collect();
-    Over { frac, on, through }
+    Over {
+        frac,
+        items,
+        through,
+    }
 }
 
-/// The part that the low or `high` end of a cell's swept interval lies on, what that end comes
-/// to at link `k` of the cell, and its angle there. The cell's orbits meet the faces in the order
-/// `stack`; the link's own orbit meets them in the order `over.through`, and the cell's order is
-/// that one with the faces beside the link's curves put in where those curves lie on the orbit.
-/// So the cell's first face is the link's curve where one of the faces put in is of the same
-/// part and its curve lies before the orbit's first meeting, and otherwise the first meeting
-/// itself; and so for the last.
-fn end_at(
-    cut: &Cut,
-    cells: &Cells,
-    k: usize,
-    over: &Over,
-    stack: &[Hit],
-    high: bool,
-) -> Result<(usize, Beside, f64)> {
-    let lost = || Error::Numerical("a cell's faces along its orbits are not its link's".into());
-    let end = if high { stack.last() } else { stack.first() }.ok_or_else(lost)?;
-    let through = if high {
-        over.through.last()
-    } else {
-        over.through.first()
-    };
-    let near = through.map_or(end.phase, |h| h.phase);
-    // The faces the cell's order has and the link's has not, by part.
-    let mut spare: Vec<usize> = stack.iter().map(|h| h.part).collect();
-    for h in &over.through {
-        match spare.iter().position(|&p| p == h.part) {
-            Some(i) => {
-                spare.swap_remove(i);
-            }
-            None => return Err(lost()),
+/// What each face of a cell's order `stack` comes to at a link of the cell, and its angle
+/// there. The link's own orbit meets the faces in the order `over.through`, and the cell's order
+/// is that one with some of the faces beside the link's curves put in, each where its curve
+/// lies on the orbit. The cell's order is matched to that, face for face in order of angle; a
+/// face put in is the link's curve there, and any other is the orbit's own meeting.
+fn align(cut: &Cut, over: &Over, stack: &[Hit]) -> Result<Vec<(Beside, f64)>> {
+    let _ = cut;
+    let slack = 1e-6;
+    fn fit(
+        over: &Over,
+        stack: &[Hit],
+        (s, t): (usize, usize),
+        used: &mut Vec<bool>,
+        angle: f64,
+        got: &mut Vec<(Beside, f64)>,
+        slack: f64,
+    ) -> bool {
+        if s == stack.len() {
+            return t == over.through.len();
         }
-    }
-    let mut own: Option<(usize, f64)> = None;
-    if spare.contains(&end.part) {
-        for (i, g) in cells.gens[k].iter().enumerate() {
-            let on_part = cut.parts[end.part]
-                .loops
-                .iter()
-                .flatten()
-                .any(|t| t.piece == g.piece);
-            if !on_part {
+        let want = &stack[s];
+        if let Some(h) = over.through.get(t)
+            && h.part == want.part
+            && h.enters == want.enters
+        {
+            got.push((Beside::Through(t), h.phase));
+            if fit(over, stack, (s + 1, t + 1), used, h.phase, got, slack) {
+                return true;
+            }
+            got.pop();
+        }
+        for i in 0..over.items.len() {
+            let it = over.items[i];
+            let before_next = over
+                .through
+                .get(t)
+                .is_none_or(|h| it.angle <= h.phase + slack);
+            if used[i]
+                || it.part != want.part
+                || it.enters != want.enters
+                || it.angle < angle - slack
+                || !before_next
+            {
                 continue;
             }
-            let angle = cells.axis.drawn(over.on[i], near).1;
-            let beyond = through.is_none_or(|h| {
-                if high {
-                    angle > h.phase
-                } else {
-                    angle < h.phase
+            used[i] = true;
+            got.push((Beside::Own(it.curve), it.angle));
+            if fit(over, stack, (s + 1, t), used, it.angle, got, slack) {
+                return true;
+            }
+            got.pop();
+            used[i] = false;
+        }
+        false
+    }
+    let mut got = Vec::with_capacity(stack.len());
+    let mut used = vec![false; over.items.len()];
+    if fit(
+        over,
+        stack,
+        (0, 0),
+        &mut used,
+        f64::NEG_INFINITY,
+        &mut got,
+        slack,
+    ) {
+        Ok(got)
+    } else {
+        Err(Error::Numerical(
+            "a cell's faces along its orbits are not its link's".into(),
+        ))
+    }
+}
+
+/// The curves where the body's surface at the end of the turn meets its surface at the start:
+/// each face orbits leave the body by, turned, against each face they come into it by. Only a
+/// meeting with a closed form is taken, which gives all of it.
+fn meetings(cut: &Cut, cells: &Cells, turn: &Transform) -> Result<Vec<Meet>> {
+    let mut region = crate::math::Aabb::EMPTY;
+    for &p in &cut.pool {
+        region.add(p);
+        region.add(turn.point(p));
+    }
+    let pad = crate::math::Vec3::new(cells.size, cells.size, cells.size);
+    region.min -= pad;
+    region.max += pad;
+    // A face the orbits run within, as a plane square to the axis, is met by none.
+    let still = |part: usize| {
+        let d = &cells.domains[part];
+        // At places not on one line of the face's parameters: a part cut off along its face's
+        // grazing line can have that line for the diagonal of its window.
+        [
+            (0.25, 0.25),
+            (0.75, 0.25),
+            (0.25, 0.75),
+            (0.75, 0.75),
+            (0.5, 0.4),
+        ]
+        .into_iter()
+        .all(|(fu, fv)| {
+            let uv = Vec2::new(
+                d.lo.x + (d.hi.x - d.lo.x) * fu,
+                d.lo.y + (d.hi.y - d.lo.y) * fv,
+            );
+            let v = cells.axis.velocity(d.surface.eval(uv.x, uv.y));
+            d.surface.normal(uv.x, uv.y).dot(v).abs() <= 1e-9 * v.norm().max(1e-300)
+        })
+    };
+    let mut seen: BTreeSet<(usize, usize)> = BTreeSet::new();
+    let mut out = Vec::new();
+    for (q, enter) in cut.parts.iter().enumerate() {
+        if enter.front || still(q) {
+            continue;
+        }
+        for exit in cut.parts.iter().filter(|p| p.front) {
+            if !seen.insert((enter.face, exit.face)) {
+                continue;
+            }
+            let turned = exit.surface.transformed(turn);
+            // A pair that asks for places to trace from has no closed form: traced, a loop no
+            // such place lies on is missed, and a gap would be read closed where it is open.
+            let mut traced = false;
+            let found = ssi::intersect(&enter.surface, &turned, &region, &mut || {
+                traced = true;
+                Vec::new()
+            })?;
+            if traced {
+                return unsupported(
+                    "the end of a turn meeting its start along a curve with no closed form",
+                );
+            }
+            match found {
+                Ssi::Coincident => {}
+                Ssi::Curves { curves, .. } => {
+                    for c in curves {
+                        out.push(Meet {
+                            curve: Rc::new(c.curve),
+                            range: c.range,
+                            enter: enter.face,
+                            exit: exit.face,
+                        });
+                    }
                 }
-            });
-            let better = own.is_none_or(|x| if high { angle > x.1 } else { angle < x.1 });
-            if beyond && better {
-                own = Some((i, angle));
             }
         }
     }
-    match (own, through) {
-        (Some((i, angle)), _) => Ok((end.part, Beside::Own(i), angle)),
-        (None, Some(h)) if h.part == end.part => {
-            let i = if high { over.through.len() - 1 } else { 0 };
-            Ok((end.part, Beside::Through(i), h.phase))
-        }
-        _ => Err(lost()),
-    }
+    Ok(out)
 }
 
 /// The piece of the result `lift` is, made once.
-fn piece_of(cut: &Cut, out: &mut Out, turn: &Transform, lift: Lift) -> (usize, Rc<Curve>) {
+fn piece_of(cells: &Cells, out: &mut Out, turn: &Transform, lift: Lift) -> (usize, Rc<Curve>) {
     let (lo, hi) = (lift.t.0.min(lift.t.1), lift.t.0.max(lift.t.1));
     let key = (lift.piece, lo.to_bits(), hi.to_bits(), lift.end);
-    let curve = source(cut, out, lift.piece);
+    let curve = source(cells, out, lift.piece);
     if let Some(&k) = out.made.get(&key) {
         return (k, out.pieces[k].curve.clone().expect("made with a curve"));
     }
@@ -499,18 +704,63 @@ fn piece_of(cut: &Cut, out: &mut Out, turn: &Transform, lift: Lift) -> (usize, R
 }
 
 /// The trim of `part`'s own boundary along `lift`, run from the link's `a` to its `b` if `fwd`.
+#[allow(clippy::too_many_arguments)]
 fn trim_on_part(
     cut: &Cut,
+    cells: &Cells,
     out: &mut Out,
-    turn: &Transform,
+    (turn, back): (&Transform, &Transform),
     part: usize,
     lift: Lift,
     fwd: bool,
+    high: bool,
+    over: &Over,
 ) -> Result<Trim> {
     let p = &cut.parts[part];
-    let (piece, curve) = piece_of(cut, out, turn, lift);
+    let (piece, curve) = piece_of(cells, out, turn, lift);
     let (t0, t1) = if fwd { lift.t } else { (lift.t.1, lift.t.0) };
-    if let Some(k) = lift.piece.checked_sub(cut.pieces.len()) {
+    if lift.piece >= cells.first_meet && lift.piece < cells.pieces.len() {
+        // A curve where the turn's end meets its start: its parameters on the face are carried
+        // out from where the link's own orbit passes through the face at it.
+        let item = over
+            .items
+            .iter()
+            .find(|it| it.part == part && it.uv.is_some())
+            .ok_or_else(|| {
+                Error::Numerical("a face is not met where the turn's end meets its start".into())
+            })?;
+        let on_face = |t: f64| {
+            let q = curve.eval(t);
+            if high { back.point(q) } else { q }
+        };
+        let middle = lift.t.0 + (lift.t.1 - lift.t.0) * over.frac;
+        let walk = |to: f64| {
+            let mut uv = item.uv.expect("checked");
+            for n in 1..=32 {
+                uv = p
+                    .surface
+                    .project_near(on_face(middle + (to - middle) * f64::from(n) / 32.0), uv);
+            }
+            uv
+        };
+        let pg = &out.pieces[piece];
+        let forward = t1 >= t0;
+        let (uv0, uv1) = (walk(t0), walk(t1));
+        return Ok(Trim {
+            piece,
+            forward,
+            curve: Some(curve),
+            pole: out.pool[pg.v0],
+            t0,
+            t1,
+            map: UvMap::Projected,
+            uv0,
+            uv1,
+            v0: if forward { pg.v0 } else { pg.v1 },
+            v1: if forward { pg.v1 } else { pg.v0 },
+        });
+    }
+    if let Some(k) = lift.piece.checked_sub(cells.pieces.len()) {
         let (ua, ub) = out.shadows[k].1;
         let pg = &out.pieces[piece];
         let forward = t1 >= t0;
@@ -536,7 +786,7 @@ fn trim_on_part(
         .iter()
         .flatten()
         .filter(|t| t.piece == lift.piece)
-        .max_by_key(|t| (t.t1 >= t.t0) == ((t1 >= t0) != lift.end))
+        .max_by_key(|t| (t.t1 >= t.t0) == ((t1 >= t0) != high))
         .ok_or_else(|| Error::Numerical("a lifted curve is not on its face".into()))?;
     let uv = |t: f64| {
         let f = ((t - mine.t0) / (mine.t1 - mine.t0)).clamp(0.0, 1.0);
@@ -572,18 +822,18 @@ struct Wall {
 /// the ends that differ.
 #[allow(clippy::too_many_arguments)]
 fn walls(
-    cut: &Cut,
     cells: &Cells,
-    angles: &HashMap<(usize, usize, bool), f64>,
-    lifts: &HashMap<(usize, usize, bool), Lift>,
+    ends: &HashMap<usize, Vec<(f64, Lift, usize)>>,
+    spans: &HashMap<(usize, usize), Vec<(f64, f64)>>,
     turn: &Transform,
     feature: &str,
     out: &mut Out,
 ) -> Result<()> {
     let axis = &cells.axis;
-    let sources: HashMap<usize, Rc<Curve>> = lifts
+    let sources: HashMap<usize, Rc<Curve>> = ends
         .values()
-        .map(|l| (l.piece, source(cut, out, l.piece)))
+        .flatten()
+        .map(|e| (e.1.piece, source(cells, out, e.1.piece)))
         .collect();
     let point = |l: &Lift, t: f64| {
         let p = sources[&l.piece].eval(t);
@@ -591,23 +841,16 @@ fn walls(
     };
     let mut list: Vec<Wall> = Vec::new();
     for k in 0..cells.links.len() {
-        // Each side's ends that are curves of the result here, with the angle of each at the
-        // link's middle; an end both sides share is no wall's.
-        let mut events: Vec<(f64, Lift, usize)> = Vec::new();
-        for side in 0..2 {
-            for high in [false, true] {
-                if let Some(&l) = lifts.get(&(k, side, high)) {
-                    let mid = point(&l, 0.5 * (l.t.0 + l.t.1));
-                    let _ = mid;
-                    events.push((angles[&(k, side, high)], l, side));
-                }
-            }
-        }
+        // The ends that are curves of the result here, with the angle of each at the link's
+        // middle. Two ends on one curve stand no wall between them: an end both sides share, or
+        // a high end and a low end met where the turn's end meets its start.
         let mut kept: Vec<(f64, Lift, usize)> = Vec::new();
-        for e in &events {
-            let twin = events.iter().any(|o| o.2 != e.2 && o.1 == e.1);
-            if !twin {
-                kept.push(*e);
+        for e in ends.get(&k).map_or(&[][..], |v| &v[..]) {
+            match kept.iter().position(|o| o.1 == e.1) {
+                Some(i) => {
+                    kept.remove(i);
+                }
+                None => kept.push(*e),
             }
         }
         kept.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -620,11 +863,11 @@ fn walls(
             // The wall stands between the two ends; the solid is on the side whose interval
             // holds the angles between them.
             let between = 0.5 * (pair[0].0 + pair[1].0);
-            let holds =
-                |side: usize| match (angles.get(&(k, side, false)), angles.get(&(k, side, true))) {
-                    (Some(&lo), Some(&hi)) => between > lo && between < hi,
-                    _ => false,
-                };
+            let holds = |side: usize| {
+                spans
+                    .get(&(k, side))
+                    .is_some_and(|list| list.iter().any(|&(lo, hi)| between > lo && between < hi))
+            };
             let (left, right) = (holds(0), holds(1));
             if left == right {
                 return Err(Error::Numerical(
@@ -676,7 +919,7 @@ fn walls(
     for (w, quad) in list.iter().zip(&corners) {
         let link = &cells.links[w.k];
         let g = cells.gens[w.k][0];
-        let base = cut.pieces[g.piece].curve.as_ref().expect("a drawn piece");
+        let base = cells.pieces[g.piece].curve.as_ref().expect("a drawn piece");
         // The surface the link's curve sweeps, from a little before the wall's lowest angle to a
         // little past its highest, each read from the curve's own.
         let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
@@ -702,12 +945,12 @@ fn walls(
         };
         let range = (g.t.0.min(g.t.1), g.t.0.max(g.t.1));
         let surface = sweep
-            .sheet(&base.transformed(&from), cut.whole[g.piece], range)?
+            .sheet(&base.transformed(&from), cells.whole[g.piece], range)?
             .surface;
         // Round the wall: along the low lift, up the orbit at `b`, back along the high lift, down
         // the orbit at `a`.
         let mut run: Vec<(usize, Rc<Curve>, f64, f64)> = Vec::new();
-        let (kl, cl) = piece_of(cut, out, turn, w.low);
+        let (kl, cl) = piece_of(cells, out, turn, w.low);
         run.push((kl, cl, w.low.t.0, w.low.t.1));
         let mut side = |node: usize,
                         lo: (f64, usize),
@@ -750,7 +993,7 @@ fn walls(
             run.extend(steps);
         };
         side(link.b, quad[1][0], quad[1][1], true, out, &mut run);
-        let (kh, ch) = piece_of(cut, out, turn, w.high);
+        let (kh, ch) = piece_of(cells, out, turn, w.high);
         run.push((kh, ch, w.high.t.1, w.high.t.0));
         side(link.a, quad[0][0], quad[0][1], false, out, &mut run);
         // Each trim's parameters carried on from the last one's end, round the loop.
@@ -977,7 +1220,7 @@ fn shadow(
                     if at != node {
                         continue;
                     }
-                    let p = cut.pieces[own.piece]
+                    let p = cells.pieces[own.piece]
                         .curve
                         .as_ref()
                         .expect("a drawn piece")
@@ -1016,7 +1259,7 @@ fn shadow(
     out.shadows
         .push((Rc::new(curve), (walk(0.0, pa), walk(1.0, pb))));
     Ok(Lift {
-        piece: cut.pieces.len() + out.shadows.len() - 1,
+        piece: cells.pieces.len() + out.shadows.len() - 1,
         t: range,
         end: high,
     })

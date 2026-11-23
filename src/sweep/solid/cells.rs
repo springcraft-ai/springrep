@@ -6,6 +6,7 @@
 //! with the ones it reaches.
 
 use std::f64::consts::PI;
+use std::rc::Rc;
 
 use super::cut::Cut;
 use super::moving::graph::{self, Link, Region};
@@ -14,6 +15,7 @@ use crate::{
     boolean::{
         csi,
         domain::{Domain, Where},
+        sew::PieceGeom,
     },
     geom::{Circle, Curve, Surface},
     math::{Frame, Point3, Vec2, Vec3},
@@ -57,6 +59,18 @@ impl Axis {
     }
 }
 
+/// A curve where the body's surface at the end of the turn meets its surface at the start: where
+/// an orbit leaves the body by a face, by its place among the body's, and comes back into it by
+/// another exactly a turn on. Across its drawing a gap along the orbits closes or opens. The
+/// curve is where the orbits come back in.
+#[derive(Clone, Debug)]
+pub(super) struct Meet {
+    pub curve: Rc<Curve>,
+    pub range: (f64, f64),
+    pub enter: usize,
+    pub exit: usize,
+}
+
 /// A stretch of a piece of the cut body whose drawing is a link: the piece, and its parameters
 /// at the link's two ends.
 #[derive(Clone, Copy, Debug)]
@@ -85,6 +99,12 @@ pub(super) struct Cells {
     pub fracs: Vec<Vec<f64>>,
     /// The face each characteristic curve of the cut body lies on, by piece.
     grazes: Vec<Option<Surface>>,
+    /// The cut body's pieces and, from `first_meet` on, the curves where the end of the turn
+    /// meets its start; the range of the whole curve each is of; and those curves' faces.
+    pub pieces: Vec<PieceGeom>,
+    pub whole: Vec<(f64, f64)>,
+    pub first_meet: usize,
+    pub meets: Vec<Meet>,
     pub regions: Vec<Region>,
     pub domains: Vec<Domain>,
     pub size: f64,
@@ -119,20 +139,38 @@ fn off(pts: &[Vec2], p: Vec2) -> f64 {
 }
 
 impl Cells {
-    pub(super) fn new(cut: &Cut, axis: Axis) -> Result<Cells> {
+    pub(super) fn new(cut: &Cut, axis: Axis, meets: Vec<Meet>) -> Result<Cells> {
         let mut bounds = crate::math::Aabb::EMPTY;
         cut.pool.iter().for_each(|&p| bounds.add(p));
         let size = bounds.diagonal();
+        // The cut body's pieces, and after them the curves where the end of the turn meets its
+        // start, each between two points of its own.
+        let mut pieces = cut.pieces.clone();
+        let mut whole = cut.whole.clone();
+        let mut pool = cut.pool.clone();
+        for m in &meets {
+            pool.push(m.curve.eval(m.range.0));
+            pool.push(m.curve.eval(m.range.1));
+            pieces.push(PieceGeom {
+                curve: Some(m.curve.clone()),
+                range: m.range,
+                v0: pool.len() - 2,
+                v1: pool.len() - 1,
+                tol: crate::tol::LINEAR,
+            });
+            whole.push(m.range);
+        }
+        let pieces = &pieces;
         let near = 1e-9 * size;
         // The face each characteristic curve lies on: its points are read on the face itself.
-        let mut grazes: Vec<Option<Surface>> = vec![None; cut.pieces.len()];
+        let mut grazes: Vec<Option<Surface>> = vec![None; pieces.len()];
         for part in &cut.parts {
             for &k in &cut.curves[part.face] {
                 grazes[k] = Some(part.surface.clone());
             }
         }
         let at = |piece: usize, t: f64| -> Vec2 {
-            axis.drawn(exact(cut, &axis, &grazes, piece, t), 0.0).0
+            axis.drawn(exact(pieces, &axis, &grazes, piece, t), 0.0).0
         };
         let mut nodes: Vec<Vec2> = Vec::new();
         let node = |p: Vec2, nodes: &mut Vec<Vec2>| -> usize {
@@ -144,14 +182,12 @@ impl Cells {
                 }
             }
         };
-        let of_vertex: Vec<usize> = cut
-            .pool
+        let of_vertex: Vec<usize> = pool
             .iter()
             .map(|&p| node(axis.drawn(p, 0.0).0, &mut nodes))
             .collect();
         // A piece that lies along an orbit is drawn as a point, and is no link.
-        let drawings: Vec<Drawing> = cut
-            .pieces
+        let drawings: Vec<Drawing> = pieces
             .iter()
             .enumerate()
             .filter(|(_, pg)| pg.curve.is_some())
@@ -235,18 +271,18 @@ impl Cells {
         // curve sweeps folds there, and which side of it the body lies on changes, so the place
         // is a node. The velocity crossed with the curve's direction turns over there.
         for (i, d) in drawings.iter().enumerate() {
-            let pg = &cut.pieces[d.piece];
+            let pg = &pieces[d.piece];
             // The curve's direction by differences a thousandth of its length apart, the step's
             // own error taken off (Richardson): a finer step loses the direction in the rounding
             // of the points, and the fold would be placed a millionth of the curve off.
             let h = 1e-3 * (pg.range.1 - pg.range.0);
             let slope = |t: f64, h: f64| {
-                (exact(cut, &axis, &grazes, d.piece, t + h)
-                    - exact(cut, &axis, &grazes, d.piece, t - h))
+                (exact(pieces, &axis, &grazes, d.piece, t + h)
+                    - exact(pieces, &axis, &grazes, d.piece, t - h))
                     / (2.0 * h)
             };
             let cross = |t: f64| {
-                let p = exact(cut, &axis, &grazes, d.piece, t);
+                let p = exact(pieces, &axis, &grazes, d.piece, t);
                 let dp = (slope(t, h) * 4.0 - slope(t, 2.0 * h)) / 3.0;
                 let v = axis.velocity(p);
                 (v.cross(dp), v.norm() * dp.norm())
@@ -277,7 +313,7 @@ impl Cells {
                     if let Some(s) = &grazes[d.piece] {
                         let bend = |t: f64| {
                             let (o, touch) =
-                                axis.drawn(exact(cut, &axis, &grazes, d.piece, t), 0.0);
+                                axis.drawn(exact(pieces, &axis, &grazes, d.piece, t), 0.0);
                             let orbit = axis.orbit(o);
                             let even = |h: f64| {
                                 (csi::signed_distance(s, orbit.eval(touch + h))
@@ -348,7 +384,7 @@ impl Cells {
         let mut gens: Vec<Vec<Gen>> = Vec::new();
         let mut fracs: Vec<Vec<f64>> = Vec::new();
         for (i, d) in drawings.iter().enumerate() {
-            let pg = &cut.pieces[d.piece];
+            let pg = &pieces[d.piece];
             let forward = pg.range.1 >= pg.range.0;
             let mut stops = cuts[i].clone();
             stops.sort_by(|x, y| {
@@ -443,6 +479,10 @@ impl Cells {
             gens,
             fracs,
             grazes,
+            first_meet: cut.pieces.len(),
+            whole,
+            pieces: pieces.clone(),
+            meets,
             regions,
             domains,
             size,
@@ -452,7 +492,8 @@ impl Cells {
     /// The point of piece `piece` of the cut body at `t`: a characteristic curve's on its face
     /// exactly, where the fitted curve is a hair off.
     pub(super) fn point(&self, cut: &Cut, piece: usize, t: f64) -> Point3 {
-        exact(cut, &self.axis, &self.grazes, piece, t)
+        let _ = cut;
+        exact(&self.pieces, &self.axis, &self.grazes, piece, t)
     }
 
     /// A point well inside cell `r`: of the points a step to the left of its links' chords, the
@@ -722,8 +763,14 @@ fn bounded(orbit: &Curve, radius: f64, surface: &Surface) -> Vec<f64> {
 /// face close up, they are a thousandth apart or missing. So a characteristic curve's point is
 /// moved onto the outline itself, where the velocity lies in the face, by Newton's method across
 /// the outline in the face's parameters.
-fn exact(cut: &Cut, axis: &Axis, grazes: &[Option<Surface>], piece: usize, t: f64) -> Point3 {
-    let c = cut.pieces[piece]
+fn exact(
+    pieces: &[PieceGeom],
+    axis: &Axis,
+    grazes: &[Option<Surface>],
+    piece: usize,
+    t: f64,
+) -> Point3 {
+    let c = pieces[piece]
         .curve
         .as_ref()
         .expect("a drawn piece has a curve");

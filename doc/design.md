@@ -1877,6 +1877,39 @@ cap's pcurve is then the curve projected onto the cap.
 Only the sheets of slides, turns and screws are trimmed so far, and only bodies of revolution have
 a depth.
 
+### A turn read off its orbits
+
+A turn about a line beside the body is first read off the plane of its orbits
+([`cells.rs`](../src/sweep/solid/cells.rs), [`stack.rs`](../src/sweep/solid/stack.rs)), and built
+as above only where that is refused. The cut body's edges and characteristic curves are drawn by
+distance from the axis and height along it, and the drawing's cells are sets of orbits that pass
+through the same parts of the body's faces in the same order. Along an orbit the body is a stack of
+intervals of angle, and the sweep is each interval lengthened by the turn and merged with those it
+reaches. Its boundary is where a merged interval ends: the low ends are pieces of the body's faces
+where the turn starts, the high ends pieces where it ends, and over a link between two cells whose
+intervals differ stands a wall of orbit arcs. No face is kept or dropped by a test on the faces
+made.
+
+An orbit's crossings with a face are found with no sample count. On a plane, a cylinder, a cone,
+a sphere or a torus the surface's polynomial round a circle is a constant and the sines and
+cosines of the angle and of twice it: eight values give it exactly, and the crossings are the
+real roots of a quartic in the tangent of the half angle. On any other surface the distance to
+the surface changes no faster than the point moves, so a stretch whose middle is farther from the
+surface than half its length holds no crossing, and the rest is halved.
+
+A gap between two intervals of one orbit is closed by the turn where it is shorter than the turn,
+and which can change inside a cell. It changes across the curves where the end of the turn meets
+its start: each back part of the body's faces met with each front part turned through the whole
+angle. A turn shorter than the angle the body takes up about the axis has those curves drawn as
+links with the rest, so each cell's gaps are closed or open all over it, and at such a link a
+start face and an end face stop on the one curve. A face that the turn slides in itself has no
+such curve, and is told by the turn's velocity lying in it at places not all on one line. The
+curves are found in closed form or the turn is refused.
+
+Refused, and built the older way: a turn about a line that crosses the body's surface, since the
+drawing then bounds the orbits near the axis on no side; a sweep that closes round the axis; and
+a meeting of end and start that has no closed form.
+
 ### Motions whose `W` moves
 
 Under a frame along a curve or two motions at once ([`moving`](../src/sweep/solid/moving.rs)), `W(τ)`

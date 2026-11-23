@@ -1346,12 +1346,12 @@ fn a_leaning_drum_turned_beside_a_near_axis_bounds_its_overlap_once() {
     );
 }
 
-// A slab turned a radian about a line through it has orbits that leave it and come back after
-// more than a radian: the gap is not closed by the turn, and the sweep has a hollow there. Read
-// off its orbits with every orbit's intervals merged into one it came out valid and 1.1% too
-// large, so such a turn is not read that way: the slab spans more of a turn than it is turned.
+// A slab leaning beside the axis spans more of a turn than the radian it is turned, so along some
+// orbits the end of the turn does not reach back to the start and along others it does. Where
+// it stops reaching is drawn as the curves in which the slab's back faces meet its front faces a
+// turn on, and the solid is the one built from the slab's parts.
 #[test]
-fn a_turn_shorter_than_the_body_spans_is_not_merged_along_its_orbits() {
+fn a_turn_shorter_than_the_body_spans_is_drawn_with_where_its_end_meets_its_start() {
     let frame = Frame::new(
         Vec3::new(-1.0, -0.5, -1.0),
         Vec3::new(0.2, 0.4, 1.0),
@@ -1359,16 +1359,36 @@ fn a_turn_shorter_than_the_body_spans_is_not_merged_along_its_orbits() {
     )
     .unwrap();
     let slab = block(&frame, Vec3::new(3.0, 0.5, 2.0), "slab").unwrap();
-    let motion = about_z(1.0);
+    read_off_orbits_as_built_from_parts(&slab, 1.0);
+}
+
+// A face of this block is cut along the line where it grazes the turn, and the line runs from
+// corner to corner of the back part's window: a face is taken to slide in itself only if it
+// does at places not all on one line. Taken so by mistake, the part's meetings with the start
+// were left out and the solid came out valid and 0.08% too large.
+#[test]
+fn a_part_whose_window_has_the_grazing_line_for_diagonal_still_meets_the_start() {
+    let frame = Frame::new(
+        Vec3::new(-1.0, -0.5, -1.0),
+        Vec3::new(1.0, 1.0, 1.0),
+        Vec3::new(1.0, 1.0, 0.0),
+    )
+    .unwrap();
+    let body = block(&frame, Vec3::new(2.0, 1.0, 3.0), "b").unwrap();
+    read_off_orbits_as_built_from_parts(&body, 1.0);
+}
+
+fn read_off_orbits_as_built_from_parts(body: &Brep, turn: f64) {
+    let motion = about_z(turn);
     let (steady, twist) = (
         sheet::Steady::of(&motion).unwrap(),
         motion.steady().unwrap(),
     );
-    let cut = cut::cut(&slab, &move |p| twist.at(p), steady.held()).unwrap();
-    assert!(matches!(
-        stack::sweep(&cut, &steady, "sw"),
-        Err(Error::Unsupported(_))
-    ));
+    let cut = cut::cut(body, &move |p| twist.at(p), steady.held()).unwrap();
+    let read = stack::sweep(&cut, &steady, "sw").unwrap();
+    assert!(check::check(&read).is_empty());
+    let parts = swept(body, &motion, "sw", false).unwrap();
+    assert!((measure::volume(&read) - measure::volume(&parts)).abs() < 1e-6);
 }
 
 // A whole turn is two half turns united. A cube's half turn about a line beside it is read off
@@ -1380,4 +1400,24 @@ fn a_whole_turn_whose_halves_read_off_their_orbits_do_not_unite_is_built_the_old
     let cube = block(&frame, Vec3::new(1.0, 1.0, 1.0), "cube").unwrap();
     let b = solid(&cube, &about_z(2.0 * PI), "sw").unwrap();
     assert!(check::check(&b).is_empty());
+}
+
+// The drawing in the plane of orbits has a cell for every orbit that meets a body the axis passes
+// beside. A rod across the axis has orbits near the axis that the drawing bounds on no side, so
+// it is not read off its orbits: with the curves where the end of the turn meets its start
+// drawn, it came out valid and less than half its size.
+#[test]
+fn a_turn_about_a_line_through_the_body_is_not_read_off_its_orbits() {
+    let end = Frame::new(Vec3::new(-3.0, 0.0, 0.0), Vec3::X, Vec3::Y).unwrap();
+    let rod = cylinder(&end, 0.5, 8.0, "rod").unwrap();
+    let motion = about_z(2.0 * PI / 3.0);
+    let (steady, twist) = (
+        sheet::Steady::of(&motion).unwrap(),
+        motion.steady().unwrap(),
+    );
+    let cut = cut::cut(&rod, &move |p| twist.at(p), steady.held()).unwrap();
+    assert!(matches!(
+        stack::sweep(&cut, &steady, "sw"),
+        Err(Error::Unsupported(_))
+    ));
 }
