@@ -364,7 +364,7 @@ tr.us .tbar [data-g="1e-7"] { --c: var(--accent); }
   font: 400 12px/1.45 var(--font-machine); opacity: 0; transition: opacity 120ms linear;
 }
 .tip.on { opacity: 1; }
-.tip small { display: block; color: var(--fg-2); font-size: 11px; }
+.tip small { display: block; color: var(--fg-2); font-size: 11px; white-space: pre-line; }
 .ruler { display: flex; justify-content: space-between; margin-top: 4px; font: 400 9px/1 var(--font-machine); color: var(--fg-2); }
 .ruler span { padding-left: 3px; border-left: 1px solid var(--fg-3); }
 .board .p7, .board .px, .board .mt b { font: 400 18px/1 var(--font-machine); letter-spacing: 0; }
@@ -1182,8 +1182,7 @@ document.querySelectorAll("[data-copy-from]").forEach((b) => b.addEventListener(
 /* The leaderboard, drawn from the results site's leaderboard.json once it has loaded, so it follows
    a new run without a change here. The hero's four rows stand empty until then.
    n: cases by tightest tolerance passed (1e-7, 1e-6, 1e-5, 1e-3), then fail, unsupported, and
-   refused/timeout/crash. ms: median, first and third quartile per case, on the cases every kernel
-   answered. */
+   refused/timeout/crash. ms: median, first and third quartile per case, failed tests excluded. */
 let BOARD
 const GRADES = ["1e-7", "1e-6", "1e-5", "1e-3", "fail", "unsupported", "quiet"]
 // The bar shows 1e-6 with 1e-5, so neighbouring segments always differ clearly in colour.
@@ -1286,9 +1285,12 @@ function drawBoard() {
       return [k.label + " " + k.ver + " · " + shown[hot].says, rows.join("\n")]
     }
     cell.addEventListener("pointerleave", () => bar.classList.remove("picking"))
+    // The results site's own speed tooltip, word for word.
     if (k.ms) {
-      tr.querySelector(".mt").dataset.tip = k.label + " · median " + k.ms[0] + " ms per case|" +
-        "half of its cases take " + k.ms[1] + " to " + k.ms[2] + " ms. Timed only on cases every kernel answered."
+      const [p50, p25, p75] = k.times.map(tipMs)
+      tr.querySelector(".mt").dataset.tip = "P50 " + p50 + " per case|P25 " + p25 + " · P75 " + p75 + "\n" +
+        (k.step === null ? "" : "STEP round trip P50 " + tipMs(k.step) + ", timed apart\n") +
+        "Failed tests excluded"
     }
     board.appendChild(tr)
   })
@@ -1334,6 +1336,8 @@ const LIVE = RESULTS + "leaderboard.json"
 const shortLicense = (spdx) =>
   spdx.replace(/ WITH .*$/, "").replace(/-only|-or-later/g, "").replace(/ OR /g, "/")
 const shortMs = (v) => v < 100 ? Math.round(v * 10) / 10 : Math.round(v)
+// A time as the results site writes it in its tooltips: three significant figures.
+const tipMs = (v) => v >= 1000 ? (v / 1000).toPrecision(3) + " s" : v.toPrecision(3) + " ms"
 // The results site's leaderboard.json in this page's terms. Throws on data the board cannot draw.
 function fromLive(d) {
   const text = (...v) => v.every((s) => typeof s === "string")
@@ -1349,6 +1353,8 @@ function fromLive(d) {
     n: [...BANDED.map((g) => at(k, g)), QUIET.reduce((a, g) => a + at(k, g), 0)],
     // Null for a kernel without all three times, which is then drawn without a speed.
     ms: times(k).every((v) => above(v, 0)) ? times(k).map(shortMs) : null,
+    times: times(k),
+    step: above(k.time?.step, 0) ? k.time.step : null,
     ...(k.maintainers ? { us: true } : {}),
   }))
   const run = (d.kernels.find((k) => k.maintainers) || d.kernels[0]).run
