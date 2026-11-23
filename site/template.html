@@ -1167,21 +1167,12 @@ document.querySelectorAll("[data-copy-from]").forEach((b) => b.addEventListener(
   copyText(document.getElementById(b.dataset.copyFrom).textContent, b)
 }))
 
-/* The leaderboard, drawn from this copy of the verified run of 11-23-2026 and again from the
-   results site's current one once that has loaded, so it follows a new run without a change here.
+/* The leaderboard, drawn from the results site's leaderboard.json as the build read it, and again
+   from the current one once that has loaded, so it follows a new run without a change here.
    n: cases by tightest tolerance passed (1e-7, 1e-6, 1e-5, 1e-3), then fail, unsupported, and
    refused/timeout/crash. ms: median, first and third quartile per case, on the cases every kernel
    answered. */
-let BOARD = [
-  { label: "springrep", ver: "2.0.0", license: "MIT", n: [3650, 0, 0, 0, 0, 0, 0], ms: [27.6, 2.3, 152], us: true },
-  { label: "cadrs", ver: "0.2.9", license: "MIT/Apache-2.0", n: [3648, 0, 0, 0, 2, 0, 0], ms: [20.6, 2.1, 70.2] },
-  { label: "kentron", ver: "0.19.3", license: "AGPL-3.0 AND BSD-3-Clause AND MIT", n: [3400, 15, 12, 9, 155, 20, 39], ms: [30.2, 4.7, 115] },
-  { label: "opencascade", ver: "8.0.1.1.0", license: "LGPL-2.1", n: [2933, 27, 4, 7, 292, 295, 92], ms: [56, 12.3, 249] },
-  { label: "next.BREP", ver: "0.24.0", license: "LicenseRef-Autodrop3d", n: [2345, 8, 0, 0, 141, 856, 300], ms: [107, 15.1, 476] },
-  { label: "arris", ver: "0.10.0", license: "MIT/Apache-2.0", n: [2182, 0, 0, 0, 57, 916, 495], ms: [128, 14.5, 598] },
-  { label: "cad-kernel", ver: "0.17.0", license: "MIT/Apache-2.0", n: [2009, 0, 0, 0, 110, 1296, 235], ms: [50.7, 10.2, 79.2] },
-  { label: "solidcore", ver: "1.0.1", license: "Apache-2.0", n: [1727, 10, 2, 0, 586, 1187, 138], ms: [1934, 88.1, 7977] },
-]
+let BOARD
 const GRADES = ["1e-7", "1e-6", "1e-5", "1e-3", "fail", "unsupported", "quiet"]
 // The bar shows 1e-6 with 1e-5, so neighbouring segments always differ clearly in colour.
 const BANDS = [
@@ -1195,8 +1186,8 @@ const BANDS = [
 const bandCount = (k, b) => b.of.reduce((a, i) => a + k.n[i], 0)
 // The run the board shows, in the report's own fields (suite, run.unix, environment, and
 // kernel.tolerance, the precision the cases were run and graded to).
-let RUN = { suite: "2.0.1", unix: 1795395040, os: "linux", arch: "x86_64", cores: 24, tolerance: 1e-7 }
-let TOTAL = 3650
+let RUN
+let TOTAL
 const HERO_ROWS = 4
 function drawBoard() {
   const [ry, rm, rd] = new Date(RUN.unix * 1000).toISOString().slice(0, 10).split("-")
@@ -1322,12 +1313,12 @@ function drawBoard() {
   })
 }
 
-const LIVE = "https://springcraft-ai.github.io/brep-conformance/leaderboard.json"
+const LIVE = "{{LEADERBOARD_URL}}"
 const shortLicense = (spdx) =>
   spdx.replace(/ WITH .*$/, "").replace(/-only|-or-later/g, "").replace(/ OR /g, "/")
 const shortMs = (v) => v < 100 ? Math.round(v * 10) / 10 : Math.round(v)
 // The results site's leaderboard.json in this page's terms. Throws on data the board cannot draw,
-// which leaves the copy above in place.
+// which leaves the build's copy in place.
 function fromLive(d) {
   const at = (k, ...grades) => grades.reduce((a, g) => a + (k.counts[d.grades.indexOf(g)] || 0), 0)
   const rows = d.kernels.map((k) => ({
@@ -1347,6 +1338,7 @@ function fromLive(d) {
   const { os, arch, cores, tolerance } = run
   return [rows, { suite: d.suite, unix, os, arch, cores, tolerance }, d.cases]
 }
+;[BOARD, RUN, TOTAL] = fromLive({{LEADERBOARD}})
 // Taken before drawing, which adds each row's rate to it.
 const drawn = JSON.stringify([BOARD, RUN, TOTAL])
 drawBoard()

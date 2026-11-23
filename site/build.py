@@ -3,18 +3,26 @@
 The design system comes from its published build on the CDN, never from a checkout. With
 --preview, those files are fetched now and written into the page, for hosts that load nothing from
 other origins; the result goes to dist/springrep.preview.html.
+
+The leaderboard comes from the brep-conformance results site as it stands now, and is written into
+the page. With --offline, the copy the last build kept in dist/ is used instead.
 """
 
 import base64
 import html
+import json
 import re
 import sys
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "dist/springrep.html"
 PREVIEW = HERE / "dist/springrep.preview.html"
+LEADERBOARD_URL = "https://springcraft-ai.github.io/brep-conformance/leaderboard.json"
+LEADERBOARD_KEPT = HERE / "dist/leaderboard.json"
+GRADES = ("1e-7", "1e-6", "1e-5", "1e-3", "fail", "unsupported", "refused", "timeout", "crash")
 # An immutable build of sc-1.1: a new build of the design system gets a new path.
 SC = "https://cdn.springcraft.ai/design/sc-1.1/mwl4jqxo"
 
@@ -71,12 +79,50 @@ def highlight(src):
     return "\n".join(out)
 
 
+def drawable(d):
+    """Whether the page's fromLive accepts this leaderboard.json; the two must agree."""
+    try:
+        at = {g: d["grades"].index(g) for g in GRADES if g in d["grades"]}
+        kernels = d["kernels"]
+        run = next((k for k in kernels if k.get("maintainers")), kernels[0])["run"]
+        return (
+            d["cases"] > 0
+            and datetime.fromisoformat(run["date"].replace("Z", "+00:00")).timestamp() > 0
+            and run["cores"]
+            and run["tolerance"]
+            and all(
+                sum(k["counts"][i] for i in at.values()) == d["cases"]
+                and all(k["time"][q] >= 0 for q in ("median", "q1", "q3"))
+                for k in kernels
+            )
+        )
+    except (KeyError, IndexError, TypeError, ValueError):
+        return False
+
+
+def leaderboard(offline):
+    """The results site's leaderboard.json, as text safe inside a script element."""
+    if offline:
+        text = LEADERBOARD_KEPT.read_text()
+    else:
+        with urllib.request.urlopen(LEADERBOARD_URL) as r:
+            text = r.read().decode()
+    d = json.loads(text)
+    if not drawable(d):
+        sys.exit(f"{LEADERBOARD_URL}: not a board the page can draw")
+    LEADERBOARD_KEPT.parent.mkdir(exist_ok=True)
+    LEADERBOARD_KEPT.write_text(text)
+    return json.dumps(d, separators=(",", ":")).replace("</", "<\\/")
+
+
 def main():
     t = (HERE / "template.html").read_text()
     t = t.replace("{{GH}}", GH)
     t = t.replace("{{SC_CSS}}", f'@import url("{SC}/sc.css") layer(sc);')
     t = t.replace("{{SC}}", SC)
     t = t.replace("{{PART}}", (HERE / "data/flanged_tube.json").read_text().strip())
+    t = t.replace("{{LEADERBOARD_URL}}", LEADERBOARD_URL)
+    t = t.replace("{{LEADERBOARD}}", leaderboard("--offline" in sys.argv[1:]))
     t = t.replace("{{MAIN_RS}}", highlight((HERE.parent / "examples/bracket.rs").read_text()))
     out = OUT
     if "--preview" in sys.argv[1:]:

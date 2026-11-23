@@ -11,6 +11,9 @@ build.py. It is built from:
 
 - [template.html](template.html) — the page, its styles and its scripts.
 - [bracket.rs](../examples/bracket.rs) — the getting-started example, shown on the page as code.
+- brep-conformance's
+  [leaderboard.json](https://springcraft-ai.github.io/brep-conformance/leaderboard.json), fetched
+  when the page is built.
 - [data/flanged_tube.json](data/flanged_tube.json) — the animated part in the hero: each build
   step's edges, a coarse mesh that hides edges behind faces, the profiles it swept and what the
   kernel reported, as the [flanged_tube.rs](../examples/flanged_tube.rs) example prints them, with
@@ -22,8 +25,9 @@ dist folder here. The crate's manifest excludes this folder, so the site never s
 For a host that loads nothing from other origins, such as a sandboxed preview, `--preview` fetches
 the CDN files at build time and writes them into springrep.preview.html instead.
 
-The [pages workflow](../.github/workflows/pages.yml) publishes the page to GitHub Pages. The API
-docs link points to docs.rs, which documents the version published on crates.io.
+The [pages workflow](../.github/workflows/pages.yml) publishes the page to GitHub Pages on each
+change to it, and once a day so the leaderboard in the page stays current. The API docs link points
+to docs.rs, which documents the version published on crates.io.
 
 The link-preview image (`og:image`) is a 1200×630 PNG: the Springcraft mark, the springrep name,
 tagline and MIT badge on the left, and the finished flanged tube drawn by its exact edges on the
@@ -34,16 +38,17 @@ The leaderboard follows brep-conformance's results site. When the page loads it 
 [leaderboard.json](https://springcraft-ai.github.io/brep-conformance/leaderboard.json) and draws the
 board from it, so a new run shows here once that site has deployed it, with no change to this
 folder. Until the fetch answers, and when it fails or returns a board the page cannot draw, the page
-shows the copy in the template's `BOARD`, `RUN` and `TOTAL`: the verified run of 11-23-2026. Keep
-that copy near the current run, so a reader rarely sees the figures change. The headline and prose
-around the board are fixed text, and do not follow the figures.
+shows the board build.py wrote into it: the same leaderboard.json, as it stood when the page was
+built. The daily build keeps that copy within a day of the current run, so a reader rarely sees the
+figures change. A build fails on a board the page cannot draw, which leaves the last page published.
+The headline and prose around the board are fixed text, and do not follow the figures.
 
 The hero shows only the board's first four kernels, with springrep in the last place if it ranks
 lower, and its link gives the number of kernels on the full board below.
 
 ## Setup
 
-Python 3 and, to regenerate the hero data, the Rust toolchain that
+Python 3, network access for the leaderboard and, to regenerate the hero data, the Rust toolchain that
 [rust-toolchain.toml](../rust-toolchain.toml) names.
 
 ## Usage
@@ -53,6 +58,12 @@ Build the page:
 ```bash
 python3 site/build.py
 python3 site/build.py --preview
+```
+
+Without network access, `--offline` reuses the leaderboard the last build fetched:
+
+```bash
+python3 site/build.py --offline
 ```
 
 After changing the hero part or springrep itself, regenerate its data first:
