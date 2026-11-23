@@ -867,8 +867,28 @@ fn shadow(
             return p;
         }
         let orbit = cells.axis.orbit(o);
-        let left =
-            |d: f64| csi::signed_distance(&dom.surface, orbit.eval(touch + ahead * d)) / (d * d);
+        // Close to the touching the gap is its own series there: no first or constant term, so
+        // g₂d²/2 + g₃d³/6 + g₄d⁴/24, and the shadow is where g₂/2 + g₃d/6 + g₄d²/24 comes to
+        // nothing. The terms are read from the gap about a thousandth of a radian either side,
+        // far enough out to be well above rounding, with the step's own error taken off
+        // (Richardson). A search for the change of sign this close is lost in rounding.
+        let gap = |d: f64| csi::signed_distance(&dom.surface, orbit.eval(touch + ahead * d));
+        let h = 5e-4;
+        let even = |h: f64| (gap(h) + gap(-h)) / (h * h);
+        let odd = |h: f64| (gap(h) - gap(-h)) / (2.0 * h * h * h);
+        let g2 = (4.0 * even(h) - even(2.0 * h)) / 3.0;
+        let g4 = 4.0 * (even(2.0 * h) - even(h)) / (h * h);
+        let g3 = 6.0 * (4.0 * odd(h) - odd(2.0 * h)) / 3.0;
+        if g3 != 0.0 {
+            let mut d = -3.0 * g2 / g3;
+            for _ in 0..4 {
+                d = -(g2 / 2.0 + g4 * d * d / 24.0) / (g3 / 6.0);
+            }
+            if d.abs() <= 1e-3 {
+                return orbit.eval(touch + ahead * d.max(0.0));
+            }
+        }
+        let left = |d: f64| gap(d) / (d * d);
         let far = 0.03;
         let sign = left(far) > 0.0;
         let (mut lo, mut hi) = (1e-9, far);

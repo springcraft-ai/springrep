@@ -236,12 +236,18 @@ impl Cells {
         // is a node. The velocity crossed with the curve's direction turns over there.
         for (i, d) in drawings.iter().enumerate() {
             let pg = &cut.pieces[d.piece];
-            let h = 1e-6 * (pg.range.1 - pg.range.0);
+            // The curve's direction by differences a thousandth of its length apart, the step's
+            // own error taken off (Richardson): a finer step loses the direction in the rounding
+            // of the points, and the fold would be placed a millionth of the curve off.
+            let h = 1e-3 * (pg.range.1 - pg.range.0);
+            let slope = |t: f64, h: f64| {
+                (exact(cut, &axis, &grazes, d.piece, t + h)
+                    - exact(cut, &axis, &grazes, d.piece, t - h))
+                    / (2.0 * h)
+            };
             let cross = |t: f64| {
                 let p = exact(cut, &axis, &grazes, d.piece, t);
-                let dp = (exact(cut, &axis, &grazes, d.piece, t + h)
-                    - exact(cut, &axis, &grazes, d.piece, t - h))
-                    / (2.0 * h);
+                let dp = (slope(t, h) * 4.0 - slope(t, 2.0 * h)) / 3.0;
                 let v = axis.velocity(p);
                 (v.cross(dp), v.norm() * dp.norm())
             };
@@ -263,7 +269,38 @@ impl Cells {
                             hi = mid;
                         }
                     }
-                    let at_fold = 0.5 * (lo + hi);
+                    let mut at_fold = 0.5 * (lo + hi);
+                    // An outline folds where its orbit touches the face to the second order:
+                    // the orbit's gap from the face, which has no first term anywhere on the
+                    // outline, has no second term either. A shadow closes on the outline by that
+                    // same term, so the fold is placed by it, between the places either side.
+                    if let Some(s) = &grazes[d.piece] {
+                        let bend = |t: f64| {
+                            let (o, touch) =
+                                axis.drawn(exact(cut, &axis, &grazes, d.piece, t), 0.0);
+                            let orbit = axis.orbit(o);
+                            let even = |h: f64| {
+                                (csi::signed_distance(s, orbit.eval(touch + h))
+                                    + csi::signed_distance(s, orbit.eval(touch - h)))
+                                    / (h * h)
+                            };
+                            (4.0 * even(1e-3) - even(2e-3)) / 3.0
+                        };
+                        let w = 1e-4 * (pg.range.1 - pg.range.0);
+                        let (mut lo, mut hi) = (at_fold - w, at_fold + w);
+                        let sign = bend(lo) > 0.0;
+                        if (bend(hi) > 0.0) != sign {
+                            for _ in 0..60 {
+                                let mid = 0.5 * (lo + hi);
+                                if (bend(mid) > 0.0) == sign {
+                                    lo = mid;
+                                } else {
+                                    hi = mid;
+                                }
+                            }
+                            at_fold = 0.5 * (lo + hi);
+                        }
+                    }
                     let x = at(d.piece, at_fold);
                     if d.pts[0].dist(x) > 1e-6 * size && d.last().dist(x) > 1e-6 * size {
                         let k = node(x, &mut nodes);
