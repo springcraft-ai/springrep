@@ -114,7 +114,7 @@ header.chrome { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 9
 .hbench { display: grid; gap: 12px; max-width: 520px; padding-top: 4px; container-type: inline-size; }
 .hbench .hd { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-bottom: 6px; border-bottom: 1px solid var(--rule-soft); }
 .hrow { display: grid; grid-template-columns: 92px 112px minmax(0, 1fr) 54px 62px; gap: 12px; align-items: center; }
-.hrow .lic { font: 400 11px/1 var(--font-machine); color: var(--ink-3); white-space: nowrap; }
+.hrow .lic { font: 400 11px/1 var(--font-machine); color: var(--ink-3); white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .hrow.us .lic { color: var(--accent); }
 .hrow[data-tip] { cursor: default; }
 .hrow[data-tip] .t i { transition: width 700ms var(--ease-mech), filter var(--dur) linear; }
@@ -445,7 +445,7 @@ footer { border-top: 1px solid var(--rule-soft); padding-block: 28px; }
           <div class="hd"><span class="annot">brep-conformance leaderboard</span><span class="annot" id="hrun"></span></div>
           <div class="hrow hcols" aria-hidden="true"><span>kernel</span><span>license</span><span>pass at <span class="num">1e-7</span> mm</span><span>speed</span></div>
           <div id="hbench"></div>
-          <a class="more" href="#bench">see the benchmark ↓</a>
+          <a class="more" id="hmore" href="#bench">see the benchmark ↓</a>
         </div>
         <div class="actions">
           <a class="btn" href="https://github.com/springcraft-ai/springrep" target="_blank" rel="noopener">{{GH}}github</a>
@@ -1193,6 +1193,7 @@ const bandCount = (k, b) => b.of.reduce((a, i) => a + k.n[i], 0)
 // kernel.tolerance, the precision the cases were run and graded to).
 let RUN = { suite: "1.0.0", unix: 1794975567, os: "linux", arch: "x86_64", cores: 24, tolerance: 1e-7 }
 let TOTAL = 3487
+const HERO_ROWS = 4
 function drawBoard() {
   const [ry, rm, rd] = new Date(RUN.unix * 1000).toISOString().slice(0, 10).split("-")
   const runDate = rm + "-" + rd + "-" + ry
@@ -1206,7 +1207,13 @@ function drawBoard() {
   hbench.replaceChildren()
   hbench.style.display = "grid"
   hbench.style.gap = "10px"
-  BOARD.forEach((k) => {
+  const top = BOARD.slice(0, HERO_ROWS)
+  const us = BOARD.find((k) => k.us)
+  if (us && !top.includes(us)) top[HERO_ROWS - 1] = us
+  document.getElementById("hmore").textContent = BOARD.length > top.length
+    ? "see all " + BOARD.length + " kernels ↓"
+    : "see the benchmark ↓"
+  top.forEach((k) => {
     const row = document.createElement("div")
     row.className = "hrow" + (k.us ? " us" : "")
     row.innerHTML = '<span class="n"></span><span class="lic"></span><span class="t"><i></i></span><b>' + k.rate.toFixed(1) + "%</b>" +
@@ -1219,7 +1226,7 @@ function drawBoard() {
     hbench.appendChild(row)
   })
   requestAnimationFrame(() => requestAnimationFrame(() => {
-    hbench.querySelectorAll(".hrow .t i").forEach((el, i) => { el.style.width = BOARD[i].rate + "%" })
+    hbench.querySelectorAll(".hrow .t i").forEach((el, i) => { el.style.width = top[i].rate + "%" })
   }))
   const board = document.getElementById("board")
   board.replaceChildren()

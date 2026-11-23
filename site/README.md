@@ -38,6 +38,9 @@ shows the copy in the template's `BOARD`, `RUN` and `TOTAL`: the verified run of
 that copy near the current run, so a reader rarely sees the figures change. The headline and prose
 around the board are fixed text, and do not follow the figures.
 
+The hero shows only the board's first four kernels, with springrep in the last place if it ranks
+lower, and its link gives the number of kernels on the full board below.
+
 ## Setup
 
 Python 3 and, to regenerate the hero data, the Rust toolchain that
