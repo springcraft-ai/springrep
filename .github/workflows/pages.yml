@@ -1,5 +1,4 @@
-# Builds site/ and publishes it to GitHub Pages on each push to main that changes the page, and once
-# a day so the leaderboard the build writes into the page follows brep-conformance's latest run.
+# Builds site/ and publishes it to GitHub Pages on each push to main that changes the page.
 name: pages
 
 on:
@@ -10,8 +9,6 @@ on:
       - examples/bracket.rs
       - Cargo.toml
       - .github/workflows/pages.yml
-  schedule:
-    - cron: "23 7 * * *"
   workflow_dispatch:
 
 permissions:
@@ -30,7 +27,6 @@ jobs:
       - uses: actions/checkout@v4
       - run: python3 site/build.py
       - run: mv site/dist/springrep.html site/dist/index.html
-      - run: rm site/dist/leaderboard.json
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

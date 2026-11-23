@@ -3,30 +3,18 @@
 The design system comes from its published build on the CDN, never from a checkout. With
 --preview, those files are fetched now and written into the page, for hosts that load nothing from
 other origins; the result goes to dist/springrep.preview.html.
-
-The leaderboard comes from the brep-conformance results site as it stands now, and is written into
-the page. With --offline, the copy the last build kept in dist/ is used instead.
 """
 
 import base64
 import html
-import json
 import re
 import sys
-import time
 import urllib.request
-from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "dist/springrep.html"
 PREVIEW = HERE / "dist/springrep.preview.html"
-LEADERBOARD_URL = "https://springcraft-ai.github.io/brep-conformance/leaderboard.json"
-LEADERBOARD_KEPT = HERE / "dist/leaderboard.json"
-GRADES = ("1e-7", "1e-6", "1e-5", "1e-3", "fail", "unsupported", "refused", "timeout", "crash")
-FETCH_TRIES = 4
-FETCH_TIMEOUT_S = 20
-FETCH_PAUSE_S = 3
 # An immutable build of sc-1.1: a new build of the design system gets a new path.
 SC = "https://cdn.springcraft.ai/design/sc-1.1/mwl4jqxo"
 
@@ -83,69 +71,6 @@ def highlight(src):
     return "\n".join(out)
 
 
-def above(v, least):
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and v >= least
-
-
-def drawable(d):
-    """Whether the page's fromLive accepts this leaderboard.json; the two must agree."""
-    try:
-        at = [d["grades"].index(g) for g in GRADES if g in d["grades"]]
-        kernels = d["kernels"]
-        run = next((k for k in kernels if k.get("maintainers")), kernels[0])["run"]
-
-        def cases(k):
-            # A grade the kernel has no count for counts as none, as it does on the page.
-            return sum(k["counts"][i] or 0 for i in at if i < len(k["counts"]))
-
-        return (
-            above(d["cases"], 1)
-            and datetime.fromisoformat(run["date"].replace("Z", "+00:00")).timestamp() > 0
-            and above(run["cores"], 1)
-            and above(run["tolerance"], 0)
-            and run["tolerance"] > 0
-            and all(isinstance(v, str) for v in (d["suite"], run["os"], run["arch"]))
-            and all(
-                all(isinstance(k[f], str) for f in ("kernel", "version", "license"))
-                and all(above(k["time"][q], 0) for q in ("median", "q1", "q3"))
-                and cases(k) == d["cases"]
-                for k in kernels
-            )
-        )
-    except (AttributeError, KeyError, IndexError, TypeError, ValueError):
-        return False
-
-
-def fetched():
-    """The results site's leaderboard.json, tried a few times: one bad answer fails no deploy."""
-    for attempt in range(FETCH_TRIES):
-        time.sleep(FETCH_PAUSE_S * attempt)
-        try:
-            with urllib.request.urlopen(LEADERBOARD_URL, timeout=FETCH_TIMEOUT_S) as r:
-                return r.read().decode()
-        except OSError as e:
-            error = e
-    sys.exit(f"{LEADERBOARD_URL}: {error}")
-
-
-def leaderboard(offline):
-    """The results site's leaderboard.json, as text safe inside a script element."""
-    source = LEADERBOARD_KEPT if offline else LEADERBOARD_URL
-    if offline and not LEADERBOARD_KEPT.exists():
-        sys.exit(f"{source}: no kept leaderboard; build once without --offline")
-    text = LEADERBOARD_KEPT.read_text() if offline else fetched()
-    try:
-        d = json.loads(text)
-    except ValueError:
-        d = None
-    if not drawable(d):
-        sys.exit(f"{source}: not a board the page can draw")
-    LEADERBOARD_KEPT.parent.mkdir(exist_ok=True)
-    LEADERBOARD_KEPT.write_text(text)
-    # No "<" is left, so nothing in the data can open a tag or a comment inside the script element.
-    return json.dumps(d, separators=(",", ":")).replace("<", "\\u003c")
-
-
 def version():
     """The crate's version, from Cargo.toml's package table."""
     manifest = (HERE.parent / "Cargo.toml").read_text()
@@ -163,8 +88,6 @@ def main():
     t = t.replace("{{SC}}", SC)
     t = t.replace("{{PART}}", (HERE / "data/flanged_tube.json").read_text().strip())
     t = t.replace("{{VERSION}}", html.escape(version()))
-    t = t.replace("{{LEADERBOARD_URL}}", LEADERBOARD_URL)
-    t = t.replace("{{LEADERBOARD}}", leaderboard("--offline" in sys.argv[1:]))
     t = t.replace("{{MAIN_RS}}", highlight((HERE.parent / "examples/bracket.rs").read_text()))
     out = OUT
     if "--preview" in sys.argv[1:]:

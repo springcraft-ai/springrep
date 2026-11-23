@@ -136,6 +136,11 @@ header.chrome { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 9
 .hrow.us .t i { background: var(--accent); }
 .hbench a.more { justify-self: start; font-size: 12px; color: var(--ink-2); border-bottom: 1px solid var(--ink-3); transition: color var(--dur) linear; }
 .hbench a.more:hover { color: var(--ink-1); }
+#hbench { display: grid; gap: 10px; align-content: start; }
+/* Until the board loads its link keeps its place unseen, so its words never change in view. */
+.hbench.wait a.more { visibility: hidden; }
+.lb-off { font: 400 12px/1.5 var(--font-voice); color: var(--fg-2); white-space: normal; }
+.lb-off a { color: var(--fg); border-bottom: 1px solid var(--fg-3); }
 @media (prefers-reduced-motion: reduce) { .hrow .t i { transition: none; } }
 @container (max-width: 440px) {
   .hrow { grid-template-columns: 84px minmax(0, 1fr) 54px 64px; gap: 8px; }
@@ -441,10 +446,15 @@ footer { border-top: 1px solid var(--rule-soft); padding-block: 28px; }
         <p class="display sub"><b>Exact CAD geometry</b><br>in pure Rust.</p>
         <div class="creds" aria-label="License"><span class="badge"><b>MIT</b><span>open source license</span></span></div>
         <p class="lede">A boundary-representation (B-rep) kernel. Booleans, fillets, sweeps and STEP on exact geometry, accurate to 1e-7&nbsp;mm, with every result validated.</p>
-        <div class="hbench" aria-label="brep-conformance pass rate">
+        <div class="hbench wait" aria-label="brep-conformance pass rate">
           <div class="hd"><span class="annot" id="hsuite">brep-conformance</span><span class="annot" id="hrun"></span></div>
           <div class="hrow hcols" aria-hidden="true"><span>kernel</span><span>license</span><span>pass at <span class="num">1e-7</span> mm</span><span>speed</span></div>
-          <div id="hbench"></div>
+          <div id="hbench" aria-busy="true">
+            <div class="hrow"><span class="n">&nbsp;</span><span class="lic"></span><span class="t"><i></i></span><b></b><span class="ms"></span></div>
+            <div class="hrow"><span class="n">&nbsp;</span><span class="lic"></span><span class="t"><i></i></span><b></b><span class="ms"></span></div>
+            <div class="hrow"><span class="n">&nbsp;</span><span class="lic"></span><span class="t"><i></i></span><b></b><span class="ms"></span></div>
+            <div class="hrow"><span class="n">&nbsp;</span><span class="lic"></span><span class="t"><i></i></span><b></b><span class="ms"></span></div>
+          </div>
           <a class="more" id="hmore" href="#bench">see the benchmark ↓</a>
         </div>
         <div class="actions">
@@ -1167,8 +1177,8 @@ document.querySelectorAll("[data-copy-from]").forEach((b) => b.addEventListener(
   copyText(document.getElementById(b.dataset.copyFrom).textContent, b)
 }))
 
-/* The leaderboard, drawn from the results site's leaderboard.json as the build read it, and again
-   from the current one once that has loaded, so it follows a new run without a change here.
+/* The leaderboard, drawn from the results site's leaderboard.json once it has loaded, so it follows
+   a new run without a change here. The hero's four rows stand empty until then.
    n: cases by tightest tolerance passed (1e-7, 1e-6, 1e-5, 1e-3), then fail, unsupported, and
    refused/timeout/crash. ms: median, first and third quartile per case, on the cases every kernel
    answered. */
@@ -1201,8 +1211,7 @@ function drawBoard() {
   BOARD.forEach((k) => { k.rate = atOrBetter(k, 0) })
   const hbench = document.getElementById("hbench")
   hbench.replaceChildren()
-  hbench.style.display = "grid"
-  hbench.style.gap = "10px"
+  hbench.removeAttribute("aria-busy")
   const top = BOARD.slice(0, HERO_ROWS)
   const us = BOARD.find((k) => k.us)
   if (us && !top.includes(us)) top[HERO_ROWS - 1] = us
@@ -1314,12 +1323,12 @@ function drawBoard() {
   })
 }
 
-const LIVE = "{{LEADERBOARD_URL}}"
+const RESULTS = "https://springcraft-ai.github.io/brep-conformance/"
+const LIVE = RESULTS + "leaderboard.json"
 const shortLicense = (spdx) =>
   spdx.replace(/ WITH .*$/, "").replace(/-only|-or-later/g, "").replace(/ OR /g, "/")
 const shortMs = (v) => v < 100 ? Math.round(v * 10) / 10 : Math.round(v)
-// The results site's leaderboard.json in this page's terms. Throws on data the board cannot draw,
-// which leaves the build's copy in place.
+// The results site's leaderboard.json in this page's terms. Throws on data the board cannot draw.
 function fromLive(d) {
   const at = (k, ...grades) => grades.reduce((a, g) => a + (k.counts[d.grades.indexOf(g)] || 0), 0)
   const rows = d.kernels.map((k) => ({
@@ -1344,23 +1353,40 @@ function fromLive(d) {
   const { os, arch, cores, tolerance } = run
   return [rows, { suite: d.suite, unix, os, arch, cores, tolerance }, d.cases]
 }
-// build.py refuses a board fromLive would, so this throws only if the two have drifted apart; the
-// rest of the page then still runs, and the live board draws if it can.
-try {
-  ;[BOARD, RUN, TOTAL] = fromLive({{LEADERBOARD}})
-} catch {}
-// Taken before drawing, which adds each row's rate to it.
-const drawn = BOARD ? JSON.stringify([BOARD, RUN, TOTAL]) : ""
-if (BOARD) drawBoard()
+// Both boards say the leaderboard did not load. The hero's keeps the height its rows held.
+function boardFailed() {
+  const note = () => {
+    const el = document.createElement("span")
+    el.className = "lb-off"
+    const a = document.createElement("a")
+    a.href = RESULTS
+    a.target = "_blank"
+    a.rel = "noopener"
+    a.textContent = "See it on the results site"
+    el.append("The leaderboard did not load. ", a, ".")
+    return el
+  }
+  const hbench = document.getElementById("hbench")
+  hbench.style.minHeight = hbench.offsetHeight + "px"
+  hbench.removeAttribute("aria-busy")
+  hbench.replaceChildren(note())
+  const td = document.createElement("td")
+  td.className = "k"
+  td.colSpan = 5
+  td.append(note())
+  const tr = document.createElement("tr")
+  tr.append(td)
+  document.getElementById("board").replaceChildren(tr)
+  document.getElementById("legend").replaceChildren()
+}
 fetch(LIVE)
   .then((r) => r.ok ? r.json() : Promise.reject(new Error("leaderboard.json: " + r.status)))
   .then((d) => {
-    const live = fromLive(d)
-    if (JSON.stringify(live) === drawn) return
-    ;[BOARD, RUN, TOTAL] = live
+    ;[BOARD, RUN, TOTAL] = fromLive(d)
     drawBoard()
   })
-  .catch(() => {})
+  .catch(boardFailed)
+  .finally(() => document.querySelector(".hbench").classList.remove("wait"))
 
 function alignDeck() {
   const h = document.querySelector("#bench .sh h2")
