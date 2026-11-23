@@ -37,7 +37,9 @@ The leaderboard follows brep-conformance's results site. When the page loads it 
 board from it, so a new run shows here once that site has deployed it, with no change to this
 folder. The page holds no copy of the board. Until the fetch answers, the hero shows four empty rows
 the size of the ones to come, so nothing moves when they fill. When the fetch fails or returns a
-board the page cannot draw, both boards say so and link to the results site. The headline and prose
+board the page cannot draw, both boards say so and link to the results site. They say the same
+after 8 seconds without an answer; the request goes on, and a board that lands later replaces the
+note. The headline and prose
 around the board are fixed text, and do not follow the figures.
 
 The hero shows only the board's first four kernels, with springrep in the last place if it ranks

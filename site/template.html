@@ -1200,6 +1200,9 @@ const bandCount = (k, b) => b.of.reduce((a, i) => a + k.n[i], 0)
 let RUN
 let TOTAL
 const HERO_ROWS = 4
+// A percentage to one decimal, as the results site rounds it, except that anything short of all
+// the cases stops at 99.9%: only a kernel that passes every case reads 100.0%.
+const pct = (v) => (v < 100 ? Math.min(v, 99.94) : v).toFixed(1) + "%"
 function drawBoard() {
   const [ry, rm, rd] = new Date(RUN.unix * 1000).toISOString().slice(0, 10).split("-")
   const runDate = rm + "-" + rd + "-" + ry
@@ -1222,7 +1225,7 @@ function drawBoard() {
   top.forEach((k) => {
     const row = document.createElement("div")
     row.className = "hrow" + (k.us ? " us" : "")
-    row.innerHTML = '<span class="n"></span><span class="lic"></span><span class="t"><i></i></span><b>' + k.rate.toFixed(1) + "%</b>" +
+    row.innerHTML = '<span class="n"></span><span class="lic"></span><span class="t"><i></i></span><b>' + pct(k.rate) + "</b>" +
       '<span class="ms">' + (k.ms ? k.ms[0] + " ms" : "–") + "</span>"
     row.querySelector(".n").textContent = k.label
     row.querySelector(".lic").textContent = k.license
@@ -1236,7 +1239,6 @@ function drawBoard() {
   }))
   const board = document.getElementById("board")
   board.replaceChildren()
-  const pct = (v) => v.toFixed(1) + "%"
   BOARD.forEach((k) => {
     const tr = document.createElement("tr")
     if (k.us) tr.className = "us"
@@ -1297,7 +1299,8 @@ function drawBoard() {
 
   const figures = [...board.querySelectorAll("[data-to]")]
   const show = (el, f) => {
-    el.textContent = (Number(el.dataset.to) * f).toFixed(Number(el.dataset.dp)) + (el.dataset.unit || "")
+    const v = Number(el.dataset.to) * f
+    el.textContent = el.dataset.unit === "%" ? pct(v) : v.toFixed(Number(el.dataset.dp))
   }
   const COUNT_MS = 1100
   function lightBoard() {
@@ -1336,8 +1339,12 @@ const LIVE = RESULTS + "leaderboard.json"
 const shortLicense = (spdx) =>
   spdx.replace(/ WITH .*$/, "").replace(/-only|-or-later/g, "").replace(/ OR /g, "/")
 const shortMs = (v) => v < 100 ? Math.round(v * 10) / 10 : Math.round(v)
-// A time as the results site writes it in its tooltips: three significant figures.
-const tipMs = (v) => v >= 1000 ? (v / 1000).toPrecision(3) + " s" : v.toPrecision(3) + " ms"
+// A time as the results site writes it in its tooltips: three significant figures. Rounded before
+// the unit is chosen, so 999.7 ms reads 1.00 s.
+const tipMs = (v) => {
+  const r = Number(v.toPrecision(3))
+  return r >= 1000 ? (r / 1000).toPrecision(3) + " s" : r.toPrecision(3) + " ms"
+}
 // The results site's leaderboard.json in this page's terms. Throws on data the board cannot draw.
 function fromLive(d) {
   const text = (...v) => v.every((s) => typeof s === "string")
