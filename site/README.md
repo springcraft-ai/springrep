@@ -48,8 +48,8 @@ lower, and its link gives the number of kernels on the full board below.
 
 ## Setup
 
-Python 3, network access for the leaderboard and, to regenerate the hero data, the Rust toolchain that
-[rust-toolchain.toml](../rust-toolchain.toml) names.
+Python 3, network access for the leaderboard and, to regenerate the hero data, the Rust toolchain
+that [rust-toolchain.toml](../rust-toolchain.toml) names.
 
 ## Usage
 
