@@ -117,6 +117,27 @@ pub(super) fn sweep(cut: &Cut, motion: &Steady, feature: &str) -> Result<Brep> {
         .iter()
         .map(|hits| merged(hits, span))
         .collect::<Result<_>>()?;
+    // What follows merges every orbit's intervals into one, which is so where no gap in the body
+    // along an orbit is as long as the turn. A gap is shorter than the whole angle the body takes
+    // up about the axis, and that is the spread of its edges and characteristic curves, since
+    // the body's surface is farthest round where an orbit touches or leaves it. So either the
+    // turn is at least that spread, or no cell has a gap at all; otherwise an orbit somewhere
+    // may have a gap the turn does not close, which the cells' middles need not show.
+    let mut spread = (f64::INFINITY, f64::NEG_INFINITY);
+    for (k, pg) in cut.pieces.iter().enumerate() {
+        if pg.curve.is_none() {
+            continue;
+        }
+        for n in 0..=64 {
+            let t = pg.range.0 + (pg.range.1 - pg.range.0) * f64::from(n) / 64.0;
+            let angle = cells.axis.drawn(cells.point(cut, k, t), 0.0).1;
+            spread = (spread.0.min(angle), spread.1.max(angle));
+        }
+    }
+    let gapped = stacks.iter().any(|hits| hits.len() > 2);
+    if gapped && span < spread.1 - spread.0 + 1e-2 {
+        return unsupported("a body with gaps along its orbits, turned less than it spans");
+    }
     let overs: Vec<Over> = (0..cells.links.len())
         .map(|k| over(cut, &cells, k))
         .collect();

@@ -35,6 +35,12 @@ thread_local! {
 /// `M(τ)·body`. The faces the body's faces are cut from keep their names; each face a curve sweeps
 /// is `feature.side`.
 pub fn solid(body: &Brep, motion: &Motion, feature: &str) -> Result<Brep> {
+    swept(body, motion, feature, true)
+}
+
+/// [`solid`], with a turn that folds or runs into itself read off its orbits where `orbits` says
+/// so.
+fn swept(body: &Brep, motion: &Motion, feature: &str, orbits: bool) -> Result<Brep> {
     motion.validate()?;
     let mut solids = body.solid_ids();
     let (Some(s), None) = (solids.next(), solids.next()) else {
@@ -60,20 +66,25 @@ pub fn solid(body: &Brep, motion: &Motion, feature: &str) -> Result<Brep> {
             from: a,
             to: a + step,
         };
-        let a = solid(body, &half(from), feature)?;
+        let a = swept(body, &half(from), feature, orbits)?;
         #[cfg(test)]
         let again = SWEEP_BOTH_HALVES.get();
         #[cfg(not(test))]
         let again = false;
         let b = if again {
-            solid(body, &half(from + step), feature)?
+            swept(body, &half(from + step), feature, orbits)?
         } else {
             let mut b = a.clone();
             b.transform(&Transform::rotation(origin, axis, step));
             b
         };
         let facts = crate::blend::shared_edges(&a, &b);
-        return boolean::boolean_with(&a, &b, boolean::Op::Union, &facts);
+        // The two halves are united by the booleans, which were refused on some halves read
+        // off their orbits that they take built the older way.
+        return match boolean::boolean_with(&a, &b, boolean::Op::Union, &facts) {
+            Err(_) if orbits => swept(body, motion, feature, false),
+            other => other,
+        };
     }
     let (Some(steady), Some(twist)) = (sheet::Steady::of(motion), motion.steady()) else {
         return moving::sweep(body, motion, feature);
@@ -82,7 +93,7 @@ pub fn solid(body: &Brep, motion: &Motion, feature: &str) -> Result<Brep> {
     let cut = cut::cut(body, &field, steady.held())?;
     // A turn whose product folds or runs into itself is read off its orbits, where that is built.
     let stacked = || match steady {
-        sheet::Steady::Turn { .. } => stack::sweep(&cut, &steady, feature).ok(),
+        sheet::Steady::Turn { .. } if orbits => stack::sweep(&cut, &steady, feature).ok(),
         _ => None,
     };
     // Where the envelope folds, the faces are trimmed to what the moving body never reaches into.

@@ -1345,3 +1345,39 @@ fn a_leaning_drum_turned_beside_a_near_axis_bounds_its_overlap_once() {
         "{got} {twice}"
     );
 }
+
+// A slab turned a radian about a line through it has orbits that leave it and come back after
+// more than a radian: the gap is not closed by the turn, and the sweep has a hollow there. Read
+// off its orbits with every orbit's intervals merged into one it came out valid and 1.1% too
+// large, so such a turn is not read that way: the slab spans more of a turn than it is turned.
+#[test]
+fn a_turn_shorter_than_the_body_spans_is_not_merged_along_its_orbits() {
+    let frame = Frame::new(
+        Vec3::new(-1.0, -0.5, -1.0),
+        Vec3::new(0.2, 0.4, 1.0),
+        Vec3::new(1.0, 1.0, 0.0),
+    )
+    .unwrap();
+    let slab = block(&frame, Vec3::new(3.0, 0.5, 2.0), "slab").unwrap();
+    let motion = about_z(1.0);
+    let (steady, twist) = (
+        sheet::Steady::of(&motion).unwrap(),
+        motion.steady().unwrap(),
+    );
+    let cut = cut::cut(&slab, &move |p| twist.at(p), steady.held()).unwrap();
+    assert!(matches!(
+        stack::sweep(&cut, &steady, "sw"),
+        Err(Error::Unsupported(_))
+    ));
+}
+
+// A whole turn is two half turns united. A cube's half turn about a line beside it is read off
+// its orbits, and the union of two such halves is refused; the whole turn is then built as it
+// was before.
+#[test]
+fn a_whole_turn_whose_halves_read_off_their_orbits_do_not_unite_is_built_the_older_way() {
+    let frame = Frame::new(Vec3::new(0.5, 0.5, 0.0), Vec3::new(1.0, 1.0, 1.0), Vec3::X).unwrap();
+    let cube = block(&frame, Vec3::new(1.0, 1.0, 1.0), "cube").unwrap();
+    let b = solid(&cube, &about_z(2.0 * PI), "sw").unwrap();
+    assert!(check::check(&b).is_empty());
+}
