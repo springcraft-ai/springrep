@@ -1252,3 +1252,24 @@ fn a_path_that_ends_shallow_on_its_own_cap_does_not_pass_through_it() {
     let piece = product::product(&cut, &steady, "sw", Some(&[side]), None).unwrap();
     assert!(check::check(&piece).is_empty());
 }
+
+// An upright ring turned half a turn about a far line beside it: over each orbit it is the ring's
+// outline filled in, from where the orbit first goes into the ring to where it last leaves, and
+// half a turn on. That is the outline's section, a stadium, turned half a turn (Pappus), and the
+// filled outline itself, the stadium turned about the ring's own axis.
+#[test]
+fn a_ring_turned_half_a_turn_beside_a_far_axis() {
+    let (big, small, at) = (2.0, 0.5, Vec3::new(10.0, -2.0, 0.0));
+    let ring = crate::primitive::torus(&Frame::WORLD.translated(at), big, small, "ring").unwrap();
+    let b = solid(&ring, &about_z(PI), "sw").unwrap();
+    assert!(check::check(&b).is_empty());
+    let section = 4.0 * big * small + PI * small * small;
+    let filled =
+        PI * (2.0 * big * big * small + big * PI * small * small + 4.0 / 3.0 * small.powi(3));
+    let want = PI * at.x.hypot(at.y) * section + filled;
+    assert!(
+        rel(measure::volume(&b), want) < 1e-9,
+        "{} {want}",
+        measure::volume(&b)
+    );
+}

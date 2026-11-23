@@ -5,6 +5,7 @@
 //! body, and the solid's boundary is that boundary swept, capped by the rest of the body at the
 //! start and the region at the end.
 
+mod cells;
 mod contour;
 mod cut;
 mod grazing;
@@ -13,6 +14,7 @@ mod moving;
 mod orbit;
 mod product;
 mod sheet;
+mod stack;
 #[cfg(test)]
 mod tests;
 mod trim;
@@ -78,14 +80,25 @@ pub fn solid(body: &Brep, motion: &Motion, feature: &str) -> Result<Brep> {
     };
     let field = move |p| twist.at(p);
     let cut = cut::cut(body, &field, steady.held())?;
+    // A turn whose product folds or runs into itself is read off its orbits, where that is built.
+    let stacked = || match steady {
+        sheet::Steady::Turn { .. } => stack::sweep(&cut, &steady, feature).ok(),
+        _ => None,
+    };
     // Where the envelope folds, the faces are trimmed to what the moving body never reaches into.
-    if product::folded(&cut, &steady)
-        && let Some(reach) = trim::Reach::new(body, motion, (0.0, 1.0))
-    {
-        return product::product(&cut, &steady, feature, None, Some(&reach));
+    if product::folded(&cut, &steady) {
+        if let Some(b) = stacked() {
+            return Ok(b);
+        }
+        if let Some(reach) = trim::Reach::new(body, motion, (0.0, 1.0)) {
+            return product::product(&cut, &steady, feature, None, Some(&reach));
+        }
     }
     match product::product(&cut, &steady, feature, None, None) {
-        Err(Error::InvalidResult(_)) => in_parts(&cut, &steady, feature),
+        Err(Error::InvalidResult(_)) => match stacked() {
+            Some(b) => Ok(b),
+            None => in_parts(&cut, &steady, feature),
+        },
         other => other,
     }
 }
