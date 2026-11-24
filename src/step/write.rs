@@ -63,6 +63,145 @@ pub(super) struct Spline {
     pub(super) weights: Option<Vec<f64>>,
 }
 
+/// Control points as homogeneous coordinates, `(w·x, w·y, w·z, w)`: a row along one parameter.
+type Row = Vec<[f64; 4]>;
+
+/// The domain of a surface's STEP form along `u` and along `v`, in each direction where it has ends
+/// the kernel's does not.
+pub(super) type Ends = (Option<(f64, f64)>, Option<(f64, f64)>);
+
+/// A closed spline as its degree, knots, homogeneous control points and domain.
+struct Closed<'a> {
+    degree: usize,
+    knots: &'a [f64],
+    pts: Row,
+    domain: (f64, f64),
+    rational: bool,
+}
+
+/// A closed spline's parts. `None` for a curve that is not a closed spline.
+fn closed_spline(curve: &Curve) -> Option<Closed<'_>> {
+    curve.period()?;
+    let (p, knots, ctrl, weights) = match curve {
+        Curve::BSpline(s) => (s.degree(), s.knots(), s.control_points(), None),
+        Curve::Intersection(ic) => {
+            let s = &ic.approx;
+            (s.degree(), s.knots(), s.control_points(), None)
+        }
+        Curve::Nurbs(n) => (n.degree(), n.knots(), n.control_points(), n.weights()),
+        _ => return None,
+    };
+    Some(Closed {
+        degree: p,
+        knots,
+        pts: homogeneous(ctrl, weights),
+        domain: curve.domain(),
+        rational: weights.is_some(),
+    })
+}
+
+fn homogeneous(ctrl: &[Point3], weights: Option<&[f64]>) -> Row {
+    (0..ctrl.len())
+        .map(|i| {
+            let w = weights.map_or(1.0, |w| w[i]);
+            [ctrl[i].x * w, ctrl[i].y * w, ctrl[i].z * w, w]
+        })
+        .collect()
+}
+
+fn cartesian(pts: &[[f64; 4]]) -> Vec<Point3> {
+    pts.iter()
+        .map(|q| Vec3::new(q[0] / q[3], q[1] / q[3], q[2] / q[3]))
+        .collect()
+}
+
+/// Rows of homogeneous control points, each a curve on `knots` closed over `(a, b)`, over one turn
+/// from `start` as splines of their own that start and end on their first and last control points,
+/// with the knots they share. Each row is clamped at the ends of its own turn and run on for a
+/// second, the second turn's points scaled so the two meet in one point: a scale of a whole turn's
+/// homogeneous points leaves that turn as it was. The turn from `start` is cut out of the two.
+///
+/// A surface's rows each take their own scale, which moves its second turn unless the scales agree.
+/// They are taken where they differ by little enough that the surface moves by no more than a tenth
+/// of the tolerance, at most the spread of the scales times the reach of its control net; `None`
+/// where they differ by more, which no one scale serves.
+fn one_turn(
+    p: usize,
+    knots: &[f64],
+    rows: &[Row],
+    (a, b): (f64, f64),
+    start: f64,
+) -> Option<(Vec<f64>, Vec<Row>)> {
+    let period = b - a;
+    let slack = 1e-12 * period;
+    let clamped: Vec<(Vec<f64>, Row)> = rows
+        .iter()
+        .map(|r| crate::geom::spline_piece(p, knots, r, (a, b)))
+        .collect();
+    let k = &clamped[0].0;
+    let m = clamped[0].1.len();
+    let scale = |r: &[[f64; 4]]| r[m - 1][3] / r[0][3];
+    let first = scale(&clamped[0].1);
+    let spread = clamped
+        .iter()
+        .map(|(_, r)| (scale(r) / first - 1.0).abs())
+        .fold(0.0, f64::max);
+    let reach = clamped
+        .iter()
+        .flat_map(|(_, r)| cartesian(r))
+        .map(|q| q.norm())
+        .fold(0.0, f64::max);
+    let moves = spread * reach;
+    if moves.is_nan() || moves > 0.1 * tol::LINEAR {
+        return None;
+    }
+    let mut two = k[..m + p].to_vec();
+    two.extend(k[p + 1..].iter().map(|x| x + period));
+    let near = |t: f64| {
+        let k = two.iter().find(|&&k| (k - t).abs() <= slack);
+        k.copied().unwrap_or(t)
+    };
+    let (start, end) = (near(start), near(start + period));
+    let mut out = (Vec::new(), Vec::with_capacity(rows.len()));
+    for (_, r) in &clamped {
+        let s = scale(r);
+        let row: Row = r
+            .iter()
+            .copied()
+            .chain(r[1..].iter().map(|q| q.map(|x| x * s)))
+            .collect();
+        let (knots, row) = crate::geom::spline_piece(p, &two, &row, (start, end));
+        out.0 = knots;
+        out.1.push(row);
+    }
+    Some(out)
+}
+
+/// A closed spline over one turn from `start`, in the curve's own parameter there: the same curve,
+/// with ends where the turn from `start` has them. `None` for a curve that is not a closed spline.
+fn turned(curve: &Curve, start: f64) -> Option<Spline> {
+    let c = closed_spline(curve)?;
+    let (p, (a, b), rational) = (c.degree, c.domain, c.rational);
+    let period = b - a;
+    let at = start - period * ((start - a) / period).floor();
+    let (knots, rows) = one_turn(p, c.knots, &[c.pts], (a, b), at)?;
+    let (first, last) = (knots[0], knots[knots.len() - 1]);
+    let row = &rows[0];
+    Some(Spline {
+        degree: p,
+        knots: knots
+            .iter()
+            .map(|&k| match k {
+                k if k == first => start,
+                k if k == last => start + (last - first),
+                k => k + (start - first),
+            })
+            .collect(),
+        ctrl: cartesian(row),
+        weights: rational.then(|| row.iter().map(|q| q[3]).collect()),
+    })
+}
+
 /// A closed spline as the spline of one turn from `range.0`, for an edge whose `range` runs past
 /// where the curve's own turn ends. A STEP spline has two ends, and a reader takes an edge from its
 /// first vertex along the curve to its second, which it cannot do across them. `None` for an edge
@@ -74,65 +213,284 @@ pub(super) fn turn_from(curve: &Curve, range: (f64, f64)) -> Option<Spline> {
     if range.0 >= a - slack && range.1 <= b + slack {
         return None;
     }
-    // Two turns of the curve as one spline with ends, which holds a turn from anywhere in the first.
-    let (p, knots, ctrl, weights) = match curve {
-        Curve::BSpline(s) => two_turns(s, period),
-        Curve::Intersection(ic) => two_turns(&ic.approx, period),
-        Curve::Nurbs(n) => {
-            let (p, k, c) = (n.degree(), n.knots(), n.control_points());
-            let m = c.len();
-            let clamped = k[..=p].iter().all(|&x| x == a) && k[m..].iter().all(|&x| x == b);
-            let w = n.weights();
-            if !clamped || w.is_some_and(|w| (w[0] - w[m - 1]).abs() > 1e-12 * w[0].abs()) {
-                return None;
-            }
-            let mut knots = k[..m + p].to_vec();
-            knots.extend(k[p + 1..].iter().map(|x| x + period));
-            let twice = |v: &[f64]| [v, &v[1..]].concat();
-            (p, knots, [c, &c[1..]].concat(), w.map(twice))
-        }
-        _ => return None,
-    };
-    let near = |t: f64| {
-        let k = knots.iter().find(|&&k| (k - t).abs() <= slack);
-        k.copied().unwrap_or(t)
-    };
-    let start = near(range.0 - period * ((range.0 - a) / period).floor());
-    let end = near(start + period);
-    let pts: Vec<[f64; 4]> = (0..ctrl.len())
-        .map(|i| {
-            let w = weights.as_ref().map_or(1.0, |w| w[i]);
-            [ctrl[i].x * w, ctrl[i].y * w, ctrl[i].z * w, w]
-        })
-        .collect();
-    let (knots, pts) = crate::geom::spline_piece(p, &knots, &pts, (start, end));
-    Some(Spline {
-        degree: p,
-        // From the edge's own start to the bit, where its pcurves start too, and no shorter than it.
-        knots: knots
-            .iter()
-            .map(|&k| match k {
-                k if k == start => range.0,
-                k if k == end => range.1.max(range.0 + period),
-                k => k + (range.0 - start),
-            })
-            .collect(),
-        ctrl: pts
-            .iter()
-            .map(|q| Vec3::new(q[0] / q[3], q[1] / q[3], q[2] / q[3]))
-            .collect(),
-        weights: weights.map(|_| pts.iter().map(|q| q[3]).collect()),
-    })
+    let mut s = turned(curve, range.0)?;
+    // No shorter than the edge, where it rounds to a little more than a turn.
+    let last = s.knots[s.knots.len() - 1];
+    for k in s.knots.iter_mut().filter(|k| **k == last) {
+        *k = range.1.max(last);
+    }
+    Some(s)
 }
 
-/// A periodic spline of `period` run on for a second turn: its degree, knots, control points and
-/// no weights.
-fn two_turns(s: &BSpline, period: f64) -> (usize, Vec<f64>, Vec<Point3>, Option<Vec<f64>>) {
-    let (p, k, c) = (s.degree(), s.knots(), s.control_points());
-    let n = c.len() - p;
-    let mut knots = k.to_vec();
-    knots.extend(k[2 * p + 1..].iter().map(|x| x + period));
-    (p, knots, [&c[..n], c].concat(), None)
+/// Refuses an edge that goes round its closed curve more than once, which no spline of one turn
+/// holds; the kernel's edges never do.
+fn goes_round_once(curve: &Curve, range: (f64, f64)) -> Result<()> {
+    match curve.period() {
+        Some(p) if range.1 - range.0 > p * (1.0 + 1e-9) => Err(Error::InvalidInput(format!(
+            "STEP: an edge goes round its closed {} more than once",
+            curve.kind()
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// A face's surface written from where the face starts, for a face that runs past the end of a
+/// turn of its surface in a direction its STEP form has ends in.
+pub(super) enum Rebased {
+    Extrusion {
+        curve: Spline,
+        dir: Vec3,
+    },
+    Revolution {
+        curve: Spline,
+        origin: Point3,
+        axis: Vec3,
+    },
+    Nurbs {
+        degrees: (usize, usize),
+        knots: (Vec<f64>, Vec<f64>),
+        counts: (usize, usize),
+        ctrl: Vec<Point3>,
+        weights: Option<Vec<f64>>,
+    },
+}
+
+/// How a face is written on its surface: the domain of the surface as written in each direction it
+/// has ends in that the kernel's does not, its coedges' pcurves moved by whole periods so that the
+/// face lies in that domain and each loop's pcurves meet end to end, and the surface itself where
+/// it is written from the face's own start. A face on any other surface keeps its pcurves as
+/// [`pcurve`] finds them.
+pub(super) struct FaceForm {
+    pub(super) ended: Ends,
+    pcurves: HashMap<CoedgeId, Curve2>,
+    pub(super) surface: Option<Rebased>,
+}
+
+impl FaceForm {
+    /// Coedge `c`'s pcurve as it is written on this face.
+    pub(super) fn pcurve(&self, b: &Brep, c: CoedgeId) -> Option<Curve2> {
+        match self.pcurves.get(&c) {
+            Some(c2) => Some(c2.clone()),
+            None if self.ended == (None, None) => pcurve(b, c),
+            None => None,
+        }
+    }
+}
+
+/// The domain along `u` and along `v` of a surface's STEP form, in each direction where the kernel
+/// wraps the surface's parameter but STEP gives it ends: a spline's, and the curve's of an
+/// extrusion or a revolution of one. STEP wraps a conic's parameter and the angles of its
+/// elementary surfaces and of a surface of revolution, as the kernel does.
+pub(super) fn ended(s: &Surface) -> Ends {
+    let spline = |c: &Curve| {
+        c.period().is_some()
+            && matches!(
+                c,
+                Curve::BSpline(_) | Curve::Intersection(_) | Curve::Nurbs(_)
+            )
+    };
+    match s {
+        Surface::Extrusion(e) if spline(&e.curve) => (Some(e.curve.domain()), None),
+        Surface::Revolution(r) if spline(&r.curve) => (None, Some(r.curve.domain())),
+        Surface::Nurbs(n) => {
+            let (du, dv) = n.domain();
+            (n.u_period().map(|_| du), n.v_period().map(|_| dv))
+        }
+        _ => (None, None),
+    }
+}
+
+/// Coedge `c`'s parameter-plane points, in its own direction, on its pcurve `c2` where it has one.
+fn track(b: &Brep, c: CoedgeId, c2: Option<&Curve2>) -> Vec<Vec2> {
+    let co = b.coedge(c);
+    let (t0, t1) = b.edge(co.edge).range;
+    let mut ts: Vec<f64> = (0..=32).map(|i| t0 + (t1 - t0) * i as f64 / 32.0).collect();
+    if co.reversed {
+        ts.reverse();
+    }
+    let written = c2.map(|c2| c2.track(&ts));
+    written
+        .filter(|pts| !pts.is_empty())
+        .unwrap_or_else(|| b.coedge_uvs(c, &ts))
+}
+
+/// How face `f` is written; see [`FaceForm`]. Every face that wraps a period carries a seam, so
+/// each loop closes in one turn of its surface; a face whose loop does not is refused. So is a face
+/// across the join of a NURBS surface closed only within the tolerance whose rows meet at weights
+/// too far from one scale, which has no exact form from where the face starts ([`one_turn`]).
+pub(super) fn face_form(b: &Brep, f: FaceId) -> Result<FaceForm> {
+    let face = b.face(f);
+    let s = &face.surface;
+    let domains = ended(s);
+    let mut form = FaceForm {
+        ended: domains,
+        pcurves: HashMap::new(),
+        surface: None,
+    };
+    let dom = [domains.0, domains.1];
+    if dom == [None, None] {
+        return Ok(form);
+    }
+    let of = |v: Vec2| [v.x, v.y];
+    let whole = |d: [f64; 2]| -> [f64; 2] {
+        let mut out = [0.0; 2];
+        for i in 0..2 {
+            if let Some((a, b)) = dom[i] {
+                out[i] = ((d[i] / (b - a)).round()) * (b - a);
+            }
+        }
+        out
+    };
+    // Each loop's coedges, each moved to start where the one before it ends, and the span the
+    // loop then covers.
+    let mut loops: Vec<(Vec<CoedgeId>, [f64; 2], [f64; 2])> = Vec::new();
+    let mut shift: HashMap<CoedgeId, [f64; 2]> = HashMap::new();
+    let mut fitted: HashMap<CoedgeId, Curve2> = HashMap::new();
+    for &lp in &face.loops {
+        let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+        let (mut first, mut prev): (Option<[f64; 2]>, Option<[f64; 2]>) = (None, None);
+        let mut cs = Vec::new();
+        for &c in &b.lp(lp).coedges {
+            if b.edge(b.coedge(c).edge).is_degenerate() {
+                continue;
+            }
+            let c2 = pcurve(b, c);
+            let pts: Vec<[f64; 2]> = track(b, c, c2.as_ref()).into_iter().map(of).collect();
+            if let Some(c2) = c2 {
+                fitted.insert(c, c2);
+            }
+            let by = prev.map_or([0.0; 2], |p| whole([p[0] - pts[0][0], p[1] - pts[0][1]]));
+            for q in &pts {
+                for i in 0..2 {
+                    lo[i] = lo[i].min(q[i] + by[i]);
+                    hi[i] = hi[i].max(q[i] + by[i]);
+                }
+            }
+            let end = pts[pts.len() - 1];
+            first.get_or_insert([pts[0][0] + by[0], pts[0][1] + by[1]]);
+            prev = Some([end[0] + by[0], end[1] + by[1]]);
+            shift.insert(c, by);
+            cs.push(c);
+        }
+        if let (Some(a), Some(z)) = (first, prev)
+            && whole([z[0] - a[0], z[1] - a[1]]) != [0.0; 2]
+        {
+            return Err(Error::InvalidInput(format!(
+                "STEP: a loop of a face on a {} winds round it with no seam across it",
+                s.kind()
+            )));
+        }
+        loops.push((cs, lo, hi));
+    }
+    let Some((_, lo0, hi0)) = loops.first().cloned() else {
+        return Ok(form);
+    };
+    // The outer loop from where its low end falls in the surface's own turn, and each inner loop
+    // in the turn from there.
+    let mut start = [None; 2];
+    let mut written = dom;
+    let mut place = vec![[0.0; 2]; loops.len()];
+    for i in 0..2 {
+        let Some((a, b)) = dom[i] else { continue };
+        let period = b - a;
+        let slack = 1e-9 * period;
+        if hi0[i] - lo0[i] > period + slack {
+            return Err(Error::InvalidInput(format!(
+                "STEP: a face spans more than one turn of its {}",
+                s.kind()
+            )));
+        }
+        let moved = -((lo0[i] - a) / period).floor() * period;
+        let from = lo0[i] + moved;
+        place[0][i] = moved;
+        for (k, (_, lo, hi)) in loops.iter().enumerate().skip(1) {
+            let mid = 0.5 * (lo[i] + hi[i]);
+            place[k][i] = -((mid - from) / period).floor() * period;
+        }
+        if from + (hi0[i] - lo0[i]) > b + slack {
+            start[i] = Some(from);
+            written[i] = Some((from, from + period));
+        }
+    }
+    let rebased = match (s, start) {
+        (_, [None, None]) => None,
+        (Surface::Extrusion(e), [Some(u), _]) => {
+            turned(&e.curve, u).map(|curve| Rebased::Extrusion { curve, dir: e.dir })
+        }
+        (Surface::Revolution(r), [_, Some(v)]) => {
+            turned(&r.curve, v).map(|curve| Rebased::Revolution {
+                curve,
+                origin: r.origin,
+                axis: r.axis,
+            })
+        }
+        (Surface::Nurbs(n), _) => turned_net(n, start),
+        _ => None,
+    };
+    if start != [None, None] && rebased.is_none() {
+        return Err(Error::Unsupported(format!(
+            "STEP: a face across the join of a {} whose ends meet at different weights has no \
+             exact form from where it starts",
+            s.kind()
+        )));
+    }
+    form.surface = rebased;
+    form.ended = (written[0], written[1]);
+    for ((cs, _, _), by) in loops.iter().zip(&place) {
+        for c in cs {
+            let own = shift[c];
+            if let Some(c2) = fitted.remove(c) {
+                let moved = c2.shifted(Vec2::new(own[0] + by[0], own[1] + by[1]));
+                form.pcurves.insert(*c, moved);
+            }
+        }
+    }
+    Ok(form)
+}
+
+/// A closed NURBS surface over one turn from `start` along each direction that has one, in its own
+/// parameters there. `None` where the turn cannot be cut out; see [`one_turn`].
+fn turned_net(n: &crate::geom::NurbsSurface, start: [Option<f64>; 2]) -> Option<Rebased> {
+    let (pu, pv) = n.degrees();
+    let (mut ku, mut kv) = (n.knots().0.to_vec(), n.knots().1.to_vec());
+    let (mut nu, mut nv) = n.counts();
+    let mut net = homogeneous(n.control_points(), n.weights());
+    let (du, dv) = n.domain();
+    let at = |s: f64, (a, b): (f64, f64)| s - (b - a) * ((s - a) / (b - a)).floor();
+    let moved = |knots: Vec<f64>, s: f64| -> Vec<f64> {
+        let (first, last) = (knots[0], knots[knots.len() - 1]);
+        knots
+            .iter()
+            .map(|&k| match k {
+                k if k == first => s,
+                k if k == last => s + (last - first),
+                k => k + (s - first),
+            })
+            .collect()
+    };
+    if let Some(s) = start[0] {
+        let rows: Vec<Row> = (0..nv)
+            .map(|j| (0..nu).map(|i| net[i * nv + j]).collect())
+            .collect();
+        let (k, rows) = one_turn(pu, &ku, &rows, du, at(s, du))?;
+        nu = rows[0].len();
+        net = (0..nu * nv).map(|x| rows[x % nv][x / nv]).collect();
+        ku = moved(k, s);
+    }
+    if let Some(s) = start[1] {
+        let rows: Vec<Row> = net.chunks(nv).map(<[[f64; 4]]>::to_vec).collect();
+        let (k, rows) = one_turn(pv, &kv, &rows, dv, at(s, dv))?;
+        nv = rows[0].len();
+        net = rows.concat();
+        kv = moved(k, s);
+    }
+    Some(Rebased::Nurbs {
+        degrees: (pu, pv),
+        knots: (ku, kv),
+        counts: (nu, nv),
+        ctrl: cartesian(&net),
+        weights: n.weights().map(|_| net.iter().map(|q| q[3]).collect()),
+    })
 }
 
 /// How a STEP file is written. The default writes each edge with its pcurve on every face that uses
@@ -179,6 +537,8 @@ pub(super) struct Writer {
     fans: HashMap<CoedgeId, usize>,
     /// Each face's surface, written before any of its edges so their pcurves can name it.
     surfaces: HashMap<FaceId, usize>,
+    /// How each face is written on its surface, where that has ends the kernel's does not.
+    forms: HashMap<FaceId, std::rc::Rc<FaceForm>>,
     context_2d: Option<usize>,
     /// The faces in the order their `ADVANCED_FACE`s were written.
     faces: Vec<FaceId>,
@@ -205,9 +565,19 @@ impl Writer {
             edges: HashMap::new(),
             fans: HashMap::new(),
             surfaces: HashMap::new(),
+            forms: HashMap::new(),
             context_2d: None,
             faces: Vec::new(),
         }
+    }
+
+    fn form(&mut self, b: &Brep, f: FaceId) -> Result<std::rc::Rc<FaceForm>> {
+        if let Some(form) = self.forms.get(&f) {
+            return Ok(std::rc::Rc::clone(form));
+        }
+        let form = std::rc::Rc::new(face_form(b, f)?);
+        self.forms.insert(f, std::rc::Rc::clone(&form));
+        Ok(form)
     }
 
     fn add(&mut self, body: impl AsRef<str>) -> usize {
@@ -496,7 +866,8 @@ impl Writer {
 
     /// Coedge `c`'s pcurve on its face's surface, when [`pcurve`] finds one.
     fn pcurve(&mut self, b: &Brep, c: CoedgeId) -> Result<Option<usize>> {
-        let Some(c2) = pcurve(b, c) else {
+        let form = self.form(b, b.coedge_face(c))?;
+        let Some(c2) = form.pcurve(b, c) else {
             return Ok(None);
         };
         if let Curve2::Line { dir, .. } = &c2
@@ -525,7 +896,40 @@ impl Writer {
         if let Some(&id) = self.surfaces.get(&f) {
             return Ok(id);
         }
-        let id = self.surface(&b.face(f).surface)?;
+        let form = self.form(b, f)?;
+        let id = match &form.surface {
+            None => self.surface(&b.face(f).surface)?,
+            Some(Rebased::Extrusion { curve, dir }) => {
+                let c = self.spline_curve(curve)?;
+                let d = self.direction(*dir);
+                let v = self.add(format!("VECTOR('',#{d},1.)"));
+                self.add(format!("SURFACE_OF_LINEAR_EXTRUSION('',#{c},#{v})"))
+            }
+            Some(Rebased::Revolution {
+                curve,
+                origin,
+                axis,
+            }) => {
+                let c = self.spline_curve(curve)?;
+                let o = self.point(*origin)?;
+                let d = self.direction(*axis);
+                let ax = self.add(format!("AXIS1_PLACEMENT('',#{o},#{d})"));
+                self.add(format!("SURFACE_OF_REVOLUTION('',#{c},#{ax})"))
+            }
+            Some(Rebased::Nurbs {
+                degrees,
+                knots,
+                counts,
+                ctrl,
+                weights,
+            }) => self.spline_surface(
+                *degrees,
+                (&knots.0, &knots.1),
+                *counts,
+                ctrl,
+                weights.as_deref(),
+            )?,
+        };
         self.surfaces.insert(f, id);
         Ok(id)
     }
@@ -682,6 +1086,16 @@ impl Writer {
     /// the vertices and edges there.
     fn solid(&mut self, b: &Brep, s: SolidId) -> Result<Vec<usize>> {
         for f in b.solid_faces(s) {
+            for &lp in &b.face(f).loops {
+                for &c in &b.lp(lp).coedges {
+                    let edge = b.edge(b.coedge(c).edge);
+                    if let Some(curve) = &edge.curve {
+                        goes_round_once(curve, edge.range)?;
+                    }
+                }
+            }
+        }
+        for f in b.solid_faces(s) {
             self.face_surface(b, f)?;
         }
         let shells = b.solid(s).shells.clone();
@@ -745,6 +1159,74 @@ pub(super) enum Curve2 {
         ctrl: Vec<Vec2>,
         weights: Option<Vec<f64>>,
     },
+}
+
+impl Curve2 {
+    /// Its points at edge parameters `ts`.
+    pub(super) fn track(&self, ts: &[f64]) -> Vec<Vec2> {
+        match self {
+            Curve2::Line { origin, dir } => ts.iter().map(|&t| *origin + *dir * t).collect(),
+            Curve2::Conic {
+                center,
+                x,
+                major,
+                minor,
+            } => ts
+                .iter()
+                .map(|&t| *center + *x * (major * t.cos()) + x.perp() * (minor * t.sin()))
+                .collect(),
+            Curve2::Spline {
+                degree,
+                knots,
+                ctrl,
+                weights,
+            } => {
+                let pts: Vec<Vec3> = ctrl.iter().map(|p| Vec3::new(p.x, p.y, 0.0)).collect();
+                match crate::geom::NurbsCurve::new(*degree, knots.clone(), pts, weights.clone()) {
+                    Ok(c) => ts
+                        .iter()
+                        .map(|&t| {
+                            let p = c.eval(t);
+                            Vec2::new(p.x, p.y)
+                        })
+                        .collect(),
+                    Err(_) => Vec::new(),
+                }
+            }
+        }
+    }
+
+    /// The curve moved by `by` in the parameter plane.
+    pub(super) fn shifted(self, by: Vec2) -> Curve2 {
+        match self {
+            Curve2::Line { origin, dir } => Curve2::Line {
+                origin: origin + by,
+                dir,
+            },
+            Curve2::Conic {
+                center,
+                x,
+                major,
+                minor,
+            } => Curve2::Conic {
+                center: center + by,
+                x,
+                major,
+                minor,
+            },
+            Curve2::Spline {
+                degree,
+                knots,
+                ctrl,
+                weights,
+            } => Curve2::Spline {
+                degree,
+                knots,
+                ctrl: ctrl.into_iter().map(|p| p + by).collect(),
+                weights,
+            },
+        }
+    }
 }
 
 /// How a surface's STEP parameters follow from the kernel's: `(s·u, k·v)`. A cone's STEP form
@@ -1454,5 +1936,60 @@ mod tests {
             let s = real(x);
             assert_eq!(s.parse::<f64>().unwrap(), x);
         }
+    }
+
+    #[test]
+    fn an_edge_that_goes_round_its_curve_more_than_once_is_refused() {
+        let ring: Vec<Vec3> = (0..6)
+            .map(|i| {
+                let a = std::f64::consts::TAU * i as f64 / 6.0;
+                Vec3::new(4.0 * a.cos(), 4.0 * a.sin(), 0.0)
+            })
+            .collect();
+        let curve = Curve::BSpline(BSpline::periodic_uniform(3, &ring).unwrap());
+        assert_eq!(curve.period(), Some(6.0));
+        assert!(goes_round_once(&curve, (2.5, 8.5)).is_ok());
+        assert!(matches!(
+            goes_round_once(&curve, (2.5, 8.6)),
+            Err(Error::InvalidInput(_))
+        ));
+    }
+
+    /// Two rows of a quadratic, each the unit circle's four quarter arcs, the second's last arc run
+    /// at another rate so that it ends on weight `end`: their turns meet at scales 1 and `end`.
+    fn circle_rows(end: f64) -> (Vec<f64>, Vec<Row>) {
+        let w = std::f64::consts::FRAC_1_SQRT_2;
+        let square = [
+            (1.0, 0.0),
+            (1.0, 1.0),
+            (0.0, 1.0),
+            (-1.0, 1.0),
+            (-1.0, 0.0),
+            (-1.0, -1.0),
+            (0.0, -1.0),
+            (1.0, -1.0),
+            (1.0, 0.0),
+        ];
+        let ctrl: Vec<Point3> = square.iter().map(|&(x, y)| Vec3::new(x, y, 0.0)).collect();
+        let plain = [1.0, w, 1.0, w, 1.0, w, 1.0, w, 1.0];
+        let mut turned = plain;
+        turned[7] = w * end.sqrt();
+        turned[8] = end;
+        let knots = vec![0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 4.0];
+        let rows = vec![
+            homogeneous(&ctrl, Some(&plain)),
+            homogeneous(&ctrl, Some(&turned)),
+        ];
+        (knots, rows)
+    }
+
+    #[test]
+    fn rows_that_meet_at_scales_too_far_apart_are_refused() {
+        // The net reaches √2 from the origin. Scales a billionth apart move it by 1.4e-9, inside a
+        // tenth of the tolerance; a quarter apart, far outside.
+        let (knots, rows) = circle_rows(1.0 + 1e-9);
+        assert!(one_turn(2, &knots, &rows, (0.0, 4.0), 0.5).is_some());
+        let (knots, rows) = circle_rows(1.25);
+        assert!(one_turn(2, &knots, &rows, (0.0, 4.0), 0.5).is_none());
     }
 }

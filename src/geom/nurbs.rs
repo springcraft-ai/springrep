@@ -571,6 +571,10 @@ pub(crate) fn piece(
     pts: &[[f64; 4]],
     (t0, t1): (f64, f64),
 ) -> (Vec<f64>, Vec<[f64; 4]>) {
+    debug_assert!(
+        t0 < t1 && t0 >= knots[p] && t1 <= knots[knots.len() - 1 - p],
+        "{t0}..{t1} is not a stretch of the curve's domain"
+    );
     let (mut knots, mut pts) = (knots.to_vec(), pts.to_vec());
     for t in [t1, t0] {
         let have = knots.iter().filter(|&&k| k == t).count();

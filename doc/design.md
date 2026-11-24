@@ -2010,6 +2010,23 @@ solid never pinches.
   pcurve at all: every edge, a seam's too, is its curve in space alone, which the standard allows,
   and the file is smaller and written faster for a reader that works out each edge's course on its
   faces itself. The reader here reads either form as the same solid.
+- **Closed splines have ends in STEP.** The kernel wraps a closed spline's parameter, and the
+  parameter of an extrusion or a revolution of one along it and of a closed NURBS surface; STEP
+  wraps only a conic's parameter and the angles of its elementary surfaces and of a surface of
+  revolution, and gives every spline two ends. So everything is written inside the ends of what it
+  lies on. An edge that runs past the end of its closed spline's turn is written on the spline of
+  one turn from the edge's start; a face's coedges' pcurves are moved by whole periods so each loop
+  meets end to end within one turn of its surface, and a face that runs past the end of that turn
+  is written on its surface from where the face starts: the extrusion or the revolution of its
+  curve's turn from there, or the NURBS surface's net over the turn from there. A turn from
+  anywhere is cut by knot insertion out of two turns of the spline, clamped at the ends of its own
+  turn (a file's closed spline need not be) and with the second turn's homogeneous points scaled to
+  meet the first's, which leaves the curve as it was however its end weights differ; so the turn
+  keeps the kernel's parameters there, and the pcurves keep theirs. A NURBS surface's rows each
+  take their own scale, which leaves it within a tenth of the tolerance where the scales differ by
+  little; a face across the join of one whose rows meet at scales further apart has no exact form
+  from where it starts, and is an explicit error. So is an edge round its closed curve more than
+  once, or a face whose loop winds round its surface with no seam, which the kernel never makes.
 - **Writing an assembly** ([`write_assembly`](../src/step/write.rs)) puts several parts in one file.
   Each part is a product with its own advanced B-rep, written once however often it is used, and
   each instance is a use of its part's product under the assembly's, placed by its motion. A part
