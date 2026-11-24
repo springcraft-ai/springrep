@@ -1,6 +1,8 @@
 //! Intersection curves of surface pairs with no closed form: a cubic B-spline through points
 //! refined onto both surfaces, with enough points that the spline stays within tolerance of both.
 
+use std::collections::HashMap;
+
 use super::{BSpline, Surface, bspline::chord_params};
 use crate::{
     Error, Result,
@@ -537,12 +539,23 @@ impl IntersectionCurve {
         ))
     }
 
-    /// The curve through `sample(s)` for `s` over `range`, where `sample` gives points exactly on
-    /// both surfaces (a closed form of the intersection): points are added at the middle parameter
-    /// of every span that strays from either surface by more than half the tolerance, so nothing
-    /// is refined numerically and a touching point inside the range is never lost to a step.
+    /// The curve through `sample(s, _)` for `s` over `range`, where `sample` gives points exactly
+    /// on both surfaces (a closed form of the intersection), so nothing is refined numerically
+    /// and a touching point inside the range is never lost to a step. `sample` is also given
+    /// the point of the curve so far at the same fraction of its span, where there is one: a
+    /// point near the one asked for, which it may start from.
+    ///
+    /// The curve interpolates `sample` at its spans' ends, and a quarter, a half and three
+    /// quarters of the way along every span it lies within half the tolerance of both surfaces
+    /// and of `sample`'s point there. It is found by adding points until that holds: a span is
+    /// parted in two, four or eight, by how far it strays, and so are the spans beside it, a
+    /// level less each span out, to keep the spacing even. A cubic spline's error falls as the
+    /// fourth power of its spans (C. A. Hall and W. W. Meyer, "Optimal error bounds for cubic
+    /// spline interpolation", J. Approximation Theory 16, 1976). Every span is tried again on
+    /// the curve returned, since an interpolant through new points moves everywhere; but no
+    /// point is sampled twice, a span's three points being the ones it is parted at.
     pub fn fit_sampled(
-        sample: &dyn Fn(f64) -> Point3,
+        sample: &dyn Fn(f64, Option<Point3>) -> Point3,
         range: (f64, f64),
         a: Surface,
         b: Surface,
@@ -556,11 +569,15 @@ impl IntersectionCurve {
             ss.push(range.1);
         }
         let gap = |p: Point3| distance_to(&a, p).max(distance_to(&b, p));
+        let mut known: HashMap<u64, Point3> = HashMap::new();
+        let mut exact = |s: f64, near: Option<Point3>| {
+            *known.entry(s.to_bits()).or_insert_with(|| sample(s, near))
+        };
         for _ in 0..24 {
             let mut pts: Vec<Point3> = Vec::with_capacity(ss.len());
             let mut keep: Vec<f64> = Vec::with_capacity(ss.len());
             for &s in &ss {
-                let p = sample(s);
+                let p = exact(s, None);
                 if pts.last().is_none_or(|q: &Point3| q.dist(p) > tol::LINEAR) {
                     pts.push(p);
                     keep.push(s);
@@ -575,7 +592,7 @@ impl IntersectionCurve {
                 // The end point merged into its neighbour: the end is the one kept.
                 let n = keep.len();
                 keep[n - 1] = range.1;
-                pts[n - 1] = sample(range.1);
+                pts[n - 1] = exact(range.1, None);
             }
             if pts.len() < if closed { 3 } else { 2 } {
                 return Err(Error::Numerical(SHORT_BRANCH.into()));
@@ -599,12 +616,12 @@ impl IntersectionCurve {
                     [0.25, 0.5, 0.75]
                         .iter()
                         .map(|&f| {
-                            let off = gap(approx.eval(lo + (hi - lo) * f));
+                            let on = approx.eval(lo + (hi - lo) * f);
                             // Where the surfaces nearly touch, a point within the tolerance of
                             // both can still lie far along the band from the curve: the closed
                             // form is the curve, so the spline must pass within it of the form.
-                            let exact = sample(s0 + (s1 - s0) * f);
-                            off.max(span_distance(&approx, exact, (lo, hi), f))
+                            let exact = exact(s0 + (s1 - s0) * f, Some(on));
+                            gap(on).max(span_distance(&approx, exact, (lo, hi), f))
                         })
                         .fold(0.0, f64::max)
                 })
@@ -615,24 +632,55 @@ impl IntersectionCurve {
                     surfaces: [a, b],
                 });
             }
-            // As in `fit_near`: neighbours of a failing span split with it, so spacing stays even.
-            let near = |i: usize| {
-                [-1isize, 0, 1].iter().any(|&d| {
-                    let k = i as isize + d;
-                    let k = if closed {
-                        Some(k.rem_euclid(n_seg as isize) as usize)
-                    } else {
-                        (0..n_seg as isize).contains(&k).then_some(k as usize)
-                    };
-                    k.is_some_and(|k| err[k] > 0.125 * tol::LINEAR)
-                })
+            let beside = |i: usize, d: isize| {
+                let k = i as isize + d;
+                if closed {
+                    Some(k.rem_euclid(n_seg as isize) as usize)
+                } else {
+                    (0..n_seg as isize).contains(&k).then_some(k as usize)
+                }
             };
-            let mut next = Vec::with_capacity(2 * ss.len());
+            // How many times each span is halved: enough to bring what it strays by, falling
+            // sixteenfold each time, under an eighth of the tolerance. As in `fit_near`, the
+            // spans beside one that is parted are parted with it, so spacing stays even.
+            let wanted: Vec<u32> = err
+                .iter()
+                .map(|&e| {
+                    let over = e / (0.125 * tol::LINEAR);
+                    if over > 1.0 {
+                        ((over.log2() / 4.0).ceil() as u32).clamp(1, 3)
+                    } else {
+                        0
+                    }
+                })
+                .collect();
+            let mut halvings: Vec<u32> = (0..n_seg)
+                .map(|i| {
+                    let near = [-1, 0, 1].into_iter().filter_map(|d| beside(i, d));
+                    near.map(|k| wanted[k]).max().unwrap_or(0)
+                })
+                .collect();
+            loop {
+                let mut grew = false;
+                for i in 0..n_seg {
+                    let near = [-1, 1].into_iter().filter_map(|d| beside(i, d));
+                    let least = near.map(|k| halvings[k]).max().unwrap_or(0);
+                    if halvings[i] + 1 < least {
+                        halvings[i] = least - 1;
+                        grew = true;
+                    }
+                }
+                if !grew {
+                    break;
+                }
+            }
+            let mut next = Vec::with_capacity(4 * ss.len());
             for i in 0..n_seg {
                 next.push(ss[i]);
-                if near(i) {
-                    let hi = if i + 1 < ss.len() { ss[i + 1] } else { range.1 };
-                    next.push(0.5 * (ss[i] + hi));
+                let hi = if i + 1 < ss.len() { ss[i + 1] } else { range.1 };
+                let parts = 1u32 << halvings[i];
+                for k in 1..parts {
+                    next.push(ss[i] + (hi - ss[i]) * (f64::from(k) / f64::from(parts)));
                 }
             }
             if !closed {
@@ -663,6 +711,69 @@ mod tests {
         geom::{Cylinder, Surface},
         math::{Frame, Vec3},
     };
+
+    #[test]
+    fn a_sampled_fit_holds_its_curve_and_both_surfaces_and_samples_no_point_twice() {
+        // Where the cylinder of radius 3 along x pierces the cylinder of radius 5 along z:
+        // (√(25 − 9 cos² t), 3 cos t, 3 sin t), exactly on both.
+        let a = Surface::Cylinder(Cylinder {
+            frame: Frame::WORLD,
+            radius: 5.0,
+        });
+        let b = Surface::Cylinder(Cylinder {
+            frame: Frame::new(Vec3::ZERO, Vec3::X, Vec3::Y).unwrap(),
+            radius: 3.0,
+        });
+        let form = |t: f64| {
+            let (y, z) = (3.0 * t.cos(), 3.0 * t.sin());
+            Vec3::new((25.0 - y * y).sqrt(), y, z)
+        };
+        let asked = std::cell::RefCell::new(Vec::new());
+        let sample = |t: f64, near: Option<Point3>| {
+            asked.borrow_mut().push((t, near));
+            form(t)
+        };
+        let range = (0.2, 2.9);
+        let c =
+            IntersectionCurve::fit_sampled(&sample, range, a.clone(), b.clone(), false, 4).unwrap();
+        let asked = asked.into_inner();
+        let mut at: Vec<u64> = asked.iter().map(|x| x.0.to_bits()).collect();
+        at.sort_unstable();
+        at.dedup();
+        assert_eq!(at.len(), asked.len(), "a point sampled twice");
+        // Every point given beside a sample is the curve's own at that fraction of its span,
+        // before the curve is held to the tolerance: near the form's, a little along from it.
+        assert!(asked.iter().any(|x| x.1.is_some()));
+        for (t, near) in &asked {
+            assert!(near.is_none_or(|q| q.dist(form(*t)) <= 0.5));
+        }
+        // The curve ends on the form's ends and passes through its points at the knots; a
+        // quarter, a half and three quarters along each span it is within half the tolerance
+        // of both surfaces and of the form, and everywhere between within the tolerance.
+        let knots = c.approx.knots().to_vec();
+        let (t0, t1) = c.approx.domain();
+        assert!(c.approx.eval(t0).dist(form(range.0)) <= 1e-12);
+        assert!(c.approx.eval(t1).dist(form(range.1)) <= 1e-12);
+        let off_form = |p: Vec3| p.dist(form(p.z.atan2(p.y)));
+        let spans: Vec<(f64, f64)> = knots
+            .windows(2)
+            .filter(|w| w[1] > w[0])
+            .map(|w| (w[0], w[1]))
+            .collect();
+        assert!(spans.len() >= 8);
+        for (lo, hi) in spans {
+            for k in 0..=32 {
+                let p = c.approx.eval(lo + (hi - lo) * f64::from(k) / 32.0);
+                let within = if k % 8 == 0 {
+                    0.5 * tol::LINEAR
+                } else {
+                    tol::LINEAR
+                };
+                assert!(distance_to(&a, p) <= within && distance_to(&b, p) <= within);
+                assert!(off_form(p) <= within, "{} off the form", off_form(p));
+            }
+        }
+    }
 
     #[test]
     fn crossing_cylinders_fit_within_tolerance() {

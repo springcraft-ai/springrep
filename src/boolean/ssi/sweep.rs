@@ -192,7 +192,14 @@ impl Out {
         a: &Surface,
         b: &Surface,
     ) -> Result<()> {
-        let c = IntersectionCurve::fit_sampled(sample, range, a.clone(), b.clone(), closed, 24)?;
+        let c = IntersectionCurve::fit_sampled(
+            &|s, _| sample(s),
+            range,
+            a.clone(),
+            b.clone(),
+            closed,
+            24,
+        )?;
         let range = c.approx.domain();
         self.curves.push(SsiCurve {
             curve: Curve::Intersection(Box::new(c)),

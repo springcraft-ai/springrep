@@ -354,7 +354,7 @@ fn crossing(lane: &Lane, other: &Surface, a: Point3, b: Point3) -> Result<Run, S
     let on_contact = |q: Vec2| q.x.abs() <= tol::LINEAR || (q.x - across).abs() <= tol::LINEAR;
     let cornered = on_contact(fa) && on_contact(fb) && (fa.x - fb.x).abs() > 0.5 * across;
     let lost = Cell::new(false);
-    let sample = |s: f64| -> Point3 {
+    let sample = |s: f64, near: Option<Point3>| -> Point3 {
         if s <= 0.0 {
             return a;
         }
@@ -380,7 +380,18 @@ fn crossing(lane: &Lane, other: &Surface, a: Point3, b: Point3) -> Result<Run, S
                     hi = hi.min(t0.max(t1));
                 }
             }
-            root(gap, lo, hi)
+            // The one crossing in the box is bracketed first about a point known to be near it,
+            // as far out as that point is off the other surface, and then further.
+            let beside = near.filter(|_| lo <= hi).and_then(|q| {
+                let u = (flat(q) - base).dot(square).clamp(lo, hi);
+                let mut pad = 4.0 * gap(u).abs() + 1e-12 * length;
+                (0..3).find_map(|_| {
+                    let found = root(gap, (u - pad).max(lo), (u + pad).min(hi));
+                    pad *= 16.0;
+                    found
+                })
+            });
+            beside.or_else(|| root(gap, lo, hi))
         });
         // A curve that bows out of the box, or stops inside the strip, is taken at the nearest
         // change of side.
@@ -397,7 +408,7 @@ fn crossing(lane: &Lane, other: &Surface, a: Point3, b: Point3) -> Result<Run, S
             a.lerp(b, s)
         })
     };
-    let middle = sample(0.5);
+    let middle = sample(0.5, None);
     if lost.get() {
         return Err("a blend whose end no section of it crosses".into());
     }

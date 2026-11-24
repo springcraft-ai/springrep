@@ -174,8 +174,15 @@ pub(super) fn plane_cone(p: &Plane, c: &Cone, region: &Aabb) -> Option<Ssi> {
             None => {
                 let (sp, sc) = (Surface::Plane(p.clone()), Surface::Cone(c.clone()));
                 let sample = |s: f64| at(t0 + (t1 - t0) * s);
-                let fit =
-                    IntersectionCurve::fit_sampled(&sample, (0.0, 1.0), sp, sc, false, 32).ok()?;
+                let fit = IntersectionCurve::fit_sampled(
+                    &|s, _| sample(s),
+                    (0.0, 1.0),
+                    sp,
+                    sc,
+                    false,
+                    32,
+                )
+                .ok()?;
                 let range = fit.approx.domain();
                 (Curve::Intersection(Box::new(fit)), range)
             }

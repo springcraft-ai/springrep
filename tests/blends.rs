@@ -2040,6 +2040,28 @@ fn a_foot_round_whose_contact_passes_through_the_pole_of_its_ball_is_built() {
 }
 
 #[test]
+fn rim_rounds_whose_crease_leaves_no_room_between_its_ends_are_built_or_refused() {
+    // A hole 28.5 square at (−6, −2) through the ball, its rim rounded at 5.92: at one corner a
+    // line across the lower round's strip leaves the box between the crease's two ends at the
+    // very point it enters it, within rounding, and there is no stretch of it to look along.
+    let ball = sphere(&at_z(0.0), BALL, "ball").unwrap();
+    let foot = Profile::rect(Vec2::new(-6.0, -2.0), POST.x, POST.y);
+    let post = extrude(&foot, &at_z(0.0), TOP, "post").unwrap();
+    let body = difference(&ball, &post).unwrap();
+    let pairs: Vec<(&str, &str)> = WALLS.iter().map(|w| (w.0, "ball.skin")).collect();
+    match fillet(&body, &pairs, 5.92, "rim") {
+        Ok(b) => assert!(check::check(&b).is_empty()),
+        Err(Error::Unsupported(why)) => {
+            assert!(
+                why.starts_with("fillets that cross past the corner at"),
+                "{why}"
+            )
+        }
+        Err(other) => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn fillets_at_the_foot_of_a_leaning_wall_and_an_upright_one_cross_past_their_corner() {
     // A post on a plate, 20 square at its foot, whose wall `lean` leans in by 0.1 for each 1 up
     // while its other walls stand upright, with the feet of `lean` and of the upright wall

@@ -934,9 +934,13 @@ the branches pass each other, as far apart as the chord the margin leaves (6e-4 
 same reason two cylinders are one radius whose axes cross (the closed form with two ellipses) only
 while the radii's and the axes' gaps sum to `LINEAR`: the ellipses, about the axes' midpoint at the
 mean radius, then lie within half `LINEAR` of each. The points come from the closed form and are
-fitted with points added at middle parameters until the spline lies within half `LINEAR` of both
-surfaces and of the closed form itself (`IntersectionCurve::fit_sampled`), so nothing is refined
-numerically and no step can lose a touching point. Within the tolerance of both surfaces is not
+fitted with points added until, a quarter, a half and three quarters along every span, the spline
+lies within half `LINEAR` of both surfaces and of the closed form itself
+(`IntersectionCurve::fit_sampled`), so nothing is refined numerically and no step can lose a
+touching point. A span that strays is parted in two, four or eight by how far it strays, a
+cubic's error falling as the fourth power of its spans, and every span is tried again on the
+spline returned; a span's three points are the ones it is parted at, so no point of the closed
+form is worked out twice. Within the tolerance of both surfaces is not
 enough where they cross at a shallow angle: a fillet's tube against a copy's corner ball 1e-3 mm off
 its axis crosses it at 1e-4 rad, and a spline 5.8e-5 mm along that band from the loop still lay
 within `LINEAR` of both, so the vertices placed on the exact loop fell off it and the loop was
