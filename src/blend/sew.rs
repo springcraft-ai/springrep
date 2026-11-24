@@ -15,7 +15,7 @@ use std::collections::{BTreeSet, HashMap};
 use super::{Ball, Picked, SIDES, run::Beyond};
 use crate::{
     boolean::{
-        csi::{curve_distance, signed_distance},
+        csi::{curve_curve, curve_distance, signed_distance},
         same_domain, unify,
     },
     check,
@@ -253,6 +253,17 @@ fn sewn_parts(
             dropped.extend(bk.dropped.iter().copied());
         }
     }
+
+    swallow(
+        body,
+        picked,
+        tools,
+        &parts,
+        &picked_of,
+        &mut gone,
+        &mut near,
+        &mut dropped,
+    );
 
     let mut out = Brep::new();
     let mut vmap: Vec<Option<VertexId>> = vec![None; body.vertex_ids().count()];
@@ -509,6 +520,11 @@ fn sewn_parts(
 
     // The body's faces, each a face of the input (`Some(0)` to the checker) or one the blend
     // changed.
+    let kept: BTreeSet<EdgeId> = body
+        .edge_ids()
+        .filter(|&e| ranges[e.index()] == body.edge(e).range)
+        .filter_map(|e| emap[e.index()])
+        .collect();
     let mut fmap: Vec<Option<FaceId>> = Vec::with_capacity(body.face_count());
     let mut sides: Vec<Option<usize>> = Vec::new();
     for f in body.face_ids() {
@@ -547,7 +563,17 @@ fn sewn_parts(
         let nf = out.add_face(face.surface.clone(), face.reversed, face.names.clone());
         fmap.push(Some(nf));
         for specs in loops {
-            out.add_loop(nf, specs);
+            let lp = out.add_loop(nf, specs);
+            if touched {
+                out.continue_loop(lp);
+            }
+        }
+        if touched && let Some(at) = crossed(&out, nf, &|x| !kept.contains(&x)) {
+            return Err(format!(
+                "a blend whose edge on a face crosses another edge of that face at ({:.3}, {:.3}, \
+                 {:.3})",
+                at.x, at.y, at.z
+            ));
         }
         sides.push((!touched).then_some(0));
     }
@@ -638,6 +664,151 @@ fn sewn_parts(
         return unify(&out).map_err(|e| format!("merging the sewn faces: {e}"));
     }
     Ok(out)
+}
+
+/// Where an edge of face `f` that is `fresh`, one the blend made or cut back, meets another edge
+/// of the face away from a vertex the two share. A contact curve that reaches over an edge of
+/// its face (a ball's seam beside the post) would leave the face's boundary crossing itself,
+/// which the faces' integrals do not show. At a pole a face may touch itself: a contact through
+/// the pole meets the seam's end there and crosses nothing.
+fn crossed(out: &Brep, f: FaceId, fresh: &dyn Fn(EdgeId) -> bool) -> Option<Point3> {
+    let mut edges: Vec<EdgeId> = Vec::new();
+    let mut poles: Vec<Point3> = Vec::new();
+    for &lp in &out.face(f).loops {
+        for &c in &out.lp(lp).coedges {
+            let e = out.coedge(c).edge;
+            if out.edge(e).curve.is_none() {
+                poles.push(out.vertex(out.edge(e).start).point);
+            } else if !edges.contains(&e) {
+                edges.push(e);
+            }
+        }
+    }
+    let is_fresh: Vec<bool> = edges.iter().map(|&e| fresh(e)).collect();
+    for (i, &a) in edges.iter().enumerate() {
+        for (j, &b) in edges.iter().enumerate().skip(i + 1) {
+            if !is_fresh[i] && !is_fresh[j] {
+                continue;
+            }
+            let (ea, eb) = (out.edge(a), out.edge(b));
+            let (Some(ca), Some(cb)) = (&ea.curve, &eb.curve) else {
+                continue;
+            };
+            // Two edges that leave a vertex tangent to each other, as a blend's end and the edge
+            // of the face it touches do, run within the tolerance of each other for a stretch,
+            // and are found to meet anywhere along it.
+            let shared = |p: Point3| {
+                [ea.start, ea.end].iter().any(|v| {
+                    let at = out.vertex(*v).point;
+                    let (from, to) = (ca.project(at, ea.range.0, ea.range.1), {
+                        ca.project(p, ea.range.0, ea.range.1)
+                    });
+                    [eb.start, eb.end].contains(v)
+                        && (1..=4).all(|k| {
+                            let q = ca.eval(from + (to - from) * k as f64 / 4.0);
+                            curve_distance(cb, eb.range, q).0 <= 2.0 * tol::LINEAR
+                        })
+                })
+            };
+            let at_pole = |p: Point3| poles.iter().any(|q| q.dist(p) <= tol::LINEAR);
+            let hits = curve_curve(ca, ea.range, cb, eb.range);
+            if let Some(p) = hits.into_iter().find(|&p| !shared(p) && !at_pole(p)) {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// The edges that lie wholly under the blend where they leave a picked edge's end `v` along the
+/// section there: an edge in the plane through `v` square to the picked edges, on which the next
+/// vertex of the blend lies past its far end. That stretch of the plane's cut of the face, from
+/// `v` to the blend's vertex, is the section's own foot on the face, so the edge, its far vertex
+/// and a pole there go with the blend (a ball's seam from a wall's foot to the pole, where the
+/// round reaches over the pole).
+#[allow(clippy::too_many_arguments)]
+fn swallow(
+    body: &Brep,
+    picked: &[Picked],
+    tools: &[Option<Brep>],
+    parts: &[Parts],
+    picked_of: &HashMap<EdgeId, usize>,
+    gone: &mut BTreeSet<VertexId>,
+    near: &mut HashMap<VertexId, BTreeSet<usize>>,
+    dropped: &mut BTreeSet<EdgeId>,
+) {
+    let tips = |i: usize| {
+        let tool = tools[i].iter();
+        tool.flat_map(move |tool| {
+            parts[i].uses.iter().flat_map(move |&(e, _)| {
+                let edge = tool.edge(e);
+                [edge.start, edge.end].map(|v| tool.vertex(v).point)
+            })
+        })
+    };
+    let mut under: Vec<(EdgeId, VertexId, VertexId)> = Vec::new();
+    for e in body.edge_ids() {
+        if picked_of.contains_key(&e) || dropped.contains(&e) {
+            continue;
+        }
+        let edge = body.edge(e);
+        let Some(curve) = &edge.curve else { continue };
+        let (k, v, far) = match (gone.contains(&edge.start), gone.contains(&edge.end)) {
+            (true, false) => (0, edge.start, edge.end),
+            (false, true) => (1, edge.end, edge.start),
+            _ => continue,
+        };
+        let span = edge.range.1 - edge.range.0;
+        // Past the far end, and nearer it than the end at `v` round a circle.
+        let more = match curve {
+            Curve::Line(_) => 1e3 * span.max(1.0),
+            Curve::Circle(_) => 0.5 * (std::f64::consts::TAU - span),
+            _ => continue,
+        };
+        let (from, past) = if k == 0 {
+            (edge.range.0, (edge.range.1, edge.range.1 + more))
+        } else {
+            (edge.range.1, (edge.range.0 - more, edge.range.0))
+        };
+        let corner = body.vertex(v).point;
+        let Some(along) = near[&v]
+            .iter()
+            .map(|&i| super::leaving(body, picked[i].edge, v))
+            .collect::<Option<Vec<Vec3>>>()
+        else {
+            continue;
+        };
+        let on_section = |p: Point3| {
+            along
+                .iter()
+                .all(|d| (p - corner).dot(*d).abs() <= tol::LINEAR)
+        };
+        let hit = |range: (f64, f64)| {
+            near[&v].iter().flat_map(|&i| tips(i)).find_map(|p| {
+                let (d, t) = curve_distance(curve, range, p);
+                (d <= tol::LINEAR && p.dist(corner) > tol::LINEAR).then_some(t)
+            })
+        };
+        if hit(edge.range).is_some() {
+            continue;
+        }
+        let Some(t) = hit(past) else { continue };
+        if (1..=8).all(|j| on_section(curve.eval(from + (t - from) * j as f64 / 8.0))) {
+            under.push((e, v, far));
+        }
+    }
+    for (e, v, far) in under {
+        dropped.insert(e);
+        gone.insert(far);
+        let by = near[&v].clone();
+        near.entry(far).or_default().extend(by);
+        for x in body.edge_ids() {
+            let edge = body.edge(x);
+            if edge.curve.is_none() && edge.start == far {
+                dropped.insert(x);
+            }
+        }
+    }
 }
 
 /// The sphere patch closing a corner where the pieces `at` stop short: bounded by each one's end

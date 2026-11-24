@@ -1155,9 +1155,9 @@ Each piece ends where its edge does, in one of ten ways:
   corners of: the two surfaces cross a second time through the far end, where they touch, and
   that second curve lies outside the box. Two rounds that come to the edge within 1.5e-7 of each
   other share one corner there, the point between the two, which lies on both surfaces since
-  each is tangent to its wall; other blends do so only within the tolerance. On a post 5 by 3 off the middle of a ball, rounded at
-  0.5 to 12, the solid holds the volume and area worked by hand to 8e-12, each corner's volume
-  being worked two ways that agree to 1e-10.
+  each is tangent to its wall; other blends do so only within the tolerance. On a post 5 by 3
+  off the middle of a ball, rounded at 0.5 to 12, the solid holds the volume and area worked by
+  hand to 8e-12, each corner's volume being worked two ways that agree to 1e-10.
 
 Where every piece ends square on its own section, on one plane (another face's, or a mitre's
 mirror) or at such a corner, no tool is made and nothing is cut: each piece's section is swept a
@@ -1168,6 +1168,15 @@ of a torus or a cone it is held on both surfaces as a crease is. These faces are
 tools' are. A square post's four mitred foot rounds on a plate take 0.3 ms this way against 3.8
 cut, and on a ball 7.4 ms against 26; what the ball's still take is the sewn solid's check and
 the merging of the two halves of a round the ball's seam parts.
+
+An edge of the body that leaves the joint between two pieces along their end section there, and
+stops short of the contact curve, lies wholly under the blend: a ball's seam from the foot of a
+wall to the pole, where the blend reaches over the pole. It goes with the blend, and so does the
+pole. A point just past a pole lies half a turn of longitude from one just short of it, so no
+hint places the contact curves' parameters there: each rebuilt loop's projected coedges are
+continued one from the next round the loop instead. A blend's edge on a face that would cross
+another edge of that face away from a vertex the two share, as a contact reaching over a seam
+its own edge does not meet, is refused: the face's boundary would cross itself.
 - **Through into air.** Two convex pieces sharing one face, at a vertex of three faces where each
   edge runs on past the vertex through the other's wall into air (a tower's rim where a square side
   meets a leaning cut), each run past the vertex and clear of that wall. Cutting both leaves the
@@ -1316,8 +1325,9 @@ What the region form cannot reach comes back as `Error::Unsupported`, never as a
   convex corner of planes, or where a face other than a plane, cylinder or cone meets it;
 - blends that cross at a corner whose faces cannot be sewn (the error names the corner and why):
   beside a piece that must be cut; blends so wide that their contacts on the shared face pass
-  without meeting, so the crease has no far end; where the blends take a pole and a stretch of
-  the seam out of the face of the ball they stand on; and the largest rounds of a hole's rim;
+  without meeting, so the crease has no far end; where a blend reaches over an edge of the face
+  it stands on that its own edge does not meet, as a ball's seam beside a post (the error names
+  the point); and the largest rounds of a hole's rim;
 - a blend wider than a face it sits on, including one whose strip would cross onto the next face
   along its edge, such as where its edge runs on, tangent, as a curve other than a line or circle.
 

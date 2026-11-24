@@ -1349,37 +1349,18 @@ impl Foot {
         }
     }
 
-    /// How far from the ball's centre the ray at the elevation `psi` leaves the spandrel, through
-    /// the blend's section.
-    fn far(&self, psi: f64) -> f64 {
-        match self.size {
-            Size::Round(r) => {
-                let off = self.elevations()[2] - psi;
-                let d = BALL + r;
-                d * off.cos() - (r * r - (d * off.sin()).powi(2)).sqrt()
-            }
-            Size::Bevel(_) => {
-                let [w, x, _, _] = self.section(0.0);
-                let [bw, bx, _, _] = self.section(1.0);
-                let run = Vec2::new(bw - w, bx - x);
-                Vec2::new(w, x).cross(run) / Vec2::new(psi.cos(), psi.sin()).cross(run)
-            }
-        }
-    }
-
     fn turn(&self, rho: f64, x: f64) -> f64 {
         (self.stops[1].at(x) / rho).asin() - (self.stops[0].at(x) / rho).asin()
     }
 
-    /// The integral of `f(ρ, x)` over the spandrel, in polar coordinates about the ball's centre:
-    /// each ray enters through the wall or the ball and leaves through the blend's section.
+    /// The integral of `f(ρ, x)` over the spandrel, by lines square to the wall: at the height
+    /// `x` of each point of the blend's section, from the ball out to that point. This holds
+    /// for a wall on either side of the ball's centre.
     fn over_spandrel(&self, f: impl Fn(f64, f64) -> f64) -> f64 {
-        let [wall, edge, ball] = self.elevations();
-        let slice = |psi: f64| {
-            let near = BALL.max(self.a / psi.sin());
-            gauss(near, self.far(psi), |s| f(s * psi.cos(), s * psi.sin()) * s)
-        };
-        gauss(wall, edge, slice) + gauss(edge, ball, slice)
+        gauss(0.0, self.last(), |t| {
+            let [rho, x, _, d_x] = self.section(t);
+            gauss((BALL * BALL - x * x).sqrt(), rho, |q| f(q, x)) * d_x
+        })
     }
 
     fn volume(&self) -> f64 {
@@ -1948,6 +1929,72 @@ fn foot_fillets_of_a_post_longer_than_it_is_wide_cross_past_its_corners() {
     let round = [[0, 1], [1, 2], [2, 3], [3, 0]];
     assert_foot((c, s), Size::Round(4.0), &[0, 1, 2, 3], &all, &round);
     assert_foot((c, s), Size::Bevel(2.5), &[0, 1, 2, 3], &all, &round);
+}
+
+#[test]
+fn foot_blends_that_reach_over_the_pole_of_a_ball_take_it_and_its_seam_with_them() {
+    // A post 8 by 30 at (5, 3): its wall `u_min` stands at x = 1, past the ball's centre from
+    // its own side, and the ball's seam runs from that wall's foot 1 mm on to the pole. A round
+    // of 0.5 stops short of the pole, at x = 0.49; one of 2 touches the ball at x = −0.95, and
+    // the larger ones farther out, so the pole and that stretch of the seam lie under the blend.
+    let (c, s) = (Vec2::new(5.0, 3.0), Vec2::new(8.0, 30.0));
+    let reach = |r: f64| (1.0 - r) * BALL / (BALL + r);
+    assert!(reach(0.5) > 0.0 && reach(2.0) < 0.0);
+    let all = [0, 1, 2, 3].map(|w| under(c, s, w));
+    let round = [[0, 1], [1, 2], [2, 3], [3, 0]];
+    for size in [
+        Size::Round(0.5),
+        Size::Round(2.0),
+        FILLET,
+        Size::Round(12.0),
+        Size::Bevel(2.0),
+        Size::Bevel(5.92),
+    ] {
+        assert_foot((c, s), size, &[0, 1, 2, 3], &all, &round);
+    }
+    // The wall alone, ending on the walls beside it, and with one neighbour.
+    assert_foot((c, s), FILLET, &[3], &[free(c, s, 3)], &[]);
+    let two = [
+        [free(c, s, 3)[0], under(c, s, 3)[1]],
+        [under(c, s, 0)[0], free(c, s, 0)[1]],
+    ];
+    assert_foot((c, s), FILLET, &[3, 0], &two, &[[0, 1]]);
+    // The same post turned a quarter turn, its short wall beside the pole.
+    let (c, s) = (Vec2::new(16.0, 1.0), Vec2::new(30.0, 8.0));
+    let all = [0, 1, 2, 3].map(|w| under(c, s, w));
+    assert_foot((c, s), FILLET, &[0, 1, 2, 3], &all, &round);
+}
+
+#[test]
+fn a_foot_blend_that_reaches_over_a_seam_its_edge_does_not_meet_is_refused_by_name() {
+    // The post 8 by 30 at (5, 16) stands 1 mm beside the ball's seam, which runs along its wall
+    // `v_min` and meets none of its edges. A round of 2 at that wall's foot touches the ball at
+    // y = −0.95, past the seam: its end on the plane of `u_min` crosses the seam at (1, 0), and
+    // the round of `u_max` beside it crosses it again. Sewn as they are, the ball's face would
+    // have the seam running through the hole the rounds leave in it.
+    let (c, s) = (Vec2::new(5.0, 16.0), Vec2::new(8.0, 30.0));
+    for walls in [&[0usize, 1][..], &[0, 1, 2, 3]] {
+        let pairs: Vec<(&str, &str)> = walls.iter().map(|&w| (WALLS[w].0, "ball.skin")).collect();
+        let Err(Error::Unsupported(why)) = fillet(&post_on_ball(c, s), &pairs, 2.0, "foot") else {
+            panic!("rounds over a seam");
+        };
+        assert!(
+            why.contains("crosses another edge of that face at ("),
+            "{why}"
+        );
+        assert!(why.contains(", 0.000, "), "{why}");
+    }
+}
+
+#[test]
+fn a_foot_round_whose_contact_passes_through_the_pole_of_its_ball_is_built() {
+    // The post 8 by 30 at (−6, −2) has its wall `u_max` at x = −2, and a round of 2 there
+    // touches the ball on the plane x = 0, a meridian through the pole: the contact meets the
+    // seam's end at the pole, where a face may touch itself, and crosses nothing.
+    let (c, s) = (Vec2::new(-6.0, -2.0), Vec2::new(8.0, 30.0));
+    let all = [0, 1, 2, 3].map(|w| under(c, s, w));
+    let round = [[0, 1], [1, 2], [2, 3], [3, 0]];
+    assert_foot((c, s), Size::Round(2.0), &[0, 1, 2, 3], &all, &round);
 }
 
 #[test]

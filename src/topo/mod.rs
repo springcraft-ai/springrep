@@ -691,6 +691,61 @@ impl Brep {
         (0..ts.len()).map(|i| uvs[i * per]).collect()
     }
 
+    /// Loop `lp`'s projected coedges each moved by whole periods to start where the coedge before
+    /// it ends, going round from a coedge whose pcurve is exact where there is one. A seed placed
+    /// by nearness to a hint comes out a turn away where the hint lies half a turn off, as a
+    /// point just past a pole does from one just short of it.
+    pub(crate) fn continue_loop(&mut self, lp: LoopId) {
+        let face = self.lp(lp).face;
+        let surface = &self.face(face).surface;
+        let periods = [surface.u_period(), surface.v_period()];
+        if periods == [None, None] {
+            return;
+        }
+        let cs = self.lp(lp).coedges.clone();
+        let n = cs.len();
+        let projected = |c: CoedgeId| matches!(self.coedge(c).pcurve, PCurve::Projected { .. });
+        let first = cs.iter().position(|&c| !projected(c)).unwrap_or(0);
+        let ends = |c: CoedgeId| {
+            let co = self.coedge(c);
+            let (t0, t1) = self.edge(co.edge).range;
+            let uvs = self.coedge_uvs(c, &if co.reversed { [t1, t0] } else { [t0, t1] });
+            (uvs[0], uvs[1])
+        };
+        let mut moves: Vec<(CoedgeId, Vec2)> = Vec::new();
+        let mut at = ends(cs[first]).1;
+        for k in 1..n {
+            let c = cs[(first + k) % n];
+            let (start, end) = ends(c);
+            if !projected(c) {
+                at = end;
+                continue;
+            }
+            let turn = |from: f64, to: f64, period: Option<f64>| match period {
+                Some(p) => ((to - from) / p).round() * p,
+                None => 0.0,
+            };
+            let by = Vec2::new(
+                turn(start.x, at.x, periods[0]),
+                turn(start.y, at.y, periods[1]),
+            );
+            if by != Vec2::ZERO {
+                moves.push((c, by));
+            }
+            at = end + by;
+        }
+        if moves.is_empty() {
+            return;
+        }
+        self.changed();
+        self.memos.0[face.index()] = Arc::default();
+        for (c, by) in moves {
+            if let PCurve::Projected { seed } = &mut self.coedges[c.index()].pcurve {
+                *seed = *seed + by;
+            }
+        }
+    }
+
     /// [`Brep::coedge_uvs`] continued from each point asked for to the next.
     fn coedge_uvs_at(&self, c: CoedgeId, ts: &[f64]) -> Vec<Vec2> {
         let co = self.coedge(c);
