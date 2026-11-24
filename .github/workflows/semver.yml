@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: MIT OR Apache-2.0
 name: Semver
 
 # Checks springrep against its latest release on crates.io. The check takes the release type from

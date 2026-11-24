@@ -2,7 +2,7 @@
 name = "springrep"
 version = "2.1.0"
 edition = "2024"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 description = "An exact boundary-representation geometry kernel, in safe Rust"
 repository = "https://github.com/springcraft-ai/springrep"
 homepage = "https://springcraft-ai.github.io/springrep/"

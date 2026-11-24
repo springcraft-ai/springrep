@@ -60,6 +60,5 @@ do without it.
 
 Unless you explicitly state otherwise, any contribution you intentionally submit for inclusion
 in this repository, as defined in the Apache License, Version 2.0, is licensed under both the
-[MIT licence](../LICENSE) and the
-[Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0), without any
-additional terms or conditions.
+[MIT licence](../LICENSE-MIT) and the [Apache License, Version 2.0](../LICENSE-APACHE), without
+any additional terms or conditions.
