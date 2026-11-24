@@ -925,6 +925,29 @@ fn local_tolerances_are_written_as_the_files_uncertainty_and_read_back() {
 }
 
 #[test]
+fn a_solid_kept_with_local_tolerances_reads_back_as_it_was_written() {
+    // A vertex 0.03 mm off its corner, in a file that states 0.01: healing would move it further
+    // than that, so it is kept where it is. Written, the file states its 0.042 mm tolerance, within
+    // which healing could move it; read back, it is still the solid that was written.
+    let blk = block("b", [0.0, 0.0, 0.0], [10.0, 4.0, 3.0]);
+    let moved = with_vertex_moved(&blk, Vec3::new(0.01, -0.02, 0.02));
+    let imp = read(with_uncertainty(&moved, 0.01).as_bytes(), "imp").unwrap();
+    assert!(imp.rejected.is_empty(), "{:?}", imp.rejected);
+    assert_eq!(imp.tolerant.len(), 1, "{:?}", imp.healed);
+    let back = read(write(&imp.brep, "b").unwrap().as_bytes(), "imp").unwrap();
+    assert!(back.rejected.is_empty(), "{:?}", back.rejected);
+    assert!(back.healed.is_empty(), "{:?}", back.healed);
+    assert_eq!(back.brep.tolerant(), imp.brep.tolerant());
+    assert_eq!(measure::bbox(&back.brep), measure::bbox(&imp.brep));
+    for (got, want) in [
+        (measure::volume(&back.brep), measure::volume(&imp.brep)),
+        (measure::area(&back.brep), measure::area(&imp.brep)),
+    ] {
+        assert!((got - want).abs() <= 1e-9 * want, "{got} vs {want}");
+    }
+}
+
+#[test]
 fn booleans_pass_tolerant_solids_they_do_not_reach() {
     let imp = rounds_held_apart(0.4).brep;
     let far = block("far", [20.0, 0.0, 0.0], [21.0, 1.0, 1.0]);

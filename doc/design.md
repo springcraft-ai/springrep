@@ -2127,7 +2127,9 @@ solid never pinches.
      indistinct, and is an error; where there is one and healing succeeded, the healed solid stands.
      `Import::tolerant` lists each such solid, with the uncertainty the file states and how many of
      its tolerances are past it. The writer gives a file holding local tolerances the widest of them
-     as its uncertainty, which is what other kernels read. The conjugate-gradient solves of step 2
+     as its uncertainty, which is what other kernels read; reading such a file of its own, the
+     kernel keeps its geometry so rather than healing it within that uncertainty, so a solid held
+     with local tolerances reads back as it was written. The conjugate-gradient solves of step 2
      stop once the residual has not halved in 200 iterations: on faces that touch the system is
      nearly singular and the residual stalls far above its goal.
 

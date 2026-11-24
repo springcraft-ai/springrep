@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use super::WRITER;
 use super::geometry::Geometry;
 use super::heal;
 use super::part21::Param;
@@ -1566,7 +1567,6 @@ pub(super) fn solid(geo: &mut Geometry, id: u64, strict: bool) -> Result<ReadSol
     rd.solid(id)?;
     let uncertainty = rd.geo.uncertainty();
     let file = own_nappes(join_contacts(without_split(rd.raw, &rd.splits)))?;
-    let mut raw = file.clone();
     let names = || file.faces.iter().map(|f| (f.id, f.name.clone())).collect();
     if strict {
         if let Some(why) = heal::misfit(&file) {
@@ -1575,20 +1575,33 @@ pub(super) fn solid(geo: &mut Geometry, id: u64, strict: bool) -> Result<ReadSol
             )));
         }
         // A file that agrees with itself is left exactly as it is.
+        let mut raw = file.clone();
         let (ranges, _) = heal::heal(&mut raw)?;
         return assemble(&raw, &ranges, None).map(|b| (b, names(), None));
     }
-    let exact = heal::heal(&mut raw)
-        .and_then(|(ranges, healed)| assemble(&raw, &ranges, None).map(|b| (b, healed)));
+    let exact = || {
+        let mut raw = file.clone();
+        heal::heal(&mut raw)
+            .and_then(|(ranges, healed)| assemble(&raw, &ranges, None).map(|b| (b, healed)))
+    };
     let within = uncertainty.filter(|&u| u > tol::LINEAR);
+    // This kernel states an uncertainty above its own only for geometry it kept with local
+    // tolerances, which a read of its file keeps too rather than healing within them; it heals
+    // only if that fails.
+    let kept = within.is_some() && rd.geo.file.originating_system() == Some(WRITER);
     // Healing that moves geometry further than the file says its geometry meets has changed the
     // shape, not closed it: the file's geometry is kept instead where tolerances can hold it.
-    let why = match exact {
-        Ok((b, healed)) if within.is_none_or(|w| healed.as_ref().is_none_or(|h| h.moved <= w)) => {
-            return Ok((b, names(), healed));
+    let why = if kept {
+        None
+    } else {
+        match exact() {
+            Ok((b, healed))
+                if within.is_none_or(|w| healed.as_ref().is_none_or(|h| h.moved <= w)) =>
+            {
+                return Ok((b, names(), healed));
+            }
+            why => Some(why),
         }
-        Ok((b, healed)) => Ok((b, healed)),
-        Err(e) => Err(e),
     };
     // Geometry that cannot be made to meet within the kernel tolerance is kept as the file has
     // it, its edges and vertices given the tolerances it does meet within, whatever the file
@@ -1603,10 +1616,13 @@ pub(super) fn solid(geo: &mut Geometry, id: u64, strict: bool) -> Result<ReadSol
                     .map_err(|e| format!("kept as the file has it, with local tolerances: {e}"))
             })
     };
-    match (tolerant(&file), why) {
-        (Ok((b, moved)), _) => Ok((b, names(), moved)),
-        (Err(_), Ok((b, healed))) => Ok((b, names(), healed)),
-        (Err(t), Err(e)) => {
+    let t = match tolerant(&file) {
+        Ok((b, moved)) => return Ok((b, names(), moved)),
+        Err(t) => t,
+    };
+    match why.unwrap_or_else(exact) {
+        Ok((b, healed)) => Ok((b, names(), healed)),
+        Err(e) => {
             // Healed where it can be, and held by tolerances where it cannot.
             let mut loose = file.clone();
             let healed = heal::heal_loosely(&mut loose);
