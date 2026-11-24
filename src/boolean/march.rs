@@ -558,8 +558,8 @@ pub(crate) fn trace(
     }
 }
 
-/// The deepest the surfaces part inside a closed branch: the gap from `a` to `b` midway between
-/// each point and the nearest point of the far half of the loop.
+/// The deepest the surfaces part inside a closed branch: the gap from each to the other midway
+/// between each point and the nearest point of the far half of the loop.
 fn lens_depth(a: &Surface, b: &Surface, br: &Branch) -> f64 {
     let n = br.points.len();
     let mut deepest: f64 = 0.0;
@@ -574,12 +574,18 @@ fn lens_depth(a: &Surface, b: &Surface, br: &Branch) -> f64 {
         let Some(j) = across else {
             continue;
         };
-        for f in [0.25, 0.5, 0.75] {
-            let x = p.lerp(br.points[j], f);
-            let ua = a.project_near(x, br.uvs[i].0);
-            let q = a.eval(ua.x, ua.y);
-            let ub = b.project_near(q, br.uvs[i].1);
-            deepest = deepest.max((q - b.eval(ub.x, ub.y)).dot(b.normal(ub.x, ub.y)).abs());
+        // From each surface in turn: a surface that stands square to the chord takes every point
+        // of it back onto the loop, where the gap is nothing, and only the other shows the depth.
+        let (ha, hb) = br.uvs[i];
+        for (from, to, hint_from, hint_to) in [(a, b, ha, hb), (b, a, hb, ha)] {
+            for f in [0.25, 0.5, 0.75] {
+                let x = p.lerp(br.points[j], f);
+                let uf = from.project_near(x, hint_from);
+                let q = from.eval(uf.x, uf.y);
+                let ut = to.project_near(q, hint_to);
+                let gap = (q - to.eval(ut.x, ut.y)).dot(to.normal(ut.x, ut.y)).abs();
+                deepest = deepest.max(gap);
+            }
         }
     }
     deepest
@@ -917,6 +923,36 @@ mod tests {
                 let p = c.curve.eval(t);
                 assert!(signed_distance(&a, p).abs() < 1e-7);
                 assert!(signed_distance(&b, p).abs() < 1e-7);
+            }
+        }
+    }
+
+    #[test]
+    fn a_loop_on_a_surface_square_to_the_other_is_a_crossing_whichever_is_first() {
+        // A rod of radius 4 cut across at z = 7: every point of the disk is nearest the rod on
+        // the circle itself, yet the disk's middle is 4 from it.
+        let rod = Surface::Cylinder(Cylinder {
+            frame: Frame::WORLD,
+            radius: 4.0,
+        });
+        let across = Surface::Plane(Plane {
+            frame: Frame::new(Vec3::new(0.0, 0.0, 7.0), Vec3::Z, Vec3::X).unwrap(),
+        });
+        let region = Aabb {
+            min: Vec3::new(-5.0, -5.0, 6.0),
+            max: Vec3::new(5.0, 5.0, 8.0),
+        };
+        let seeds = [Vec3::new(4.0, 0.0, 7.0)];
+        for (a, b) in [(&rod, &across), (&across, &rod)] {
+            let curves = trace(a, b, &region, &seeds).unwrap().0;
+            assert_eq!(curves.len(), 1);
+            let c = &curves[0];
+            assert!(c.closed);
+            for i in 0..50 {
+                let p = c
+                    .curve
+                    .eval(c.range.0 + (c.range.1 - c.range.0) * i as f64 / 50.0);
+                assert!((p.z - 7.0).abs() < 1e-7 && (p.x.hypot(p.y) - 4.0).abs() < 1e-7);
             }
         }
     }

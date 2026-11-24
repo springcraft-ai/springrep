@@ -45,7 +45,11 @@ pub fn split(s: &Brep, origin: Point3, normal: Vec3) -> Result<(Brep, Brep)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::measure::section_area;
+    use crate::{
+        loft::{Section, loft},
+        measure::section_area,
+    };
+    use std::f64::consts::PI;
 
     /// A prism on the polygon `pts`, `h` tall, its sides named `e0`, `e1`, … from the first edge.
     fn prism(pts: &[[f64; 2]], h: f64) -> Brep {
@@ -117,5 +121,61 @@ mod tests {
         close(measure::volume(&near), 6.0);
         close(measure::volume(&far), 18.0);
         close(section_area(&b, o, n).unwrap(), 6.0);
+    }
+
+    /// The solid lofted through circles of each (radius, height), about the z axis.
+    fn lofted(circles: &[(f64, f64)], ruled: bool) -> Brep {
+        let sections: Vec<Section> = circles
+            .iter()
+            .map(|&(r, z)| {
+                let f = Frame::new(Vec3::new(0.0, 0.0, z), Vec3::Z, Vec3::X).unwrap();
+                Section::new(Profile::circle(Vec2::ZERO, 2.0 * r), f)
+            })
+            .collect();
+        loft(&sections, ruled, "l").unwrap()
+    }
+
+    /// The part of `s` above the level plane at `z`, valid, and the area of its cut.
+    fn cap_above(s: &Brep, z: f64) -> (Brep, f64) {
+        let o = Point3::new(0.0, 0.0, z);
+        let (above, _) = split(s, o, Vec3::Z).unwrap();
+        assert!(crate::check::check(&above).is_empty());
+        (above, section_area(s, o, Vec3::Z).unwrap())
+    }
+
+    #[test]
+    fn an_ellipsoid_cut_through_its_centre_leaves_half_of_it_on_an_ellipse() {
+        // Semi-axes 3, 4, 5 cut at z = 0: an ellipse of 3 by 4, under half of 4π·3·4·5/3.
+        let e = crate::primitive::ellipsoid(&Frame::WORLD, Vec3::new(3.0, 4.0, 5.0), "e").unwrap();
+        let (above, cut) = cap_above(&e, 0.0);
+        close(cut, 12.0 * PI);
+        close(measure::volume(&above), 40.0 * PI);
+    }
+
+    #[test]
+    fn a_loft_through_equal_circles_cut_between_two_of_them_is_a_cylinder() {
+        // Radius 4 at z = 0, 4 and 10, cut at z = 7: a disk of radius 4 under a rod 3 tall.
+        for ruled in [false, true] {
+            let (above, cut) =
+                cap_above(&lofted(&[(4.0, 0.0), (4.0, 4.0), (4.0, 10.0)], ruled), 7.0);
+            close(cut, 16.0 * PI);
+            close(measure::volume(&above), 48.0 * PI);
+        }
+    }
+
+    #[test]
+    fn a_loft_cut_at_its_middle_section_is_cut_on_that_section() {
+        // Radii 2, 3, 2 at z = 0, 2, 4, cut at z = 2, where the smooth skin is widest and stands
+        // square to the plane: the disk of radius 3 and, by symmetry, half the solid. Ruled,
+        // that half is a frustum, π·2·(3² + 3·2 + 2²)/3.
+        for ruled in [false, true] {
+            let l = lofted(&[(2.0, 0.0), (3.0, 2.0), (2.0, 4.0)], ruled);
+            let (above, cut) = cap_above(&l, 2.0);
+            close(cut, 9.0 * PI);
+            close(measure::volume(&above), 0.5 * measure::volume(&l));
+            if ruled {
+                close(measure::volume(&above), 38.0 * PI / 3.0);
+            }
+        }
     }
 }
