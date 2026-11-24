@@ -20,7 +20,7 @@ use crate::{
     },
     check,
     geom::{Curve, Surface},
-    math::{Point3, Vec3},
+    math::{Aabb, Point3, Vec3},
     tol,
     topo::{Brep, CoedgeId, CoedgeSpec, EdgeId, FaceId, FaceName, PCurve, VertexId},
 };
@@ -696,9 +696,27 @@ fn crossed(out: &Brep, f: FaceId, fresh: &dyn Fn(EdgeId) -> bool) -> Option<Poin
         }
     }
     let is_fresh: Vec<bool> = edges.iter().map(|&e| fresh(e)).collect();
+    // Edges whose boxes stand clear of each other by more than the tolerance do not meet, so a
+    // loop of many edges is searched only where neighbours come together.
+    let pad = Vec3::new(1.0, 1.0, 1.0) * (2.0 * tol::LINEAR);
+    let boxes: Vec<Aabb> = edges
+        .iter()
+        .map(|&e| {
+            let edge = out.edge(e);
+            let curve = edge.curve.as_ref().expect("kept above");
+            let tight = curve.bbox(edge.range.0, edge.range.1);
+            Aabb {
+                min: tight.min - pad,
+                max: tight.max + pad,
+            }
+        })
+        .collect();
+    let apart = |i: usize, j: usize| {
+        (0..3).any(|k| boxes[i].min[k] > boxes[j].max[k] || boxes[j].min[k] > boxes[i].max[k])
+    };
     for (i, &a) in edges.iter().enumerate() {
         for (j, &b) in edges.iter().enumerate().skip(i + 1) {
-            if !is_fresh[i] && !is_fresh[j] {
+            if (!is_fresh[i] && !is_fresh[j]) || apart(i, j) {
                 continue;
             }
             let (ea, eb) = (out.edge(a), out.edge(b));
