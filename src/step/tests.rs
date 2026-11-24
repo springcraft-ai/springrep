@@ -574,6 +574,12 @@ fn assemblies_place_each_instance_in_file_units() {
 fn with_vertex_moved(b: &Brep, d: Vec3) -> String {
     let text = write(b, "blk").unwrap();
     let vp = text.lines().find(|l| l.contains("=VERTEX_POINT(")).unwrap();
+    with_point_moved(&text, vp, d)
+}
+
+/// `text`, a file this kernel wrote, with the point of its vertex `vp`, a line of it, moved by `d`,
+/// and written by another system, so that a read heals it rather than keeping it as it was written.
+fn with_point_moved(text: &str, vp: &str, d: Vec3) -> String {
     let pid = vp.split('#').nth(2).unwrap().trim_end_matches(");");
     let head = format!("#{pid}=CARTESIAN_POINT('',(");
     let line = text.lines().find(|l| l.starts_with(&head)).unwrap();
@@ -4005,5 +4011,189 @@ fn a_spline_face_that_stands_still_along_an_end_line_is_no_pole() {
             );
         }
         round_trip(b);
+    }
+}
+
+/// `text`, a file of solids written one after another, as one solid with voids: the first solid's
+/// shell is its outer shell, and the shell of each other one, turned by an `ORIENTED_CLOSED_SHELL`
+/// as a void's is, one of its voids. The file's representation then lists that solid alone. A file
+/// that writes a compound of bodies this way lists as voids bodies that lie outside the outer one.
+fn written_as_voids(text: &str) -> (String, Vec<u64>) {
+    let solids: Vec<(String, String)> = text
+        .lines()
+        .filter_map(|l| {
+            let (id, rest) = l.split_once("=MANIFOLD_SOLID_BREP('',")?;
+            Some((id.to_string(), rest.trim_end_matches(");").to_string()))
+        })
+        .collect();
+    let (first, voids) = solids.split_first().unwrap();
+    let listed: Vec<&str> = voids.iter().map(|v| v.0.as_str()).collect();
+    let mut out = String::new();
+    for l in text.lines() {
+        let at = |id: &str| l.starts_with(&format!("{id}="));
+        let line = if at(&first.0) {
+            format!(
+                "{}=BREP_WITH_VOIDS('',{},({}));",
+                first.0,
+                first.1,
+                listed.join(",")
+            )
+        } else if let Some(v) = voids.iter().find(|v| at(&v.0)) {
+            format!("{}=ORIENTED_CLOSED_SHELL('',*,{},.F.);", v.0, v.1)
+        } else if l.contains("=ADVANCED_BREP_SHAPE_REPRESENTATION(") {
+            let mut l = l.to_string();
+            for v in &listed {
+                l = l
+                    .replace(&format!(",{v},"), ",")
+                    .replace(&format!(",{v})"), ")");
+            }
+            l
+        } else {
+            l.to_string()
+        };
+        out.push_str(&line);
+        out.push('\n');
+    }
+    let ids = listed.iter().map(|v| v[1..].parse().unwrap()).collect();
+    (out, ids)
+}
+
+/// The volume of each solid of `b`, in its order.
+fn solid_volumes(b: &Brep) -> Vec<f64> {
+    b.solid_ids()
+        .map(|s| measure::volume(&boolean::solids_of(b, &[s])))
+        .collect()
+}
+
+/// A cube of 10 mm listed as the void of another beside it, touching it along a face or 2 mm
+/// apart: neither is a void of the other, so each is read as a solid of its own, of 1000 mm³, and
+/// the import says which shells were. A strict read rejects the solid, saying why.
+#[test]
+fn voids_outside_the_outer_shell_are_read_as_solids_of_their_own() {
+    for gap in [0.0, 2.0] {
+        let mut b = block("a", [0.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+        b.append(&block(
+            "b",
+            [10.0 + gap, 0.0, 0.0],
+            [20.0 + gap, 10.0, 10.0],
+        ));
+        let (text, voids) = written_as_voids(&write(&b, "board").unwrap());
+        assert_eq!(instances(&text, "BREP_WITH_VOIDS"), 1);
+        assert_eq!(instances(&text, "MANIFOLD_SOLID_BREP"), 0);
+        let imp = read(text.as_bytes(), "imp").unwrap();
+        assert!(imp.rejected.is_empty(), "gap {gap}: {:?}", imp.rejected);
+        assert!(check::check_each(&imp.brep).is_empty());
+        let volumes = solid_volumes(&imp.brep);
+        assert_eq!(volumes.len(), 2);
+        for v in volumes {
+            assert!((v - 1000.0).abs() < 1e-9, "gap {gap}: {v}");
+        }
+        assert_eq!(imp.separated.len(), 1);
+        let s = &imp.separated[0];
+        assert_eq!((s.index, &s.shells), (0, &voids));
+        assert_eq!(imp.bodies.len(), 2);
+        assert!(imp.bodies.iter().all(|x| x.step_id == s.step_id));
+        // As one part, the two cubes are one box of 2000 mm³ where they touch.
+        let part = super::read_part(text.as_bytes(), "imp").unwrap();
+        assert!((measure::volume(&part) - 2000.0).abs() < 1e-9);
+        let solids = if gap == 0.0 { 1 } else { 2 };
+        assert_eq!(part.solid_ids().count(), solids);
+        let strict = read_with(text.as_bytes(), "imp", &ReadOptions::default().strict(true));
+        let strict = strict.unwrap();
+        assert_eq!(strict.brep.solid_ids().count(), 0);
+        assert!(strict.separated.is_empty());
+        let why = &strict.rejected[0];
+        let named = format!("void shell #{} lies outside the outer shell", voids[0]);
+        assert!(why.contains(&named), "{why}");
+    }
+}
+
+/// Of two voids listed, one inside the outer cube and one beside it: the first stays a void, and
+/// the second is a solid of its own. The cube of 10 mm less the void of 3 mm holds 973 mm³.
+#[test]
+fn a_void_inside_stays_a_void_beside_one_read_as_a_solid() {
+    let mut b = block("a", [0.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+    b.append(&block("v", [3.0, 3.0, 3.0], [6.0, 6.0, 6.0]));
+    b.append(&block("b", [10.0, 0.0, 0.0], [20.0, 10.0, 10.0]));
+    let (text, voids) = written_as_voids(&write(&b, "board").unwrap());
+    let imp = read(text.as_bytes(), "imp").unwrap();
+    assert!(imp.rejected.is_empty(), "{:?}", imp.rejected);
+    assert!(check::check_each(&imp.brep).is_empty());
+    let volumes = solid_volumes(&imp.brep);
+    assert_eq!(volumes.len(), 2);
+    assert!((volumes[0] - 973.0).abs() < 1e-9, "{volumes:?}");
+    assert!((volumes[1] - 1000.0).abs() < 1e-9, "{volumes:?}");
+    assert_eq!(imp.separated.len(), 1);
+    assert_eq!(imp.separated[0].shells, voids[1..]);
+    // The void inside alone is a solid with a void, as the file means it.
+    let mut c = block("a", [0.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+    c.append(&block("v", [3.0, 3.0, 3.0], [6.0, 6.0, 6.0]));
+    let (text, _) = written_as_voids(&write(&c, "board").unwrap());
+    let imp = read(text.as_bytes(), "imp").unwrap();
+    assert!(imp.rejected.is_empty() && imp.separated.is_empty());
+    assert!((measure::volume(&imp.brep) - 973.0).abs() < 1e-9);
+    assert_eq!(imp.brep.solid_ids().count(), 1);
+}
+
+/// A block listed as the void of a cube it passes through, as one body of a compound may through
+/// another: it lies partly outside the cube, so it is no void, and is read as a solid of its own.
+/// The cube of 10 mm holds 1000 mm³ and the block of 4 × 3 × 3 mm, 36 mm³.
+#[test]
+fn a_void_passing_through_the_outer_shell_is_read_as_a_solid_of_its_own() {
+    let mut b = block("a", [0.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+    b.append(&block("v", [8.0, 3.0, 3.0], [12.0, 6.0, 6.0]));
+    let (text, voids) = written_as_voids(&write(&b, "board").unwrap());
+    let imp = read(text.as_bytes(), "imp").unwrap();
+    assert!(imp.rejected.is_empty(), "{:?}", imp.rejected);
+    // Read as a void, the block would make a solid that passes through itself.
+    assert!(imp.crossed.is_empty());
+    assert!(check::check_each(&imp.brep).is_empty());
+    let volumes = solid_volumes(&imp.brep);
+    assert_eq!(volumes.len(), 2);
+    assert!((volumes[0] - 1000.0).abs() < 1e-9, "{volumes:?}");
+    assert!((volumes[1] - 36.0).abs() < 1e-9, "{volumes:?}");
+    assert_eq!(imp.separated.len(), 1);
+    assert_eq!(imp.separated[0].shells, voids);
+}
+
+/// Two cubes of 10 mm, 2 mm apart, the second listed as a void of the first, with a vertex of the
+/// second moved off its corner: 20 nm, which healing moves back, or 30 µm in a file that states
+/// 10 µm, which it keeps with a tolerance. The second cube is read as a solid of its own, and the
+/// healing or the tolerance is reported for it, the second solid read, not the first.
+#[test]
+fn healing_and_tolerances_of_a_void_read_as_a_solid_name_that_solid() {
+    let mut b = block("a", [0.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+    b.append(&block("b", [12.0, 0.0, 0.0], [22.0, 10.0, 10.0]));
+    let (text, voids) = written_as_voids(&write(&b, "board").unwrap());
+    let vp = text
+        .lines()
+        .rfind(|l| l.contains("=VERTEX_POINT("))
+        .unwrap();
+    for (d, stated) in [(2e-5, None), (0.03, Some(0.01))] {
+        let mut text = with_point_moved(&text, vp, Vec3::new(d, 0.0, 0.0));
+        if let Some(u) = stated {
+            text = with_uncertainty(&text, u);
+        }
+        let imp = read(text.as_bytes(), "imp").unwrap();
+        assert!(imp.rejected.is_empty(), "{:?}", imp.rejected);
+        assert_eq!(imp.separated.len(), 1);
+        assert_eq!(imp.separated[0].shells, voids);
+        assert_eq!(imp.brep.solid_ids().count(), 2);
+        let volumes = solid_volumes(&imp.brep);
+        assert!((volumes[0] - 1000.0).abs() < 1e-9, "{volumes:?}");
+        // A corner moved by d changes the volume by at most d times the area of its three faces.
+        assert!((volumes[1] - 1000.0).abs() <= d * 300.0, "{volumes:?}");
+        if stated.is_none() {
+            assert_eq!(imp.healed.len(), 1, "{:?}", imp.healed);
+            let h = &imp.healed[0];
+            assert_eq!(h.index, 1, "{h:?}");
+            assert!(h.at.x >= 12.0 - 1e-3, "{h:?}");
+            assert!(imp.tolerant.is_empty(), "{:?}", imp.tolerant);
+        } else {
+            assert_eq!(imp.tolerant.len(), 1, "{:?}", imp.tolerant);
+            let t = &imp.tolerant[0];
+            assert_eq!(t.index, 1, "{t:?}");
+            assert!(t.vertices >= 1 && t.largest >= d, "{t:?}");
+        }
     }
 }

@@ -13,7 +13,7 @@ use crate::{
     geom::Surface,
     math::{Aabb, Point3, Vec3},
     tol,
-    topo::Brep,
+    topo::{Brep, FaceId},
 };
 
 /// A gap between a point of one surface and another surface that is no rounding of a touch: a
@@ -222,6 +222,23 @@ pub(crate) fn contains(faces: &[(&Domain, Aabb)], p: Point3) -> Option<bool> {
     order
         .into_iter()
         .find_map(|(_, d)| crossings(faces, p, d).map(|n| n % 2 == 1))
+}
+
+/// Whether any of `points` lies outside the closed shell that `faces` of `b` make, by the parity
+/// of a ray's crossings. A point within the tolerance of one of them is on the boundary, not
+/// outside.
+pub(crate) fn any_outside(b: &Brep, faces: &[FaceId], points: &[Point3]) -> bool {
+    let doms: Vec<Domain> = faces.iter().map(|&f| face_domain(b, f)).collect();
+    let faces: Vec<(&Domain, Aabb)> = doms.iter().map(|d| (d, face_bbox(d))).collect();
+    let on = |p: Point3| {
+        doms.iter().any(|d| {
+            signed_distance(&d.surface, p).abs() <= tol::LINEAR
+                && !matches!(d.locate(p), Where::Outside)
+        })
+    };
+    points
+        .iter()
+        .any(|&p| !on(p) && contains(&faces, p) == Some(false))
 }
 
 /// Whether solids `a` and `b` share material that an empty result of `op` leaves out: a vertex or

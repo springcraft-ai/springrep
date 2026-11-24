@@ -1,0 +1,9 @@
+void-outside-touching.step
+
+Written for springrep by r2rho (Vertec), by a short script of our own that emits the entities of
+ISO 10303-42 as their definitions give them; not taken from any other file or program. Two cubes
+of 10 mm, the second at x = 10 and sharing a face with the first, written as one BREP_WITH_VOIDS
+whose outer shell is the first cube and whose one "void" is the second: the way some exporters
+write a compound of touching bodies.
+
+Contributed under springrep's licence, MIT OR Apache-2.0, at your option.

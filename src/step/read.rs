@@ -62,6 +62,9 @@ pub struct Import {
     /// solid is kept as the file has it: an imported mesh stitched with folds microns deep is still
     /// the part, and other systems keep it too.
     pub crossed: Vec<Crossed>,
+    /// One entry per placed solid written with voids outside its outer shell, each of which was
+    /// read as a solid of its own, in placement order. A strict read rejects such a solid instead.
+    pub separated: Vec<Separated>,
     /// One entry per solid of `brep`, in its order: what the file calls it and how it draws it.
     pub bodies: Vec<Body>,
     /// The faces the file gives a colour of their own, apart from their body's.
@@ -100,13 +103,30 @@ pub struct Crossed {
     pub depth: f64,
 }
 
+/// A placed solid whose file lists, among its voids, shells that lie outside its outer shell. A
+/// void is a hole in the material the outer shell bounds (ISO 10303-42, `brep_with_voids`), so such
+/// a file writes a compound of bodies as one solid; the read keeps each of those shells as a solid
+/// of its own, bounded by it as the file has it, however the file turns it.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Separated {
+    /// The position among `Import::brep`'s solids of the solid the outer shell bounds, with any
+    /// voids inside it; the solids read from the shells outside it follow it, in `shells`' order.
+    pub index: usize,
+    /// The solid's STEP instance.
+    pub step_id: u64,
+    /// The shells read as solids of their own, by the instances the solid lists them as.
+    pub shells: Vec<u64>,
+}
+
 /// A placed solid whose geometry could not be healed to meet within [`crate::tol::LINEAR`]
 /// without moving it further than the file says it meets, so its edges and vertices carry the
 /// tolerances it does meet within. Those are measured, and may be wider than the file states.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Tolerant {
-    /// The solid's position among `Import::brep`'s solids.
+    /// The solid's position among `Import::brep`'s solids. A void read as a solid of its own (see
+    /// [`Separated`]) is reported apart, at its own position.
     pub index: usize,
     /// The solid's STEP instance.
     pub step_id: u64,
@@ -125,7 +145,8 @@ pub struct Tolerant {
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Healing {
-    /// The solid's position among `Import::brep`'s solids.
+    /// The solid's position among `Import::brep`'s solids. A void read as a solid of its own (see
+    /// [`Separated`]) is reported apart, at its own position.
     pub index: usize,
     /// The solid's STEP instance.
     pub step_id: u64,
@@ -531,6 +552,7 @@ pub fn read_with(text: &[u8], feature: &str, options: &ReadOptions) -> Result<Im
     let mut healed = Vec::new();
     let mut tolerant = Vec::new();
     let mut crossed = Vec::new();
+    let mut separated = Vec::new();
     let mut crossings: HashMap<Key, Vec<check::SelfCrossing>> = HashMap::new();
     let mut counter = 0usize;
     let mut index = 0usize;
@@ -540,7 +562,7 @@ pub fn read_with(text: &[u8], feature: &str, options: &ReadOptions) -> Result<Im
     for pl in placements {
         match &built[&pl.key()] {
             Err(e) => rejected.push(format!("#{}: {e}", pl.solid)),
-            Ok((b, names, heal, stated)) => {
+            Ok((b, names, heal, stated, apart)) => {
                 let found = crossings
                     .entry(pl.key())
                     .or_insert_with(|| check::self_crossings(b))
@@ -557,9 +579,9 @@ pub fn read_with(text: &[u8], feature: &str, options: &ReadOptions) -> Result<Im
                         continue;
                     }
                 }
-                if let Some(h) = heal {
+                for (k, h) in heal {
                     healed.push(Healing {
-                        index,
+                        index: index + k,
                         step_id: pl.solid,
                         moved: h.moved,
                         at: pl.at.rigid.point(h.at),
@@ -569,21 +591,45 @@ pub fn read_with(text: &[u8], feature: &str, options: &ReadOptions) -> Result<Im
                 }
                 if b.has_tolerances() {
                     let (vs, es) = b.tolerant();
-                    let all = vs.iter().map(|x| x.1).chain(es.iter().map(|x| x.1));
-                    let past = |t: &f64| stated.is_some_and(|s| *t > s);
-                    tolerant.push(Tolerant {
+                    // A solid read with voids outside it as solids of their own is several, each
+                    // reported apart.
+                    let (vertex_in, edge_in) = solid_of_each(b);
+                    for (k, _) in b.solid_ids().enumerate() {
+                        let vs: Vec<f64> = vs
+                            .iter()
+                            .filter(|x| vertex_in[x.0.index()] == k)
+                            .map(|x| x.1)
+                            .collect();
+                        let es: Vec<f64> = es
+                            .iter()
+                            .filter(|x| edge_in[x.0.index()] == k)
+                            .map(|x| x.1)
+                            .collect();
+                        if vs.is_empty() && es.is_empty() {
+                            continue;
+                        }
+                        let past = |t: &&f64| stated.is_some_and(|s| **t > s);
+                        tolerant.push(Tolerant {
+                            index: index + k,
+                            step_id: pl.solid,
+                            vertices: vs.len(),
+                            edges: es.len(),
+                            largest: vs.iter().copied().fold(0.0, f64::max),
+                            stated: *stated,
+                            past_stated: vs.iter().chain(&es).filter(past).count(),
+                        });
+                    }
+                }
+                if !apart.is_empty() {
+                    separated.push(Separated {
                         index,
                         step_id: pl.solid,
-                        vertices: vs.len(),
-                        edges: es.len(),
-                        largest: vs.iter().map(|x| x.1).fold(0.0, f64::max),
-                        stated: *stated,
-                        past_stated: all.filter(past).count(),
+                        shells: apart.clone(),
                     });
                 }
                 let first = out.face_count();
                 let solid_index = index;
-                index += 1;
+                index += b.solid_ids().count();
                 let mut copy = b.clone();
                 copy.transform(&pl.at.rigid);
                 let mut own_colours = Vec::new();
@@ -611,8 +657,10 @@ pub fn read_with(text: &[u8], feature: &str, options: &ReadOptions) -> Result<Im
                     colour: colours.get(&pl.solid).copied(),
                 }));
                 for x in found {
+                    // A solid read with voids outside it as solids of their own is several.
+                    let within = b.face(x.a).shell.and_then(|sh| b.shell(sh).solid);
                     crossed.push(Crossed {
-                        index: solid_index,
+                        index: solid_index + within.map_or(0, |s| s.index()),
                         step_id: pl.solid,
                         faces: (ids[x.a.index()], ids[x.b.index()]),
                         at: pl.at.rigid.point(x.at),
@@ -628,6 +676,7 @@ pub fn read_with(text: &[u8], feature: &str, options: &ReadOptions) -> Result<Im
         healed,
         tolerant,
         crossed,
+        separated,
         bodies,
         face_colours,
     })
@@ -740,9 +789,42 @@ fn colours(file: &File) -> HashMap<u64, [f64; 3]> {
     out
 }
 
-/// A solid, its faces' ids and names, how far healing moved it, and the uncertainty its file
-/// states.
-type Built = std::result::Result<(Brep, Vec<(u64, String)>, Option<Healed>, Option<f64>), String>;
+/// A solid, its faces' ids and names, how far healing moved each of its solids it moved, by the
+/// solid's position, the uncertainty its file states, and the void shells outside its outer shell
+/// read as solids of their own.
+type Built = std::result::Result<
+    (
+        Brep,
+        Vec<(u64, String)>,
+        Vec<(usize, Healed)>,
+        Option<f64>,
+        Vec<u64>,
+    ),
+    String,
+>;
+
+/// The position among `b`'s solids of the solid each vertex and each edge of `b` bounds, by id;
+/// `usize::MAX` for one that bounds none.
+fn solid_of_each(b: &Brep) -> (Vec<usize>, Vec<usize>) {
+    let mut vertices = vec![usize::MAX; b.vertex_ids().count()];
+    let mut edges = vec![usize::MAX; b.edge_ids().count()];
+    for (k, s) in b.solid_ids().enumerate() {
+        for &sh in &b.solid(s).shells {
+            for &f in &b.shell(sh).faces {
+                for &lp in &b.face(f).loops {
+                    for &c in &b.lp(lp).coedges {
+                        let e = b.coedge(c).edge;
+                        edges[e.index()] = k;
+                        let edge = b.edge(e);
+                        vertices[edge.start.index()] = k;
+                        vertices[edge.end.index()] = k;
+                    }
+                }
+            }
+        }
+    }
+    (vertices, edges)
+}
 
 /// A rough measure of how long a solid takes to build: its faces, and the control points of its
 /// spline surfaces, which healing fits.
@@ -835,7 +917,9 @@ fn build_all(file: &File, keys: &[Key], strict: bool) -> HashMap<Key, Built> {
                 |geo| {
                     geo.use_scaled(context, f64::from_bits(scale))
                         .and_then(|_| topology::solid(geo, solid, strict))
-                        .map(|(b, names, healed)| (b, names, healed, geo.uncertainty()))
+                        .map(|(b, names, healed, apart)| {
+                            (b, names, healed, geo.uncertainty(), apart)
+                        })
                         .map_err(|e| e.to_string())
                 },
             );

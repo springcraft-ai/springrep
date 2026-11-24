@@ -2164,7 +2164,16 @@ solid never pinches.
   a line along the direction), where it is farthest round from the rims' vertices and clear of the
   face's holes. A shell is the way the volume it encloses says, outer positive and void negative:
   some files write a void's faces facing into it and turn its shell too, which read as written is a
-  void inside out.
+  void inside out. A void is a hole in the material its outer shell bounds, but some files write a
+  compound of bodies as one solid whose "voids" are the other bodies, beside the outer shell and
+  often touching it, where joining their contacts gives edges four faces use that pair across no
+  material. Every void is placed against the outer shell by its vertices and the middles of its
+  edges, those within the tolerance of the shell left out, before the solid is taken as read: the
+  outer shell of the solid read whole, or, where that read is rejected, the outer shell read
+  alone. A void with a point outside lies beside the outer shell or passes through it, as one body
+  of a compound may through another, and is read as a solid of its own, however the file turns
+  it, and `Import::separated` names it; its healing and tolerances are reported for that solid. A
+  strict read rejects the solid instead, naming those voids.
 - **Pcurves and poles.** Each loop is followed through its face's parameter plane by projection,
   each point continuing from the last. Where a loop leaves a pole any angle is possible: the one its
   next point implies is tried in each nearby period, a seam's second use must run a period from its

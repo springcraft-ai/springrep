@@ -5,14 +5,16 @@
 //! A solid is read in three passes: the file's topology into [`Raw`], [`super::heal`] where the
 //! file's geometry disagrees with itself by more than the kernel tolerance, then the arena.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::WRITER;
 use super::geometry::Geometry;
 use super::heal;
 use super::part21::Param;
 use crate::{
-    Error, Result, check,
+    Error, Result,
+    boolean::classify,
+    check,
     geom::{Circle, Cone, Curve, Line, Surface},
     math::{Frame, Point3, Transform, Vec2},
     tol,
@@ -1342,7 +1344,9 @@ impl<'g, 'a> Reader<'g, 'a> {
         Ok(f)
     }
 
-    fn solid(&mut self, id: u64) -> Result<()> {
+    /// Reads the shells of solid `id` into `raw`, and returns their instances as the solid lists
+    /// them, outer first.
+    fn solid(&mut self, id: u64) -> Result<Vec<u64>> {
         let Some(e) = self.geo.file.get(id) else {
             return bad(id, "missing instance");
         };
@@ -1360,8 +1364,8 @@ impl<'g, 'a> Reader<'g, 'a> {
             }
             other => return unsupported(id, &format!("solid {other}")),
         }
-        for mut sh in shells {
-            let mut flip = false;
+        for &listed in &shells {
+            let (mut sh, mut flip) = (listed, false);
             if let Some(p) = self
                 .geo
                 .file
@@ -1378,7 +1382,7 @@ impl<'g, 'a> Reader<'g, 'a> {
             }
             self.raw.shells.push(faces);
         }
-        Ok(())
+        Ok(shells)
     }
 }
 
@@ -1762,8 +1766,20 @@ fn shift_into(s: &Surface, tracks: &mut [Track], lo: Vec2, hi: Vec2) {
     }
 }
 
-/// A solid read, its faces' STEP ids and names in order, and how far healing moved its geometry.
-pub(super) type ReadSolid = (Brep, Vec<(u64, String)>, Option<heal::Healed>);
+/// A solid read, its faces' STEP ids and names in order, how far healing moved the geometry of
+/// each of its solids it moved, by the solid's position, and the instances of the void shells that
+/// lie outside its outer shell and were read as solids of their own, in the order the solids follow
+/// the first.
+pub(super) type ReadSolid = (
+    Brep,
+    Vec<(u64, String)>,
+    Vec<(usize, heal::Healed)>,
+    Vec<u64>,
+);
+
+/// A solid read from some of a solid's shells, its faces' STEP ids and names in order, and how far
+/// healing moved its geometry.
+type Shells = (Brep, Vec<(u64, String)>, Option<heal::Healed>);
 
 /// The larger of two movements.
 fn farther(a: Option<heal::Healed>, b: Option<heal::Healed>) -> Option<heal::Healed> {
@@ -1855,8 +1871,16 @@ fn own_nappes(mut raw: Raw) -> Result<Raw> {
 
 /// Builds the solid of a `MANIFOLD_SOLID_BREP` or `BREP_WITH_VOIDS`, healed where its geometry
 /// disagrees with itself, and checked. Returns the solid, its faces' STEP ids and names in order,
-/// and how far healing moved its geometry. `strict` builds it only where the file's geometry
-/// already agrees with itself, and is an error naming where it does not.
+/// how far healing moved the geometry of each solid read, and the void shells read as solids of
+/// their own. `strict`
+/// builds it only where the file's geometry already agrees with itself, and is an error naming
+/// where it does not.
+///
+/// A void is a hole in the material its outer shell bounds (ISO 10303-42, `brep_with_voids`). Some
+/// files write a compound of bodies as one solid whose "voids" are the other bodies, outside the
+/// outer shell and often touching it, or passing through it. Each void with a point outside the
+/// outer shell is read as a solid of its own instead, and returned to be reported; a strict read
+/// rejects the solid, saying why.
 pub(super) fn solid(geo: &mut Geometry, id: u64, strict: bool) -> Result<ReadSolid> {
     if geo
         .file
@@ -1865,7 +1889,7 @@ pub(super) fn solid(geo: &mut Geometry, id: u64, strict: bool) -> Result<ReadSol
     {
         return tessellated(geo, id).map(|b| {
             let names = vec![(0, String::new()); b.face_count()];
-            (b, names, None)
+            (b, names, Vec::new(), Vec::new())
         });
     }
     let mut rd = Reader {
@@ -1877,9 +1901,171 @@ pub(super) fn solid(geo: &mut Geometry, id: u64, strict: bool) -> Result<ReadSol
         sides: HashMap::new(),
         splits: HashMap::new(),
     };
-    rd.solid(id)?;
+    let listed = rd.solid(id)?;
     let uncertainty = rd.geo.uncertainty();
-    let file = own_nappes(join_contacts(without_split(rd.raw, &rd.splits)))?;
+    let ours = rd.geo.file.originating_system() == Some(WRITER);
+    let raw = without_split(rd.raw, &rd.splits);
+    let read = |raw: Raw| built(raw, uncertainty, ours, strict);
+    let first = |healed: Option<heal::Healed>| healed.map(|h| (0, h)).into_iter().collect();
+    if raw.shells.len() == 1 {
+        return read(raw).map(|(b, names, healed)| (b, names, first(healed), Vec::new()));
+    }
+    // A void lies inside the outer shell, so one with a point outside it, beyond the tolerance, is
+    // no void: it lies beside the outer shell, touching it or not, or passes through it, as one
+    // body of a compound does through another. Read as voids, such shells make edges four faces
+    // use where they touch, or a solid that passes through itself where they cross. Each void is
+    // placed against the outer shell of the solid read whole, or, where that read is rejected, of
+    // the outer shell read alone; a solid whose voids all lie inside is read once.
+    let whole = read(raw.clone());
+    let mut outer = None;
+    let against = |b: &Brep, faces: &[FaceId]| -> Vec<usize> {
+        (1..raw.shells.len())
+            .filter(|&k| classify::any_outside(b, faces, &shell_points(&raw, k)))
+            .collect()
+    };
+    let outside = match &whole {
+        Ok((b, names, _)) => {
+            let ids: HashSet<u64> = raw.shells[0].iter().map(|&f| raw.faces[f].id).collect();
+            let faces: Vec<FaceId> = b
+                .face_ids()
+                .filter(|f| ids.contains(&names[f.index()].0))
+                .collect();
+            against(b, &faces)
+        }
+        Err(_) => {
+            outer = read(shells_of(&raw, &[0])).ok();
+            outer.as_ref().map_or_else(Vec::new, |(b, _, _)| {
+                against(b, &b.face_ids().collect::<Vec<_>>())
+            })
+        }
+    };
+    if outside.is_empty() {
+        return whole.map(|(b, names, healed)| (b, names, first(healed), Vec::new()));
+    }
+    let named: Vec<String> = outside.iter().map(|&k| format!("#{}", listed[k])).collect();
+    if strict {
+        return Err(Error::InvalidInput(format!(
+            "void shell{} {} lie{} outside the outer shell, which a void of a solid does not; a \
+             strict read does not read them as solids of their own",
+            if outside.len() == 1 { "" } else { "s" },
+            named.join(", "),
+            if outside.len() == 1 { "s" } else { "" },
+        )));
+    }
+    let kept: Vec<usize> = (0..raw.shells.len())
+        .filter(|k| !outside.contains(k))
+        .collect();
+    let (mut b, mut names, healed) = match outer {
+        Some(outer) if kept.len() == 1 => outer,
+        _ => read(shells_of(&raw, &kept))?,
+    };
+    let mut healed: Vec<(usize, heal::Healed)> = first(healed);
+    for (&k, name) in outside.iter().zip(&named) {
+        let (part, more, moved) = read(shells_of(&raw, &[k])).map_err(|e| {
+            Error::InvalidInput(format!(
+                "void shell {name} lies outside the outer shell, and read as a solid of its own: \
+                 {e}"
+            ))
+        })?;
+        healed.extend(moved.map(|h| (b.solid_ids().count(), h)));
+        b.append(&part);
+        names.extend(more);
+    }
+    Ok((
+        b,
+        names,
+        healed,
+        outside.iter().map(|&k| listed[k]).collect(),
+    ))
+}
+
+/// The part of `raw` bounded by its shells `keep`, in that order, with its own copies of the
+/// points and edges they use.
+fn shells_of(raw: &Raw, keep: &[usize]) -> Raw {
+    let mut out = Raw::default();
+    let mut face_at = vec![usize::MAX; raw.faces.len()];
+    let mut edge_at = vec![usize::MAX; raw.edges.len()];
+    let mut point_at = vec![usize::MAX; raw.points.len()];
+    let mut point = |out: &mut Raw, p: usize| {
+        if point_at[p] == usize::MAX {
+            point_at[p] = out.points.len();
+            out.points.push(raw.points[p]);
+            out.vertex_ids.push(raw.vertex_ids[p]);
+        }
+        point_at[p]
+    };
+    let mut faces = Vec::new();
+    for &k in keep {
+        for &f in &raw.shells[k] {
+            face_at[f] = faces.len();
+            faces.push(raw.faces[f].clone());
+        }
+    }
+    for f in &mut faces {
+        for (_, uses) in &mut f.bounds {
+            for u in uses {
+                if edge_at[u.edge] == usize::MAX {
+                    let e = &raw.edges[u.edge];
+                    let (start, end) = (point(&mut out, e.start), point(&mut out, e.end));
+                    edge_at[u.edge] = out.edges.len();
+                    out.edges.push(RawEdge {
+                        id: e.id,
+                        curve: e.curve.clone(),
+                        start,
+                        end,
+                        faces: e
+                            .faces
+                            .iter()
+                            .map(|&g| face_at[g])
+                            .filter(|&g| g != usize::MAX)
+                            .collect(),
+                    });
+                }
+                u.edge = edge_at[u.edge];
+            }
+        }
+        for v in &mut f.points {
+            *v = point(&mut out, *v);
+        }
+    }
+    out.faces = faces;
+    let mut next = 0;
+    for &k in keep {
+        let n = raw.shells[k].len();
+        out.shells.push((next..next + n).collect());
+        next += n;
+    }
+    out
+}
+
+/// The vertices of shell `k` of `raw` and the middles of its edges.
+fn shell_points(raw: &Raw, k: usize) -> Vec<Point3> {
+    let mut seen = vec![false; raw.edges.len()];
+    let mut out = Vec::new();
+    for &f in &raw.shells[k] {
+        for (_, uses) in &raw.faces[f].bounds {
+            for u in uses {
+                if std::mem::replace(&mut seen[u.edge], true) {
+                    continue;
+                }
+                let e = &raw.edges[u.edge];
+                let (ps, pe) = (raw.points[e.start], raw.points[e.end]);
+                out.extend([ps, pe]);
+                if let Some((t0, t1)) = edge_range(&e.curve, ps, pe, e.start == e.end) {
+                    out.push(e.curve.eval(0.5 * (t0 + t1)));
+                }
+            }
+        }
+        out.extend(raw.faces[f].points.iter().map(|&v| raw.points[v]));
+    }
+    out
+}
+
+/// The checked solid of the shells of `raw`, as [`solid`] reads them, with its faces' STEP ids and
+/// names and how far healing moved it; `uncertainty` is the one its file states, and `ours`
+/// whether this kernel wrote the file.
+fn built(raw: Raw, uncertainty: Option<f64>, ours: bool, strict: bool) -> Result<Shells> {
+    let file = own_nappes(join_contacts(raw))?;
     let names = || file.faces.iter().map(|f| (f.id, f.name.clone())).collect();
     if strict {
         if let Some(why) = heal::misfit(&file) {
@@ -1901,7 +2087,7 @@ pub(super) fn solid(geo: &mut Geometry, id: u64, strict: bool) -> Result<ReadSol
     // This kernel states an uncertainty above its own only for geometry it kept with local
     // tolerances, which a read of its file keeps too rather than healing within them; it heals
     // only if that fails.
-    let kept = within.is_some() && rd.geo.file.originating_system() == Some(WRITER);
+    let kept = within.is_some() && ours;
     // Healing that moves geometry further than the file says its geometry meets has changed the
     // shape, not closed it: the file's geometry is kept instead where tolerances can hold it.
     let why = if kept {
