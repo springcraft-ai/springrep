@@ -2791,7 +2791,9 @@ fn assert_within_step_domains(b: &Brep) -> (usize, usize) {
                 }
                 let ts: Vec<f64> = (0..=64).map(|i| t0 + (t1 - t0) * i as f64 / 64.0).collect();
                 let uvs = c2.track(&ts);
-                for &uv in &uvs {
+                // The box the pcurve is known to lie in, as well as points along it.
+                let (_, bounds) = super::write::course(b, c, Some(&c2));
+                for &uv in uvs.iter().chain(&bounds) {
                     if let Some(d) = du {
                         assert!(inside(uv.x, d), "{kind}: u {} outside {d:?}", uv.x);
                     }
