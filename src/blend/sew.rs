@@ -399,7 +399,15 @@ pub(super) fn sewn(
                     let xe = out.edge(x);
                     let ends_match =
                         (xe.start == s && xe.end == t) || (xe.start == t && xe.end == s);
-                    (ends_match && m.dist(mid) <= tol::LINEAR).then_some((x, xe.start != s))
+                    // Two pieces' cuts of one curve need not run along it at the same pace.
+                    let on = || {
+                        m.dist(mid) <= tol::LINEAR
+                            || xe
+                                .curve
+                                .as_ref()
+                                .is_some_and(|c| curve_distance(c, xe.range, mid).0 <= tol::LINEAR)
+                    };
+                    (ends_match && on()).then_some((x, xe.start != s))
                 });
                 if let Some((x, flipped)) = same {
                     if matches!(u, Use::Contact(_)) {

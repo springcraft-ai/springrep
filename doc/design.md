@@ -1131,9 +1131,14 @@ Each piece ends where its edge does, in one of nine ways:
 - **On a neighbour's section.** Pieces whose edges continue each other tangentially share their end
   section exactly. They are glued into one tool along it without a boolean: the two blend surfaces
   touch tangentially there, which intersection cannot resolve.
-- **On a mitre.** Two straight pieces on one plane whose other faces are planes mirrored across the
-  plane between them (a box's top edges, a pocket's corners) each run past the corner and are cut on
-  that mirror plane, where their blend faces meet.
+- **On a mitre.** Two pieces on one face whose other faces are planes mirrored across the plane
+  between them, where that mirror also takes the shared face onto itself: a plane square to it (a
+  box's top edges, a pocket's corners), or a sphere centred on it (a square post standing on the
+  middle of a ball). The mirror then takes one blend surface onto the other, so they cross on the
+  mirror plane, and each piece runs past the corner and is cut there. Two rounds between a plane
+  and a sphere are tori about different axes, and their crease is the mirror plane's cut of
+  either. A corner no such plane mirrors (the same post off the middle of the ball) is refused:
+  its two surfaces differ and cross on no plane.
 - **Through into air.** Two convex pieces sharing one face, at a vertex of three faces where each
   edge runs on past the vertex through the other's wall into air (a tower's rim where a square side
   meets a leaning cut), each run past the vertex and clear of that wall. Cutting both leaves the
