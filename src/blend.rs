@@ -20,8 +20,10 @@
 //! concave piece whose strip is wider than its face runs over the face's convex edge and is
 //! trimmed by the face past it. Three or more fillets meeting at a corner of planes close with the
 //! sphere touching them all, the rolling ball's corner (Rossignac and Requicha 1984), or where no
-//! one ball touches four planes, with two such corners and a round between them ([`ridge`]); three
-//! or more chamfers close with the plane through the points where their contact lines cross.
+//! one ball touches four planes, with two such corners and a round between them ([`ridge`]). Where
+//! the balls at an edge's two ends take the whole edge, as a plate's full round does, the edge has
+//! no piece and the two corners meet on the section through both balls' centre. Three or more
+//! chamfers close with the plane through the points where their contact lines cross.
 
 pub(crate) mod shaped;
 
@@ -888,8 +890,14 @@ fn blend_picked(
         }
     }
 
-    let mut tools = Vec::with_capacity(picked.len());
+    // A piece whose corner balls take its whole edge has no tool: the balls meet on the end
+    // section they share.
+    let mut tools: Vec<Option<Brep>> = Vec::with_capacity(picked.len());
     for i in 0..picked.len() {
+        if vanishes(&sections[i], ends[i]) {
+            tools.push(None);
+            continue;
+        }
         let tool = piece(&sections[i], &outlines[i], ends[i], feature)?;
         let tool = trimmed(
             tool,
@@ -899,7 +907,7 @@ fn blend_picked(
             &beyonds[i],
             feature,
         )?;
-        tools.push(spilled(body, tool, &spills[i], feature)?);
+        tools.push(Some(spilled(body, tool, &spills[i], feature)?));
     }
     let sewing = std::time::Instant::now();
     let sew_tools = if spills.iter().any(|s| !s.is_empty()) {
@@ -1132,13 +1140,14 @@ fn compare(
     Ok(sewn)
 }
 
-/// The blend made by cutting each piece from the body, or adding it, with a boolean.
+/// The blend made by cutting each piece from the body, or adding it, with a boolean. A piece with
+/// no tool ([`vanishes`]) takes nothing.
 #[allow(clippy::too_many_arguments)]
 fn by_tools(
     body: &Brep,
     picked: &[Picked],
     sections: &[Section],
-    tools: Vec<Brep>,
+    tools: Vec<Option<Brep>>,
     names: &[BTreeSet<FaceName>],
     joints: &[(usize, usize)],
     balls: &[(Vec<usize>, Ball)],
@@ -1149,6 +1158,7 @@ fn by_tools(
     let mut cut_pieces: Vec<(usize, Brep)> = Vec::new();
     let mut add_pieces: Vec<(usize, Brep)> = Vec::new();
     for (i, tool) in tools.into_iter().enumerate() {
+        let Some(tool) = tool else { continue };
         let tool = marked(tool, i, &names[i]);
         if sections[i].convex {
             cut_pieces.push((i, tool));
@@ -2769,7 +2779,7 @@ struct Ends<'a> {
 fn sewing_tools(
     body: &Brep,
     picked: &[Picked],
-    tools: &[Brep],
+    tools: &[Option<Brep>],
     e: &Ends,
     feature: &str,
 ) -> std::result::Result<(Vec<Brep>, Vec<[run::Beyond; 2]>), String> {
@@ -2795,6 +2805,9 @@ fn sewing_tools(
     let mut out = Vec::with_capacity(tools.len());
     let mut taken = Vec::with_capacity(tools.len());
     for (i, tool) in tools.iter().enumerate() {
+        let Some(tool) = tool else {
+            return Err("a fillet whose corners meet along an edge".into());
+        };
         let [b0, b1] = &e.beyonds[i];
         let b = [b0.clone()?, b1.clone()?];
         if !e.sections[i].convex && b.iter().any(|bk| !bk.gone.is_empty()) {
@@ -2911,6 +2924,16 @@ fn extent(s: &Section, o: &Outline) -> f64 {
         }
     }
     far
+}
+
+/// Whether a straight piece's corner balls take its whole edge, so it leaves no material.
+fn vanishes(s: &Section, ends: [End; 2]) -> bool {
+    match (s.path, ends) {
+        (Path::Prism { length, .. }, [End::Short(a), End::Short(b)]) => {
+            (length - a - b).abs() <= tol::LINEAR
+        }
+        _ => false,
+    }
 }
 
 /// The solid of one picked edge's blend material, finished at both ends.

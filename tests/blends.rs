@@ -164,6 +164,68 @@ fn three_fillets_at_a_corner_close_with_a_sphere() {
 }
 
 #[test]
+fn a_plate_rounded_at_half_its_thickness_is_a_full_round() {
+    // Every edge of a plate filleted at half its thickness: the side faces shrink to nothing, and
+    // each corner's two balls are one, so its upright edge keeps no round. The solid is every
+    // point within r of the rectangle r in from the sides at mid-height.
+    let (w, d, h) = (40.0, 30.0, 6.0);
+    let r = h / 2.0;
+    let plate = springrep::primitive::block(&Frame::WORLD, Vec3::new(w, d, h), "plate").unwrap();
+    let sides = ["plate.v_min", "plate.u_max", "plate.v_max", "plate.u_min"];
+    let mut pairs = Vec::new();
+    for (i, side) in sides.iter().enumerate() {
+        pairs.push(("plate.start", *side));
+        pairs.push(("plate.end", *side));
+        pairs.push((*side, sides[(i + 1) % 4]));
+    }
+    let b = fillet(&plate, &pairs, r, "f").unwrap();
+    let (core, rim) = ((w - 2.0 * r) * (d - 2.0 * r), 2.0 * (w + d - 4.0 * r));
+    let volume = 2.0 * r * core + PI * r * r / 2.0 * rim + 4.0 / 3.0 * PI * r.powi(3);
+    let area = 2.0 * core + PI * r * rim + 4.0 * PI * r * r;
+    assert_solid(&b, volume, area);
+    assert_eq!(b.face_count(), 10);
+    assert_eq!(kinds(&b, "cylinder"), 4);
+    assert_eq!(kinds(&b, "sphere"), 4);
+    for side in sides {
+        assert_eq!(names(&b, side), 0, "{side}");
+    }
+    for i in 0..12 {
+        let upright = i % 3 == 2;
+        assert_eq!(names(&b, &format!("f.round_{i}")), usize::from(!upright));
+    }
+    // A ball larger than half the thickness does not fit.
+    assert!(fillet(&plate, &pairs, r + 1e-3, "f").is_err());
+}
+
+#[test]
+fn a_rib_rounded_at_half_its_width_is_a_full_round() {
+    // The top and upright edges of a rib filleted at half its width: the top face and the end
+    // faces shrink to nothing, and the top edge across each end keeps no round. In plan the rib
+    // is a stadium; above its rounds' axis it is the half cylinder and the two quarter balls.
+    let (l, h, r) = (40.0, 10.0, 3.0);
+    let rib = springrep::primitive::block(&Frame::WORLD, Vec3::new(l, 2.0 * r, h), "rib").unwrap();
+    let sides = ["rib.v_min", "rib.u_max", "rib.v_max", "rib.u_min"];
+    let mut pairs = Vec::new();
+    for (i, side) in sides.iter().enumerate() {
+        pairs.push(("rib.end", *side));
+        pairs.push((*side, sides[(i + 1) % 4]));
+    }
+    let b = fillet(&rib, &pairs, r, "f").unwrap();
+    let c = l - 2.0 * r;
+    let (plan, rim) = (2.0 * r * c + PI * r * r, 2.0 * c + 2.0 * PI * r);
+    let volume = plan * (h - r) + PI * r * r / 2.0 * c + 2.0 / 3.0 * PI * r.powi(3);
+    let area = plan + rim * (h - r) + PI * r * c + 2.0 * PI * r * r;
+    assert_solid(&b, volume, area);
+    for gone in ["rib.end", "rib.u_min", "rib.u_max"] {
+        assert_eq!(names(&b, gone), 0, "{gone}");
+    }
+    for i in 0..8 {
+        let across = i == 2 || i == 6;
+        assert_eq!(names(&b, &format!("f.round_{i}")), usize::from(!across));
+    }
+}
+
+#[test]
 fn a_blend_wider_than_its_face_is_refused() {
     let r = chamfer(
         &block("box", 40.0, 30.0, 4.0),
