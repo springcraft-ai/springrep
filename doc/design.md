@@ -294,7 +294,9 @@ wherever it does not touch a tolerant entity.
   knot span apart never differs by more than a right angle (a face bounded by a fold touches itself,
   and no mesher can triangulate it). Imported splines are not tested, since a designer may draw a
   cusp;
-- each loop runs the way its face's orientation requires, except a vertex loop, which is a point;
+- each loop runs the way its face's orientation requires, except a vertex loop, which is a point,
+  and a loop that runs only along slits and back, a line contact inside the face, which encloses
+  nothing;
 - each inner loop lies in the region the face's other loops bound, by the exact winding number of
   those loops about a point on it (a face whose loops wind round a period, as a band round a
   cylinder, has no such region and is not tested), and each void shell lies inside its solid's outer

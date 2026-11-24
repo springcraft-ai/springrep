@@ -17,7 +17,7 @@ use crate::{
     geom::{Curve, NurbsSurface, Surface, distance_to},
     math::{Aabb, Point3, Vec2, Vec3},
     measure, tol,
-    topo::{Brep, CoedgeId, EdgeId, FaceId, FaceMemo, ShellId, SolidId, VertexId},
+    topo::{Brep, CoedgeId, EdgeId, FaceId, FaceMemo, LoopId, ShellId, SolidId, VertexId},
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -142,6 +142,27 @@ fn within_vertex(b: &Brep, face: FaceId, c: CoedgeId, p: Vec2, q: Vec2) -> bool 
         return false;
     }
     carried(&b.face(face).surface, p, q) <= 2.0 * (tol - tol::LINEAR) + 10.0 * tol::LINEAR
+}
+
+/// Whether loop `lp` of face `f` runs only along slits and back: each coedge's edge is run the
+/// other way by another coedge of the loop, over the same image in the parameter plane, not a
+/// seam's a period away. Such a loop is a contact inside the face and encloses nothing.
+fn slit_loop(b: &Brep, f: FaceId, lp: LoopId) -> bool {
+    let cs = &b.lp(lp).coedges;
+    let mid = |c: CoedgeId| {
+        let (t0, t1) = b.edge(b.coedge(c).edge).range;
+        b.coedge_uvs(c, &[0.5 * (t0 + t1)])[0]
+    };
+    cs.iter().all(|&c| {
+        let co = b.coedge(c);
+        b.edge(co.edge).curve.is_some()
+            && cs.iter().any(|&d| {
+                let other = b.coedge(d);
+                other.edge == co.edge
+                    && other.reversed != co.reversed
+                    && uv_gap(b, f, mid(c), mid(d)) <= 10.0 * tol::LINEAR
+            })
+    })
 }
 
 /// The length of the step from `p` to `q` in parameters as the surface carries it at `p`.
@@ -524,7 +545,9 @@ fn checked(
                 area
             };
             let want_positive = (li == 0) != face.reversed;
-            if !b.is_vertex_loop(lp) && (area > 0.0) != want_positive {
+            // A slit encloses nothing, so its area has no sign to test: read as zero, an inner slit
+            // in a face turned against its surface would run the wrong way.
+            if !b.is_vertex_loop(lp) && (area > 0.0) != want_positive && !slit_loop(b, f, lp) {
                 issue(format!("face {} loop {li} runs the wrong way", f.index()));
             }
         }
@@ -2349,6 +2372,52 @@ mod tests {
     use super::*;
     use crate::geom::{BSpline, IntersectionCurve, Plane};
     use crate::math::{Frame, Vec3};
+
+    #[test]
+    fn a_loop_with_a_slit_off_its_boundary_still_runs_its_face_s_way() {
+        // A rod lying on a box's top face, its end flush with the box's side x = 0, touches the
+        // face along a line from the face's edge: a slit off the face's outer loop, not a loop of
+        // its own. Turned over, that loop runs the wrong way, slit and all.
+        let frame = Frame::new(Vec3::ZERO, Vec3::Z, Vec3::X).unwrap();
+        let rect = crate::profile::Profile::rect(Vec2::new(10.0, 5.0), 20.0, 10.0);
+        let a = crate::sweep::extrude(&rect, &frame, 10.0, "a").unwrap();
+        let axis = Frame::from_axis(Vec3::new(0.0, 5.0, 12.0), Vec3::X).unwrap();
+        let disc = crate::profile::Profile::circle(Vec2::ZERO, 4.0);
+        let c = crate::sweep::extrude(&disc, &axis, 10.0, "c").unwrap();
+        let mut u = crate::boolean::union(&a, &c).unwrap();
+        assert!(check(&u).is_empty(), "{:?}", check(&u));
+        let contact = u
+            .edge_ids()
+            .find(|&e| {
+                let edge = u.edge(e);
+                let mut ps = [edge.start, edge.end].map(|v| u.vertex(v).point);
+                ps.sort_by(|p, q| p.x.total_cmp(&q.x));
+                ps[0].dist(Vec3::new(0.0, 5.0, 10.0)) < 1e-9
+                    && ps[1].dist(Vec3::new(10.0, 5.0, 10.0)) < 1e-9
+            })
+            .expect("the rod's line of contact");
+        let (top, li, lp) = u
+            .face_ids()
+            .filter(|&f| matches!(u.face(f).surface, Surface::Plane(_)))
+            .find_map(|f| {
+                let loops = u.face(f).loops.clone();
+                loops.into_iter().enumerate().find_map(|(li, lp)| {
+                    let on = |c: &CoedgeId| u.coedge(*c).edge == contact;
+                    let cs = &u.lp(lp).coedges;
+                    (cs.iter().filter(|c| on(c)).count() == 2 && cs.len() > 2)
+                        .then_some((f, li, lp))
+                })
+            })
+            .expect("the top face's loop, with the slit on it");
+        assert!(!slit_loop(&u, top, lp));
+        u.face_mut(top).reversed ^= true;
+        let wrong = format!("face {} loop {li} runs the wrong way", top.index());
+        assert!(
+            check(&u).iter().any(|i| i.message == wrong),
+            "{:?}",
+            check(&u)
+        );
+    }
 
     #[test]
     fn a_step_on_a_surface_whose_parameters_run_askew_is_measured_as_it_lies_in_space() {

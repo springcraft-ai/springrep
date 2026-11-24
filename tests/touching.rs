@@ -16,6 +16,7 @@ use springrep::{
     math::{Frame, Vec2, Vec3},
     measure,
     mesh::{self, MeshOptions},
+    primitive::cylinder,
     profile::{NamedSegment, Profile, ProfileLoop, Segment},
     sweep::{extrude, revolve},
     topo::{Brep, EdgeId},
@@ -171,6 +172,83 @@ fn a_rod_lying_on_a_box_face_unites_along_the_line() {
     // line is an edge.
     let a = block("a", [0.0, 0.0, 0.0], [20.0, 10.0, 10.0]);
     let c = rod("c", [5.0, 5.0, 12.0], [1.0, 0.0, 0.0], 2.0, 10.0);
+    let u = union(&a, &c).unwrap();
+    let rod_area = 2.0 * PI * 4.0 + 2.0 * PI * 2.0 * 10.0;
+    assert_touching(&u, 2000.0 + PI * 4.0 * 10.0, 1000.0 + rod_area, [1, 0, 0]);
+    assert_eq!(four_face_edges(&u).len(), 1);
+}
+
+#[test]
+fn bored_tubes_fanned_from_a_shells_axis_touch_along_it() {
+    // Tubes of radius 120 from the axis of a shell of radius 1000, each 87.5 above and 11.25°
+    // round from the last, are united and bored to radius 100 in turn. The first tube's end ring
+    // less the second bore leaves an 11.25° wedge whose edge runs along the axis from z = 700 to
+    // 720, inside the third tube's end disc, which it touches only there until the third bore
+    // takes the disc's middle.
+    let at = |origin: Vec3, dir: Vec3| {
+        let hint = if dir.z.abs() > 0.9 { Vec3::X } else { Vec3::Z };
+        Frame::new(origin, dir, hint).unwrap()
+    };
+    let outer = cylinder(&at(Vec3::ZERO, Vec3::Z), 1000.0, 4000.0, "outer").unwrap();
+    let inner = cylinder(&at(Vec3::ZERO, Vec3::Z), 980.0, 4000.0, "inner").unwrap();
+    let mut body = difference(&outer, &inner).unwrap();
+    // Each step's volume by inclusion–exclusion from the common part.
+    let unite = |a: &Brep, b: &Brep| {
+        let (u, i) = (union(a, b).unwrap(), intersection(a, b).unwrap());
+        let want = measure::volume(a) + measure::volume(b) - measure::volume(&i);
+        let v = measure::volume(&u);
+        assert!((v - want).abs() <= 1e-9 * want, "union {v} vs {want}");
+        u
+    };
+    let cut = |a: &Brep, b: &Brep| {
+        let (d, i) = (difference(a, b).unwrap(), intersection(a, b).unwrap());
+        let want = measure::volume(a) - measure::volume(&i);
+        let v = measure::volume(&d);
+        assert!((v - want).abs() <= 1e-9 * want, "difference {v} vs {want}");
+        d
+    };
+    for i in 0..3 {
+        let a = TAU * i as f64 / 32.0;
+        let (origin, dir) = (
+            Vec3::new(0.0, 0.0, 600.0 + 87.5 * i as f64),
+            Vec3::new(a.cos(), a.sin(), 0.0),
+        );
+        let tube = cylinder(&at(origin, dir), 120.0, 1300.0, &format!("tube{i}")).unwrap();
+        body = unite(&body, &tube);
+        if i == 2 {
+            assert_eq!(body.solid_ids().count(), 1);
+            let ends = |e: EdgeId| {
+                let edge = body.edge(e);
+                [edge.start, edge.end].map(|v| body.vertex(v).point)
+            };
+            let contact = [Vec3::new(0.0, 0.0, 700.0), Vec3::new(0.0, 0.0, 720.0)];
+            let on_axis = |e: EdgeId| {
+                let mut ps = ends(e);
+                ps.sort_by(|p, q| p.z.total_cmp(&q.z));
+                ps.iter().zip(&contact).all(|(p, q)| p.dist(*q) < 1e-9)
+            };
+            assert_eq!(
+                four_face_edges(&body)
+                    .into_iter()
+                    .filter(|&e| on_axis(e))
+                    .count(),
+                1
+            );
+        }
+        let bore = cylinder(&at(origin, dir), 100.0, 1400.0, &format!("bore{i}")).unwrap();
+        body = cut(&body, &bore);
+    }
+    let issues = check::check(&body);
+    assert!(issues.is_empty(), "{issues:?}");
+    assert_eq!(body.solid_ids().count(), 1);
+}
+
+#[test]
+fn a_rod_lying_under_a_box_face_unites_along_the_line() {
+    // The same contact on the face z = 0, whose outward normal runs against its plane's: the line
+    // is a slit of its own inside the face, which encloses nothing and so runs neither way.
+    let a = block("a", [0.0, 0.0, 0.0], [20.0, 10.0, 10.0]);
+    let c = rod("c", [5.0, 5.0, -2.0], [1.0, 0.0, 0.0], 2.0, 10.0);
     let u = union(&a, &c).unwrap();
     let rod_area = 2.0 * PI * 4.0 + 2.0 * PI * 2.0 * 10.0;
     assert_touching(&u, 2000.0 + PI * 4.0 * 10.0, 1000.0 + rod_area, [1, 0, 0]);
