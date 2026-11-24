@@ -1800,6 +1800,48 @@ fn a_square_post_on_a_ball_takes_fillets_mitred_at_its_corners() {
 }
 
 #[test]
+fn a_foot_round_the_seam_of_the_ball_parts_is_built_as_one_face() {
+    // The ball's seam meets the foot of the wall `u_max` at its middle, y = 0, and parts that
+    // edge in two. The round along both is one face of the solid as it is sewn: one edge along
+    // the wall, where nothing else ends, and two along the ball, which meet where the seam now
+    // ends, on the round's section through the seam.
+    for (c, s) in [SQUARE, (Vec2::new(5.0, 3.0), POST)] {
+        let pairs: Vec<(&str, &str)> = WALLS.iter().map(|w| (w.0, "ball.skin")).collect();
+        let b = fillet(&post_on_ball(c, s), &pairs, 5.92, "foot").unwrap();
+        let round = b
+            .face_ids()
+            .find(|&f| {
+                b.face(f)
+                    .names
+                    .iter()
+                    .any(|x| x.to_string() == "foot.round_1")
+            })
+            .unwrap();
+        let wall = wall_place(c, s, 1).0;
+        let (mut on_wall, mut on_ball, mut seam_ends) = (0, 0, 0);
+        for &lp in &b.face(round).loops {
+            for &co in &b.lp(lp).coedges {
+                let edge = b.edge(b.coedge(co).edge);
+                let curve = edge.curve.as_ref().unwrap();
+                let points: Vec<Vec3> = (0..=4)
+                    .map(|k| {
+                        curve.eval(edge.range.0 + (edge.range.1 - edge.range.0) * k as f64 / 4.0)
+                    })
+                    .collect();
+                if points.iter().all(|q| (q.x - wall).abs() <= 1e-9) {
+                    on_wall += 1;
+                } else if points.iter().all(|q| (q.norm() - BALL).abs() <= 1e-9) {
+                    on_ball += 1;
+                    let ends = [edge.start, edge.end].map(|v| b.vertex(v).point);
+                    seam_ends += ends.iter().filter(|q| q.y.abs() <= 1e-9).count();
+                }
+            }
+        }
+        assert_eq!((on_wall, on_ball, seam_ends), (1, 2, 2));
+    }
+}
+
+#[test]
 fn a_square_post_on_a_ball_takes_chamfers_mitred_at_its_corners() {
     let b = assert_foot(SQUARE, Size::Bevel(3.0), &[0, 1, 2, 3], &[MITRED; 4], &[]);
     for k in 0..4 {

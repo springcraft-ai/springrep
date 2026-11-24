@@ -1,6 +1,8 @@
 //! A piece's blend face built alone, as the strip its section sweeps, trimmed where it ends: for
 //! the sewing, with no solid tool and no boolean. A strip ends square on its own section; on a
 //! plane, along the plane's cut of its surface; or at a corner it shares with another strip.
+//! Two pieces whose edges are one curve parted at a vertex, as a wall's foot is by a ball's
+//! seam, are one strip.
 //!
 //! At such a corner the two blend surfaces cross on one curve, the crease, whose ends are known
 //! outright. Its far end is where the two strips' contact curves on the face they share meet:
@@ -480,7 +482,7 @@ struct Trim {
 fn corner(
     body: &Brep,
     picked: &[Picked],
-    lanes: &[Lane],
+    lanes: &[&Lane],
     (i, wall_i, on_i): (usize, (Point3, Vec3), Vec3),
     (j, wall_j, on_j): (usize, (Point3, Vec3), Vec3),
     mirror: Option<(Point3, Vec3)>,
@@ -524,7 +526,7 @@ fn corner(
             None if on_both => (lanes[j].surface().clone(), between),
             None => (lanes[j].surface().clone(), edge_i),
         };
-        let crease = crossing(&lanes[i], &other, edge_i, far)?;
+        let crease = crossing(lanes[i], &other, edge_i, far)?;
         let trim = |w: usize| Trim {
             stops: if w == 0 { [edge_i, far] } else { [far, edge_i] },
             first: w,
@@ -566,8 +568,8 @@ fn corner(
         })
         .min_by(|a, b| a.dist(edge_low).total_cmp(&b.dist(edge_low)))
         .ok_or("a blend whose contact runs past a corner without meeting the other blend")?;
-    let crease = crossing(&lanes[low], lanes[high].surface(), near, far)?;
-    let step = crossing(&lanes[high], plane_low, edge_high, near)?;
+    let crease = crossing(lanes[low], lanes[high].surface(), near, far)?;
+    let step = crossing(lanes[high], plane_low, edge_high, near)?;
     let stops = |w: usize, wall: Point3| if w == 0 { [wall, far] } else { [far, wall] };
     let lower = Trim {
         stops: stops(w_low, near),
@@ -636,28 +638,170 @@ fn reaches(
     Ok(reach)
 }
 
-/// Every piece's strip, each end closed as `closes` gives; or why they cannot be built.
+/// Pieces `a` and `b`, joined where `a`'s edge ends and `b`'s starts, as one section swept along
+/// both edges: the two edges are stretches of one line or circle, between the same two faces in
+/// the same order, blended alike. None where they are not.
+fn as_one(picked: &[Picked], sections: &[Section], a: usize, b: usize) -> Option<Section> {
+    let (sa, sb) = (&sections[a], &sections[b]);
+    let near = |p: Vec2, q: Vec2| p.dist(q) <= tol::LINEAR;
+    let turned = |p: Vec2, q: Vec2| p.dist(q) <= tol::ANGULAR;
+    let alike = picked[a].faces == picked[b].faces
+        && picked[a].pairs == picked[b].pairs
+        && sa.convex == sb.convex
+        && near(sa.p, sb.p)
+        && (0..2).all(|k| turned(sa.m[k], sb.m[k]) && turned(sa.n[k], sb.n[k]));
+    if !alike {
+        return None;
+    }
+    let same = |f: &Frame, g: &Frame| {
+        [(f.x, g.x), (f.y, g.y), (f.z, g.z)]
+            .iter()
+            .all(|(u, v)| (*u - *v).norm() <= tol::ANGULAR)
+    };
+    let path = match (sa.path, sb.path) {
+        (
+            Path::Prism { frame, length },
+            Path::Prism {
+                frame: next,
+                length: more,
+            },
+        ) if same(&frame, &next)
+            && next.origin.dist(frame.origin + frame.z * length) <= tol::LINEAR =>
+        {
+            Path::Prism {
+                frame,
+                length: length + more,
+            }
+        }
+        (
+            Path::Ring {
+                circle,
+                t0,
+                span,
+                full: false,
+            },
+            Path::Ring {
+                circle: next,
+                t0: from,
+                span: more,
+                full: false,
+            },
+        ) if same(&circle, &next)
+            && circle.origin.dist(next.origin) <= tol::LINEAR
+            && (from - t0 - span + PI).rem_euclid(TAU) - PI <= tol::ANGULAR
+            && (from - t0 - span + PI).rem_euclid(TAU) - PI >= -tol::ANGULAR =>
+        {
+            Path::Ring {
+                circle,
+                t0,
+                span: span + more,
+                full: false,
+            }
+        }
+        _ => return None,
+    };
+    Some(Section { path, ..*sa })
+}
+
+/// Every piece's strip, each end closed as `closes` gives, and the piece whose strip each piece
+/// lies on: its own, or that of the piece it is one strip with ([`as_one`]), which has none of
+/// its own. Or why they cannot be built.
 pub(super) fn strips(
     body: &Brep,
     picked: &[Picked],
     sections: &[Section],
     outlines: &[Outline],
     closes: &[[Close; 2]],
+    joints: &[(usize, usize)],
     feature: &str,
-) -> Result<Vec<Strip>, String> {
-    let mut lanes = Vec::with_capacity(picked.len());
-    for i in 0..picked.len() {
-        let reach = reaches(body, picked, sections, outlines, closes, i)?;
+) -> Result<(Vec<Option<Strip>>, Vec<usize>), String> {
+    let n = picked.len();
+    // Each lane: the piece at its start and the piece at its end, its section, and where its
+    // contact with each face is parted, at a vertex another edge of that face ends on.
+    struct Run {
+        ends: [usize; 2],
+        section: Section,
+        parts: [Option<Point3>; 2],
+    }
+    let mut runs: Vec<Run> = Vec::new();
+    let mut hosts: Vec<usize> = (0..n).collect();
+    let mut taken = vec![false; n];
+    for &(i, j) in joints {
+        if taken[i] || taken[j] {
+            continue;
+        }
+        let (ei, ej) = (body.edge(picked[i].edge), body.edge(picked[j].edge));
+        let (a, b) = if ei.end == ej.start && ei.start != ej.end {
+            (i, j)
+        } else if ej.end == ei.start && ej.start != ei.end {
+            (j, i)
+        } else {
+            continue;
+        };
+        if closes[a][1] != Close::Square || closes[b][0] != Close::Square {
+            continue;
+        }
+        let Some(section) = as_one(picked, sections, a, b) else {
+            continue;
+        };
+        let v = body.edge(picked[a].edge).end;
+        let parted = |k: usize| {
+            body.coedge_ids().any(|c| {
+                let e = body.coedge(c).edge;
+                let edge = body.edge(e);
+                body.coedge_face(c) == picked[a].faces[k]
+                    && (edge.start == v || edge.end == v)
+                    && picked.iter().all(|pk| pk.edge != e)
+            })
+        };
+        let across = |k: usize| -> Option<Point3> {
+            let blend = outlines[a].profile.loops.iter().flat_map(|l| &l.segments);
+            let blend = blend.clone().find(|sg| sg.names.contains("blend"))?;
+            Some(sections[a].path.place(blend.segment.at(k as f64), true))
+        };
+        let parts = [0, 1].map(|k| if parted(k) { across(k) } else { None });
+        if (0..2).any(|k| parted(k) && parts[k].is_none()) {
+            continue;
+        }
+        taken[i] = true;
+        taken[j] = true;
+        hosts[b] = a;
+        runs.push(Run {
+            ends: [a, b],
+            section,
+            parts,
+        });
+    }
+    for i in (0..n).filter(|&i| !taken[i]) {
+        runs.push(Run {
+            ends: [i, i],
+            section: sections[i],
+            parts: [None, None],
+        });
+    }
+    let mut lanes = Vec::with_capacity(runs.len());
+    for run in &runs {
+        let [a, b] = run.ends;
+        let reach = [
+            reaches(body, picked, sections, outlines, closes, a)?[0],
+            reaches(body, picked, sections, outlines, closes, b)?[1],
+        ];
         lanes.push(Lane::swept(
-            &sections[i],
-            &outlines[i],
-            closes[i],
+            &run.section,
+            &outlines[a],
+            [closes[a][0], closes[b][1]],
             reach,
             feature,
         )?);
     }
-    let mut trims: Vec<[Option<Trim>; 2]> = (0..picked.len()).map(|_| [None, None]).collect();
-    for i in 0..picked.len() {
+    let mut lane_of = vec![0; n];
+    for (l, run) in runs.iter().enumerate() {
+        lane_of[run.ends[0]] = l;
+        lane_of[run.ends[1]] = l;
+    }
+    let by_piece: Vec<&Lane> = lane_of.iter().map(|&l| &lanes[l]).collect();
+    let mut trims: Vec<[Option<Trim>; 2]> = (0..n).map(|_| [None, None]).collect();
+    for i in 0..n {
         for k in 0..2 {
             if trims[i][k].is_some() {
                 continue;
@@ -679,12 +823,12 @@ pub(super) fn strips(
                     }
                     let cut = plane(origin, normal)?;
                     let missed = "a blend whose contact does not reach the face it ends on";
-                    let a = lanes[i].contact_on(0, &cut, at).ok_or(missed)?;
-                    let b = lanes[i].contact_on(1, &cut, at).ok_or(missed)?;
+                    let a = by_piece[i].contact_on(0, &cut, at).ok_or(missed)?;
+                    let b = by_piece[i].contact_on(1, &cut, at).ok_or(missed)?;
                     trims[i][k] = Some(Trim {
                         stops: [a, b],
                         first: 0,
-                        runs: vec![crossing(&lanes[i], &cut, a, b)?],
+                        runs: vec![crossing(by_piece[i], &cut, a, b)?],
                     });
                 }
                 Close::Cross {
@@ -700,7 +844,7 @@ pub(super) fn strips(
                     let [mine, yours] = corner(
                         body,
                         picked,
-                        &lanes,
+                        &by_piece,
                         (i, wall, onward(body, picked, i, k)?),
                         (other, theirs, onward(body, picked, other, end)?),
                         mirror,
@@ -713,15 +857,22 @@ pub(super) fn strips(
             }
         }
     }
-    lanes
-        .iter()
-        .zip(&trims)
-        .map(|(lane, trims)| trimmed(lane, trims))
-        .collect()
+    let mut out: Vec<Option<Strip>> = (0..n).map(|_| None).collect();
+    for (run, lane) in runs.iter().zip(&lanes) {
+        let [a, b] = run.ends;
+        let ends = [trims[a][0].take(), trims[b][1].take()];
+        out[a] = Some(trimmed(lane, &ends, run.parts)?);
+    }
+    Ok((out, hosts))
 }
 
-/// The lane's blend face with each end cut back to its trim.
-fn trimmed(lane: &Lane, trims: &[Option<Trim>; 2]) -> Result<Strip, String> {
+/// The lane's blend face with each end cut back to its trim, and its contact with face `k` in
+/// two edges that meet at `parts[k]`.
+fn trimmed(
+    lane: &Lane,
+    trims: &[Option<Trim>; 2],
+    parts: [Option<Point3>; 2],
+) -> Result<Strip, String> {
     let swept = &lane.swept;
     let surface = lane.surface();
     let mut face = Brep::new();
@@ -775,24 +926,41 @@ fn trimmed(lane: &Lane, trims: &[Option<Trim>; 2]) -> Result<Strip, String> {
                 return Err("a blend whose ends take its whole contact".into());
             }
             let (s, t) = (vertex(&mut face, tips[0]), vertex(&mut face, tips[1]));
-            let e = face.add_edge(curve.clone(), range, s, t);
-            uses.push((e, Use::Contact(k)));
-            let (from, to) = if co.reversed {
-                (range.1, range.0)
-            } else {
-                range
+            let inside = |x: f64| (x - range.0).min(range.1 - x) * speed > tol::LINEAR;
+            let cut = parts[k]
+                .map(|q| (q, curve.project(q, range.0, range.1)))
+                .filter(|&(_, x)| inside(x));
+            // The contact's stretches along its curve, and in the order the loop runs them.
+            let mut stretches = match cut {
+                Some((q, x)) => {
+                    let m = vertex(&mut face, q);
+                    vec![((range.0, x), s, m), ((x, range.1), m, t)]
+                }
+                None => vec![(range, s, t)],
             };
-            let uvs = swept.coedge_uvs(c, &[from, to]);
-            let pcurve = match &co.pcurve {
-                PCurve::Projected { .. } => PCurve::Projected { seed: uvs[0] },
-                other => other.clone(),
-            };
-            seed = Some(uvs[1]);
-            specs.push(CoedgeSpec {
-                edge: e,
-                reversed: co.reversed,
-                pcurve,
-            });
+            if co.reversed {
+                stretches.reverse();
+            }
+            for (stretch, s, t) in stretches {
+                let e = face.add_edge(curve.clone(), stretch, s, t);
+                uses.push((e, Use::Contact(k)));
+                let (from, to) = if co.reversed {
+                    (stretch.1, stretch.0)
+                } else {
+                    stretch
+                };
+                let uvs = swept.coedge_uvs(c, &[from, to]);
+                let pcurve = match &co.pcurve {
+                    PCurve::Projected { .. } => PCurve::Projected { seed: uvs[0] },
+                    other => other.clone(),
+                };
+                seed = Some(uvs[1]);
+                specs.push(CoedgeSpec {
+                    edge: e,
+                    reversed: co.reversed,
+                    pcurve,
+                });
+            }
             continue;
         }
         let end = usize::from(lane.caps[1] == c);

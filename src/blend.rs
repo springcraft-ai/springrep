@@ -1015,8 +1015,12 @@ fn blend_settled(
             })
             .collect();
         let convex: Vec<bool> = sections.iter().map(|s| s.convex).collect();
-        strip::strips(body, &picked, &sections, &outlines, &closes, feature)
-            .and_then(|strips| sew::sewn_strips(body, &picked, strips, &convex, &names, feature))
+        strip::strips(
+            body, &picked, &sections, &outlines, &closes, &joints, feature,
+        )
+        .and_then(|(strips, hosts)| {
+            sew::sewn_strips(body, &picked, strips, &hosts, &convex, &names, feature)
+        })
     });
     if let Some(corner) = crossed {
         return match outright {

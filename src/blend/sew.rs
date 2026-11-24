@@ -173,17 +173,20 @@ pub(super) fn sewn(
         })
         .collect::<Option<_>>()
         .ok_or("a tool whose blend faces meet it other than at its sides and ends")?;
+    let hosts: Vec<usize> = (0..tools.len()).collect();
     sewn_parts(
-        body, picked, tools, parts, false, beyond, convex, names, balls, feature,
+        body, picked, tools, parts, &hosts, false, beyond, convex, names, balls, feature,
     )
 }
 
 /// [`sewn`] of pieces each built as its blend face alone ([`super::strip`]), which ends on
-/// nothing past its own edge and closes no corner with a ball.
+/// nothing past its own edge and closes no corner with a ball. Piece `i` lies on the strip of
+/// piece `hosts[i]`, and has none where that is another piece.
 pub(super) fn sewn_strips(
     body: &Brep,
     picked: &[Picked],
-    strips: Vec<super::strip::Strip>,
+    strips: Vec<Option<super::strip::Strip>>,
+    hosts: &[usize],
     convex: &[bool],
     names: &[BTreeSet<FaceName>],
     feature: &str,
@@ -191,11 +194,15 @@ pub(super) fn sewn_strips(
     let mut tools = Vec::with_capacity(strips.len());
     let mut parts = Vec::with_capacity(strips.len());
     for strip in strips {
+        let (face, uses) = match strip {
+            Some(strip) => (Some(strip.face), strip.uses),
+            None => (None, Vec::new()),
+        };
         parts.push(Parts {
-            blends: strip.face.face_ids().collect(),
-            uses: strip.uses,
+            blends: face.iter().flat_map(Brep::face_ids).collect(),
+            uses,
         });
-        tools.push(Some(strip.face));
+        tools.push(face);
     }
     let beyond = vec![[Beyond::default(), Beyond::default()]; tools.len()];
     sewn_parts(
@@ -203,6 +210,7 @@ pub(super) fn sewn_strips(
         picked,
         &tools,
         parts,
+        hosts,
         true,
         &beyond,
         convex,
@@ -218,6 +226,7 @@ fn sewn_parts(
     picked: &[Picked],
     tools: &[Option<Brep>],
     parts: Vec<Parts>,
+    hosts: &[usize],
     alone: bool,
     beyond: &[[Beyond; 2]],
     convex: &[bool],
@@ -259,6 +268,7 @@ fn sewn_parts(
         picked,
         tools,
         &parts,
+        hosts,
         &picked_of,
         &mut gone,
         &mut near,
@@ -300,9 +310,9 @@ fn sewn_parts(
             }
         }
     }
-    let points: Vec<BTreeSet<VertexId>> = tvmap
+    let points: Vec<BTreeSet<VertexId>> = hosts
         .iter()
-        .map(|m| m.values().copied().collect())
+        .map(|&h| tvmap[h].values().copied().collect())
         .collect();
     for &w in &pool {
         let p = out.vertex(w).point;
@@ -540,6 +550,7 @@ fn sewn_parts(
                     picked_of: &picked_of,
                     parts: &parts,
                     tools,
+                    hosts,
                     tmap: &tmap,
                     emap: &emap,
                     ranges: &ranges,
@@ -732,12 +743,14 @@ fn swallow(
     picked: &[Picked],
     tools: &[Option<Brep>],
     parts: &[Parts],
+    hosts: &[usize],
     picked_of: &HashMap<EdgeId, usize>,
     gone: &mut BTreeSet<VertexId>,
     near: &mut HashMap<VertexId, BTreeSet<usize>>,
     dropped: &mut BTreeSet<EdgeId>,
 ) {
     let tips = |i: usize| {
+        let i = hosts[i];
         let tool = tools[i].iter();
         tool.flat_map(move |tool| {
             parts[i].uses.iter().flat_map(move |&(e, _)| {
@@ -897,6 +910,8 @@ struct Rebuild<'a> {
     picked_of: &'a HashMap<EdgeId, usize>,
     parts: &'a [Parts],
     tools: &'a [Option<Brep>],
+    /// The piece whose tool carries each piece's blend.
+    hosts: &'a [usize],
     tmap: &'a [HashMap<EdgeId, Mapped>],
     emap: &'a [Option<EdgeId>],
     ranges: &'a [(f64, f64)],
@@ -941,35 +956,54 @@ fn rebuild_loop(
         if let Some(&i) = r.picked_of.get(&co.edge) {
             changed = true;
             // The corners at the two ends of a piece with no tool meet where it would lie.
-            let Some(tool) = &r.tools[i] else { continue };
-            let k = r.picked[i]
+            let h = r.hosts[i];
+            let Some(tool) = &r.tools[h] else { continue };
+            let k = r.picked[h]
                 .faces
                 .iter()
                 .position(|&g| g == body.lp(lp).face)
                 .ok_or("a picked edge on a face it does not join")?;
-            let contacts: Vec<EdgeId> = r.parts[i]
+            let contacts: Vec<EdgeId> = r.parts[h]
                 .uses
                 .iter()
                 .filter(|u| u.1 == Use::Contact(k))
                 .map(|u| u.0)
                 .collect();
+            let curve = edge.curve.as_ref().expect("a picked edge has a curve");
+            let tm = 0.5 * (edge.range.0 + edge.range.1);
+            let (p, d) = curve.d1(tm);
+            let shared = r.hosts.iter().filter(|&&x| x == h).count() > 1;
             let ce = match contacts.as_slice() {
                 [ce] => ce,
                 // The blend meets this face only at a pole, where its neighbours' contacts meet.
-                [] if r.parts[i].uses.iter().any(|u| u.1 == Use::Pole) => continue,
+                [] if r.parts[h].uses.iter().any(|u| u.1 == Use::Pole) => continue,
+                // A strip two pieces lie on has its contact in a stretch for each where another
+                // edge of the face ends between them: the one this piece's section crosses, which
+                // holds the contact's nearest point to the middle of the piece's edge.
+                [_, _] if shared => {
+                    let off = |ce: &&EdgeId| {
+                        let x = tool.edge(**ce);
+                        let c = x.curve.as_ref().expect("checked in parts");
+                        curve_distance(c, x.range, p).0
+                    };
+                    let nearest = contacts.iter().min_by(|a, b| off(a).total_cmp(&off(b)));
+                    nearest.expect("two contacts")
+                }
                 _ => {
                     return Err("a piece with its contact on a face in other than one edge".into());
                 }
             };
             let tc = tool.edge(*ce);
             let tcurve = tc.curve.as_ref().expect("checked in parts");
-            let curve = edge.curve.as_ref().expect("a picked edge has a curve");
-            let tm = 0.5 * (edge.range.0 + edge.range.1);
-            let (p, d) = curve.d1(tm);
             let d = if co.reversed { -d } else { d };
             let (_, s) = curve_distance(tcurve, tc.range, p);
-            let m = r.tmap[i][ce];
+            let m = r.tmap[h][ce];
             let reversed = (tcurve.d1(s).1.dot(d) < 0.0) != m.flipped;
+            // One contact two pieces lie on stands for both their edges.
+            let same = |x: &(CoedgeSpec, CoedgeId)| x.0.edge == m.edge && x.0.reversed == reversed;
+            if shared && specs.last().is_some_and(same) {
+                continue;
+            }
             let spec_edge = out.edge(m.edge);
             let start = if reversed {
                 spec_edge.end
@@ -1018,6 +1052,13 @@ fn rebuild_loop(
     }
     if !changed {
         return Ok((specs.into_iter().map(|s| s.0).collect(), false));
+    }
+    // And where the loop starts between the two.
+    let twice = |a: &(CoedgeSpec, CoedgeId), b: &(CoedgeSpec, CoedgeId)| {
+        a.0.edge == b.0.edge && a.0.reversed == b.0.reversed
+    };
+    if specs.len() > 1 && twice(&specs[0], &specs[specs.len() - 1]) {
+        specs.pop();
     }
     let n = specs.len();
     let mut joined: Vec<CoedgeSpec> = Vec::with_capacity(n + 2);
