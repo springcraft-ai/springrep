@@ -3604,59 +3604,61 @@ fn a_face_on_the_far_nappe_of_its_cone_is_read_and_cut() {
         assert_ne!(far, text);
         let read_back = read(far.as_bytes(), "far").unwrap();
         assert!(read_back.rejected.is_empty(), "{:?}", read_back.rejected);
-        let b = read_back.brep;
-        assert!(check::check(&b).is_empty(), "{:?}", check::check(&b));
-        assert!((measure::volume(&b) - 105.0 * PI).abs() <= 1e-9 * 105.0 * PI);
-        let rod = extrude(
-            &Profile::circle(Vec2::ZERO, 2.0),
-            &Frame::new(Vec3::new(0.0, 0.0, -1.0), Vec3::Z, Vec3::X).unwrap(),
-            7.0,
-            "rod",
-        )
-        .unwrap();
-        let bored = boolean::difference(&b, &rod).unwrap();
-        assert!(check::check(&bored).is_empty());
-        assert!((measure::volume(&bored) - 100.0 * PI).abs() <= 1e-9 * 100.0 * PI);
-        // A coaxial rod of radius 4 cuts the cone face itself, at the height 10/3 where the
-        // frustum's radius 6 − 0.6·z is 4: what is left is π times the integral of
-        // (6 − 0.6·z)² − 16 up to there, 280π/9.
-        let rod = extrude(
-            &Profile::circle(Vec2::ZERO, 8.0),
-            &Frame::new(Vec3::new(0.0, 0.0, -1.0), Vec3::Z, Vec3::X).unwrap(),
-            7.0,
-            "rod",
-        )
-        .unwrap();
-        let ring = boolean::difference(&b, &rod).unwrap();
-        assert!(check::check(&ring).is_empty());
-        let want = 280.0 * PI / 9.0;
-        assert!((measure::volume(&ring) - want).abs() <= 1e-9 * want);
-        // The plane x = 1 along the axis cuts the cone face in a hyperbola. Each section of what
-        // is left beyond it is the disc of radius R = 6 − 0.6·z less its segment past x = 1,
-        // R²·acos(1/R) − √(R² − 1), integrated up the height by Simpson's rule.
-        let cut =
-            boolean::difference(&b, &block("x", [1.0, -10.0, -1.0], [10.0, 10.0, 6.0])).unwrap();
-        assert!(check::check(&cut).is_empty());
-        let section = |z: f64| {
-            let r = 6.0 - 0.6 * z;
-            PI * r * r - (r * r * (1.0 / r).acos() - (r * r - 1.0).sqrt())
-        };
-        let n = 2000;
-        let h = 5.0 / n as f64;
-        let simpson: f64 = (0..=n)
-            .map(|k| {
-                let w = if k == 0 || k == n {
-                    1.0
-                } else if k % 2 == 1 {
-                    4.0
-                } else {
-                    2.0
-                };
-                w * section(k as f64 * h)
-            })
-            .sum::<f64>()
-            * h
-            / 3.0;
-        assert!((measure::volume(&cut) - simpson).abs() <= 1e-9 * simpson);
+        // Read whole, and sewn from its faces alone.
+        for b in [read_back.brep, super::sew(far.as_bytes(), 1e-6).unwrap()] {
+            assert!(check::check(&b).is_empty(), "{:?}", check::check(&b));
+            assert!((measure::volume(&b) - 105.0 * PI).abs() <= 1e-9 * 105.0 * PI);
+            let rod = extrude(
+                &Profile::circle(Vec2::ZERO, 2.0),
+                &Frame::new(Vec3::new(0.0, 0.0, -1.0), Vec3::Z, Vec3::X).unwrap(),
+                7.0,
+                "rod",
+            )
+            .unwrap();
+            let bored = boolean::difference(&b, &rod).unwrap();
+            assert!(check::check(&bored).is_empty());
+            assert!((measure::volume(&bored) - 100.0 * PI).abs() <= 1e-9 * 100.0 * PI);
+            // A coaxial rod of radius 4 cuts the cone face itself, at the height 10/3 where the
+            // frustum's radius 6 − 0.6·z is 4: what is left is π times the integral of
+            // (6 − 0.6·z)² − 16 up to there, 280π/9.
+            let rod = extrude(
+                &Profile::circle(Vec2::ZERO, 8.0),
+                &Frame::new(Vec3::new(0.0, 0.0, -1.0), Vec3::Z, Vec3::X).unwrap(),
+                7.0,
+                "rod",
+            )
+            .unwrap();
+            let ring = boolean::difference(&b, &rod).unwrap();
+            assert!(check::check(&ring).is_empty());
+            let want = 280.0 * PI / 9.0;
+            assert!((measure::volume(&ring) - want).abs() <= 1e-9 * want);
+            // The plane x = 1 along the axis cuts the cone face in a hyperbola. Each section of
+            // what the cut leaves is the disc of radius R = 6 − 0.6·z less its segment past x = 1,
+            // R²·acos(1/R) − √(R² − 1), integrated up the height by Simpson's rule.
+            let cut = boolean::difference(&b, &block("x", [1.0, -10.0, -1.0], [10.0, 10.0, 6.0]))
+                .unwrap();
+            assert!(check::check(&cut).is_empty());
+            let section = |z: f64| {
+                let r = 6.0 - 0.6 * z;
+                PI * r * r - (r * r * (1.0 / r).acos() - (r * r - 1.0).sqrt())
+            };
+            let n = 2000;
+            let h = 5.0 / n as f64;
+            let simpson: f64 = (0..=n)
+                .map(|k| {
+                    let w = if k == 0 || k == n {
+                        1.0
+                    } else if k % 2 == 1 {
+                        4.0
+                    } else {
+                        2.0
+                    };
+                    w * section(k as f64 * h)
+                })
+                .sum::<f64>()
+                * h
+                / 3.0;
+            assert!((measure::volume(&cut) - simpson).abs() <= 1e-9 * simpson);
+        }
     }
 }

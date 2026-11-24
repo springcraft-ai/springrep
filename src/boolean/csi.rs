@@ -26,9 +26,10 @@ pub(crate) fn signed_distance(s: &Surface, p: Point3) -> f64 {
         }
         Surface::Sphere(sp) => (p - sp.frame.origin).norm() - sp.radius,
         // In the meridian plane through `p` a cone is two lines through its apex and a torus two
-        // circles, one each side of the axis, each with its own natural normal (a cone's turns
-        // over past the apex); the nearer of the two is the distance. Past a cone's apex, and
-        // inside a spindle torus, the far one can be nearer.
+        // circles, one each side of the axis; the nearer of the two is the distance. Past a cone's
+        // apex, and inside a spindle torus, the far one can be nearer. Each is signed by the
+        // natural normal there: a cone's far line is measured along its own, and the far circle's
+        // points face the axis, where a torus's normal turns over and points into its tube.
         Surface::Cone(c) => {
             let l = c.frame.to_local(p);
             let (sa, ca) = c.half_angle.sin_cos();
@@ -41,7 +42,7 @@ pub(crate) fn signed_distance(s: &Surface, p: Point3) -> f64 {
             let l = t.frame.to_local(p);
             let rho = l.x.hypot(l.y);
             let near = (rho - t.major).hypot(l.z) - t.minor;
-            let far = (rho + t.major).hypot(l.z) - t.minor;
+            let far = t.minor - (rho + t.major).hypot(l.z);
             if far.abs() < near.abs() { far } else { near }
         }
         _ => {
@@ -2749,10 +2750,35 @@ mod tests {
             let p = s.eval(0.7, v);
             assert!(signed_distance(&s, p).abs() <= 1e-12, "v {v}");
         }
-        let s = Surface::Torus(spindle);
+        let s = Surface::Torus(spindle.clone());
         for v in [2.5, 3.0, 3.5] {
             let p = s.eval(1.1, v);
             assert!(signed_distance(&s, p).abs() <= 1e-12, "v {v}");
+        }
+        // Signed as the natural normal at the nearest point says, on both sheets of each: a
+        // spindle torus's turns over facing the axis, as a cone's does past its apex.
+        let cone = crate::geom::Cone {
+            frame: f,
+            radius: 2.0,
+            half_angle: 0.4,
+        };
+        for s in [Surface::Cone(cone), Surface::Torus(spindle)] {
+            for k in 0..400 {
+                let l = Vec3::new(
+                    -6.0 + 0.031 * k as f64,
+                    0.7 - 0.0047 * k as f64,
+                    -12.0 + 0.053 * k as f64,
+                );
+                let p = f.to_world(l);
+                let uv = s.project(p);
+                let side = (p - s.eval(uv.x, uv.y)).dot(s.normal(uv.x, uv.y));
+                let d = signed_distance(&s, p);
+                assert!(
+                    (d - side).abs() <= 1e-9,
+                    "{} at {l:?}: {d} vs {side}",
+                    s.kind()
+                );
+            }
         }
     }
 }

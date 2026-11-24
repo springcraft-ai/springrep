@@ -1039,8 +1039,10 @@ fn circle_through(a: Point3, b: Point3, c: Point3) -> Option<crate::geom::Circle
 
 /// The surface parameters of `p` on `s` near `last`, moved by whole periods to continue it.
 pub(super) fn near_uv(s: &Surface, p: Point3, last: Option<Vec2>) -> Vec2 {
-    // The angle of `p` itself, which turns with it along an edge; the nearest point can lie a
-    // half turn round, on a spindle torus's far tube circle, which breaks the pcurve there.
+    // The angle of `p` itself, which turns with it along an edge. The nearest point can lie a half
+    // turn round, on a spindle torus's far tube circle: a meridian of a torus grown past its hole
+    // would then never reach the axis, and the face would run round the whole tube, not stop at
+    // the poles where its tube crosses the axis.
     let uv = s.project_in_half_plane(p);
     let Some(to) = last else { return uv };
     let shift = |x: f64, t: f64, per: Option<f64>| per.map_or(x, |q| x + ((t - x) / q).round() * q);

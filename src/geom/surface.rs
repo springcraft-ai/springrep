@@ -339,9 +339,9 @@ impl Surface {
         }
     }
 
-    /// `p`'s parameters on the generator of a cone, or the tube circle of a torus, in the half plane
-    /// through `p` and the axis: the foot on that line or circle, though the other one in the same
-    /// meridian plane may be nearer. Its `u` is `p`'s own angle, so it turns with `p` along a
+    /// `p`'s parameters on the generator of a cone, or the tube circle of a torus, in the half
+    /// plane through `p` and the axis: the foot on that line or circle, though the other one in the
+    /// same meridian plane may be nearer. Its `u` is `p`'s own angle, so it turns with `p` along a
     /// path, as a pcurve carried across a spindle torus's axis needs. Any other surface's
     /// [`Surface::project`].
     pub(crate) fn project_in_half_plane(&self, p: Point3) -> Vec2 {
@@ -381,11 +381,9 @@ impl Surface {
                 let rho = l.x.hypot(l.y);
                 let (sa, ca) = s.half_angle.sin_cos();
                 let u = angle_of(l);
-                self.nearer(
-                    p,
-                    Vec2::new(u, (rho - s.radius) * sa + l.z * ca),
-                    Vec2::new((u + PI).rem_euclid(TAU), (-rho - s.radius) * sa + l.z * ca),
-                )
+                let near = Vec2::new(u, (rho - s.radius) * sa + l.z * ca);
+                let far = Vec2::new((u + PI).rem_euclid(TAU), (-rho - s.radius) * sa + l.z * ca);
+                self.nearer(p, near, far)
             }
             Surface::Sphere(s) => {
                 let l = s.frame.to_local(p);
@@ -541,12 +539,14 @@ impl Surface {
         Vec2::new(u, shift(uv.y, hint.y, self.v_period()))
     }
 
-    /// Of the parameters `a` and `b`, those whose point is nearer `p`; `a` where they are as near.
-    fn nearer(&self, p: Point3, a: Vec2, b: Vec2) -> Vec2 {
-        if self.eval(b.x, b.y).dist(p) < self.eval(a.x, a.y).dist(p) {
-            b
+    /// Of the parameters `near` and `far`, those whose point is nearer `p`, as the surface itself
+    /// gives it; `near` where they are as near, as at a point on both sheets, where a spindle torus
+    /// crosses its axis or at a cone's apex.
+    fn nearer(&self, p: Point3, near: Vec2, far: Vec2) -> Vec2 {
+        if self.eval(far.x, far.y).dist(p) < self.eval(near.x, near.y).dist(p) {
+            far
         } else {
-            a
+            near
         }
     }
 

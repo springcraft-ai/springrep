@@ -1469,16 +1469,13 @@ fn farther(a: Option<heal::Healed>, b: Option<heal::Healed>) -> Option<heal::Hea
     }
 }
 
-/// Builds the solid of a `MANIFOLD_SOLID_BREP` or `BREP_WITH_VOIDS`, healed where its geometry
-/// disagrees with itself, and checked. Returns the solid, its faces' STEP ids and names in order,
-/// and how far healing moved its geometry. `strict` builds it only where the file's geometry
-/// already agrees with itself, and is an error naming where it does not.
 /// Each cone face on its cone's own nappe. A file may place a face on the nappe past the apex from
 /// its cone's placement, which no cone the kernel makes does and which its intersections and
 /// projections onto a face's cone do not follow. The same cone about its axis turned over, from the
 /// point as far past the apex as the placement's origin is before it, holds that face on its own
-/// nappe; the face turns over where the natural normal there turns with it.
-fn own_nappes(mut raw: Raw) -> Raw {
+/// nappe; the face turns over where the natural normal there turns with it. A face with points on
+/// both nappes is an error: it would pass through the apex, which no face does.
+fn own_nappes(mut raw: Raw) -> Result<Raw> {
     for f in 0..raw.faces.len() {
         let Surface::Cone(c) = &raw.faces[f].surface else {
             continue;
@@ -1501,6 +1498,18 @@ fn own_nappes(mut raw: Raw) -> Raw {
             }
         }
         let radius_at = |q: Point3| c.radius + c.frame.to_local(q).z / ca * sa;
+        let sides = |below: bool| {
+            pts.iter().any(|&q| {
+                if below {
+                    radius_at(q) < -tol::LINEAR
+                } else {
+                    radius_at(q) > tol::LINEAR
+                }
+            })
+        };
+        if sides(true) && sides(false) {
+            return bad(raw.faces[f].id, "a face lies on both nappes of its cone");
+        }
         let Some(far) = pts
             .iter()
             .copied()
@@ -1527,9 +1536,13 @@ fn own_nappes(mut raw: Raw) -> Raw {
         face.surface = own;
         face.reversed ^= turns;
     }
-    raw
+    Ok(raw)
 }
 
+/// Builds the solid of a `MANIFOLD_SOLID_BREP` or `BREP_WITH_VOIDS`, healed where its geometry
+/// disagrees with itself, and checked. Returns the solid, its faces' STEP ids and names in order,
+/// and how far healing moved its geometry. `strict` builds it only where the file's geometry
+/// already agrees with itself, and is an error naming where it does not.
 pub(super) fn solid(geo: &mut Geometry, id: u64, strict: bool) -> Result<ReadSolid> {
     if geo
         .file
@@ -1552,7 +1565,7 @@ pub(super) fn solid(geo: &mut Geometry, id: u64, strict: bool) -> Result<ReadSol
     };
     rd.solid(id)?;
     let uncertainty = rd.geo.uncertainty();
-    let file = own_nappes(join_contacts(without_split(rd.raw, &rd.splits)));
+    let file = own_nappes(join_contacts(without_split(rd.raw, &rd.splits)))?;
     let mut raw = file.clone();
     let names = || file.faces.iter().map(|f| (f.id, f.name.clone())).collect();
     if strict {
@@ -1835,7 +1848,7 @@ pub(super) fn sew(geo: &mut Geometry, tolerance: f64) -> Result<Brep> {
             "STEP: the file holds no faces to sew".into(),
         ));
     }
-    sew_raw(without_split(rd.raw, &rd.splits), tolerance)
+    sew_raw(own_nappes(without_split(rd.raw, &rd.splits))?, tolerance)
 }
 
 /// The faces of `raw`, each with its own vertices and edges, sewn into one solid as [`sew`] does.
