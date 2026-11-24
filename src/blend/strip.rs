@@ -461,6 +461,12 @@ fn crossing(lane: &Lane, other: &Surface, a: Point3, b: Point3) -> Result<Run, S
     })
 }
 
+/// How far apart two rounds may come to the edge between their walls and still share one corner
+/// there: each then ends within the tolerance of the point between the two, which lies on both.
+/// Farther apart, the higher has an end of its own from one to the other, longer than the
+/// tolerance. Blends that are not tangent to their walls share a corner only within the tolerance.
+const LEVEL: f64 = 1.5 * tol::LINEAR;
+
 /// One end of a strip, trimmed: where each contact stops, and the curves across the end from the
 /// contact with face `first` to the other.
 struct Trim {
@@ -493,20 +499,30 @@ fn corner(
     let up = super::outward(body, common, at);
     let far = lanes[i]
         .contact_on(ci, &lanes[j].contact_plane(cj, up)?, at)
-        .ok_or("blends whose contacts on the face they share do not meet")?;
+        .ok_or("blends so wide that their contacts on the face they share pass without meeting")?;
     let (other, _) = lanes[j].contact(cj);
     if curve_distance(other, lanes[j].contact(cj).1, far).0 > tol::LINEAR {
-        return Err("blends whose contacts on the face they share do not meet".into());
+        return Err(
+            "blends so wide that their contacts on the face they share pass without meeting".into(),
+        );
     }
     let (plane_i, plane_j) = (plane(wall_i.0, wall_i.1)?, plane(wall_j.0, wall_j.1)?);
     let missed = "a blend whose contact does not reach the edge between the walls";
     let edge_i = lanes[i].contact_on(wi, &plane_j, at).ok_or(missed)?;
     let edge_j = lanes[j].contact_on(wj, &plane_i, at).ok_or(missed)?;
-    if edge_i.dist(edge_j) <= tol::LINEAR || mirror.is_some() {
+    // Two rounds that nearly agree: each is tangent to its wall where it comes to the edge, so
+    // the point between the two lies on both surfaces, and within the tolerance of both ends.
+    let between = edge_i.lerp(edge_j, 0.5);
+    let on_both = [i, j]
+        .iter()
+        .all(|&k| signed_distance(lanes[k].surface(), between).abs() <= 1e-3 * tol::LINEAR);
+    let sep = edge_i.dist(edge_j);
+    if mirror.is_some() || sep <= tol::LINEAR || (sep <= LEVEL && on_both) {
         // Both come to the edge at one point, and the crease runs from it.
-        let other = match mirror {
-            Some((origin, normal)) => plane(origin, normal)?,
-            None => lanes[j].surface().clone(),
+        let (other, edge_i) = match mirror {
+            Some((origin, normal)) => (plane(origin, normal)?, edge_i),
+            None if on_both => (lanes[j].surface().clone(), between),
+            None => (lanes[j].surface().clone(), edge_i),
         };
         let crease = crossing(&lanes[i], &other, edge_i, far)?;
         let trim = |w: usize| Trim {
@@ -539,7 +555,15 @@ fn corner(
         .ts
         .into_iter()
         .map(|t| curve.eval(t))
-        .filter(|p| ((*p - edge_low).dot(on_low) > 0.0) == past)
+        .filter(|p| {
+            // Nearly level with the higher strip, the point lies within rounding of the edge.
+            let on = (*p - edge_low).dot(on_low);
+            if past {
+                on > -tol::LINEAR
+            } else {
+                on < tol::LINEAR
+            }
+        })
         .min_by(|a, b| a.dist(edge_low).total_cmp(&b.dist(edge_low)))
         .ok_or("a blend whose contact runs past a corner without meeting the other blend")?;
     let crease = crossing(&lanes[low], lanes[high].surface(), near, far)?;
@@ -731,6 +755,8 @@ fn trimmed(lane: &Lane, trims: &[Option<Trim>; 2]) -> Result<Strip, String> {
         let curve = edge.curve.as_ref().expect("checked when swept");
         if let Some(k) = lane.contacts.iter().position(|&x| x == c) {
             let mut range = edge.range;
+            // A stop two strips share within the tolerance is the vertex itself for both.
+            let mut tips = [curve.eval(range.0), curve.eval(range.1)];
             for (end, trim) in trims.iter().enumerate() {
                 let Some(trim) = trim else { continue };
                 // The contact's end at this end of the piece is its nearer one to the stop.
@@ -738,18 +764,17 @@ fn trimmed(lane: &Lane, trims: &[Option<Trim>; 2]) -> Result<Strip, String> {
                 let at_end = lane.locate(curve.eval(edge.range.1)).1 > 0.5;
                 if (end == 1) == at_end {
                     range.1 = t;
+                    tips[1] = trim.stops[k];
                 } else {
                     range.0 = t;
+                    tips[0] = trim.stops[k];
                 }
             }
             let speed = curve.d1(0.5 * (range.0 + range.1)).1.norm();
             if (range.1 - range.0) * speed <= tol::LINEAR {
                 return Err("a blend whose ends take its whole contact".into());
             }
-            let (s, t) = (
-                vertex(&mut face, curve.eval(range.0)),
-                vertex(&mut face, curve.eval(range.1)),
-            );
+            let (s, t) = (vertex(&mut face, tips[0]), vertex(&mut face, tips[1]));
             let e = face.add_edge(curve.clone(), range, s, t);
             uses.push((e, Use::Contact(k)));
             let (from, to) = if co.reversed {

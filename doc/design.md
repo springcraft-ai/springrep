@@ -1153,7 +1153,9 @@ Each piece ends where its edge does, in one of ten ways:
   from the edge to it. Between its ends the crease is held on both surfaces, through points each
   solved on a line across the lower piece's strip laid flat, within the box the two ends are
   corners of: the two surfaces cross a second time through the far end, where they touch, and
-  that second curve lies outside the box. On a post 5 by 3 off the middle of a ball, rounded at
+  that second curve lies outside the box. Two rounds that come to the edge within 1.5e-7 of each
+  other share one corner there, the point between the two, which lies on both surfaces since
+  each is tangent to its wall; other blends do so only within the tolerance. On a post 5 by 3 off the middle of a ball, rounded at
   0.5 to 12, the solid holds the volume and area worked by hand to 8e-12, each corner's volume
   being worked two ways that agree to 1e-10.
 
@@ -1313,9 +1315,9 @@ What the region form cannot reach comes back as `Error::Unsupported`, never as a
   the vertex and the faces), and an edge ending where several other faces meet it other than at a
   convex corner of planes, or where a face other than a plane, cylinder or cone meets it;
 - blends that cross at a corner whose faces cannot be sewn (the error names the corner and why):
-  beside a piece that must be cut, where the two pieces come to the edge between their walls
-  between 1e-7 and about 1e-6 mm apart, where the blends cover a pole of the ball they stand on,
-  and for the largest rounds of a hole's rim;
+  beside a piece that must be cut; blends so wide that their contacts on the shared face pass
+  without meeting, so the crease has no far end; where the blends take a pole and a stretch of
+  the seam out of the face of the ball they stand on; and the largest rounds of a hole's rim;
 - a blend wider than a face it sits on, including one whose strip would cross onto the next face
   along its edge, such as where its edge runs on, tangent, as a curve other than a line or circle.
 

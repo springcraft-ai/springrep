@@ -1636,7 +1636,15 @@ fn assert_rolls(b: &Brep, name: &str, n: Vec3, foot: &Foot, crossed: &[(Vec3, Fo
                 .map(|k| curve.eval(edge.range.0 + (edge.range.1 - edge.range.0) * k as f64 / 8.0))
                 .collect();
             assert!(points.iter().all(|&q| on_torus(q, n, foot)), "{name}");
-            if points.iter().all(|q| near(q.dot(n) - foot.a)) {
+            // An end on the plane of the wall beside it may lie along the post's edge, on its own
+            // wall's plane too: it is an end first.
+            let stops = |stop: Stop| {
+                let on = |q: &Vec3| near(q.dot(along) - stop.at(q.dot(n)));
+                points.iter().all(on)
+            };
+            if stops(foot.stops[0]) || stops(foot.stops[1]) {
+                seen[2] += 1;
+            } else if points.iter().all(|q| near(q.dot(n) - foot.a)) {
                 assert!(points.iter().all(|&q| normal(q).cross(n).norm() <= 1e-9));
                 seen[0] += 1;
             } else if points.iter().all(|q| near(q.norm() - BALL)) {
@@ -1644,17 +1652,9 @@ fn assert_rolls(b: &Brep, name: &str, n: Vec3, foot: &Foot, crossed: &[(Vec3, Fo
                 assert!(points.iter().all(|&q| radial(q)), "{name}");
                 seen[1] += 1;
             } else {
-                let stops = |stop: Stop| {
-                    let on = |q: &Vec3| near(q.dot(along) - stop.at(q.dot(n)));
-                    points.iter().all(on)
-                };
-                let crosses = crossed
-                    .iter()
-                    .any(|(m, other)| points.iter().all(|&q| on_torus(q, *m, other)));
-                assert!(
-                    stops(foot.stops[0]) || stops(foot.stops[1]) || crosses,
-                    "{name}"
-                );
+                let crosses =
+                    |(m, other): &(Vec3, Foot)| points.iter().all(|&q| on_torus(q, *m, other));
+                assert!(crossed.iter().any(crosses), "{name}");
                 seen[2] += 1;
             }
         }
@@ -1692,6 +1692,10 @@ fn assert_crease(b: &Brep, (i, far): (usize, Vec3), (j, near): (usize, Vec3), ha
     let edge = b.edge(shared[0]);
     let ends = [edge.start, edge.end].map(|v| b.vertex(v).point);
     let round = matches!(hand.far.size, Size::Round(_));
+    // Two blends that come to the post's edge within the tolerance of one height share one
+    // corner there, within the tolerance of either's own.
+    let level = (hand.far.a - hand.near.a).abs() < 1e-5;
+    let within = if level { 1.5e-7 } else { 1e-9 * BALL };
     let hand = hand
         .ends()
         .map(|[x, y, z]| far * x + near * y + Vec3::Z * z);
@@ -1700,7 +1704,7 @@ fn assert_crease(b: &Brep, (i, far): (usize, Vec3), (j, near): (usize, Vec3), ha
             .iter()
             .map(|p| p.dist(*h))
             .fold(f64::INFINITY, f64::min);
-        assert!(off <= 1e-9 * BALL, "the crease's end {k} is {off} off");
+        assert!(off <= within, "the crease's end {k} is {off} off");
     }
     if round {
         for f in [fi, fj] {
@@ -1893,6 +1897,46 @@ fn foot_blends_of_a_post_off_the_centre_of_a_ball_cross_past_its_corners() {
     ] {
         assert_foot((c, s), size, &[0, 1, 2, 3], &all, &round);
     }
+}
+
+#[test]
+fn foot_fillets_a_hair_off_the_centre_of_a_ball_build_on_both_sides_of_one_level() {
+    // A post ε off the ball's centre brings two foot rounds of 5.92 to its edge 0.147·ε apart.
+    // Within 1.5e-7 of each other they share one corner on the edge; farther apart the higher
+    // round has an end of its own between the two. Either way the solid is the one worked by
+    // hand, the corner of two rounds that cross.
+    let round = [[0, 1], [1, 2], [2, 3], [3, 0]];
+    for offset in [5e-7, 6.9e-7, 9e-7, 1.1e-6, 2e-6, 1e-5] {
+        let (c, s) = (Vec2::new(offset, 0.0), POST);
+        let all = [0, 1, 2, 3].map(|w| under(c, s, w));
+        assert_foot((c, s), FILLET, &[0, 1, 2, 3], &all, &round);
+    }
+}
+
+#[test]
+fn chamfers_so_wide_that_their_feet_on_a_ball_pass_each_other_are_refused_by_name() {
+    // Far off the ball's centre and 12 wide, the chamfers of two walls reach the ball on the
+    // planes x = 34.3 and y = −27.3, which meet outside it: their contacts on the ball never
+    // cross, and the corner has no far end.
+    let (c, s, wide) = (Vec2::new(12.0, -3.0), POST, Size::Bevel(12.0));
+    let reach = |w: usize| {
+        let foot = Foot {
+            a: wall_place(c, s, w).0,
+            size: wide,
+            stops: free(c, s, w),
+        };
+        foot.section(1.0)[1]
+    };
+    assert!(reach(0).hypot(reach(1)) > BALL);
+    let pairs: Vec<(&str, &str)> = WALLS.iter().map(|w| (w.0, "ball.skin")).collect();
+    let Err(Error::Unsupported(why)) = chamfer(&post_on_ball(c, s), &pairs, 12.0, "foot") else {
+        panic!("chamfers whose feet pass each other");
+    };
+    assert!(
+        why.starts_with("chamfers that cross past the corner at"),
+        "{why}"
+    );
+    assert!(why.ends_with("pass without meeting"), "{why}");
 }
 
 #[test]
