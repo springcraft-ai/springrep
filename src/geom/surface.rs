@@ -517,6 +517,10 @@ impl Surface {
                 }
             }
             Surface::Nurbs(s) => s.project_near(p, hint),
+            // A point stepped off a face, as a pcurve followed past its edge is, can lie nearer
+            // the other nappe or the other tube circle, a part of the surface the face does not
+            // reach; continued from the hint, it keeps its own half plane's foot.
+            Surface::Cone(_) | Surface::Torus(_) => self.project_in_half_plane(p),
             _ => self.project(p),
         }
     }

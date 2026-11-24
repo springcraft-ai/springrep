@@ -890,23 +890,36 @@ mod tests {
 
     #[test]
     fn a_torus_grown_past_its_hole_is_an_apple() {
-        // The tube of radius 2 about the circle of radius R = 4 grown by 3: every point within
-        // s = 5 of the circle. Its section is the disk of radius s about (R, 0) less the part past
-        // the axis, which it crosses at heights ±c, c = √(s² − R²), at the half angle
-        // φ = acos(R/s) from the disk's centre.
-        let t = crate::primitive::torus(&Frame::WORLD, 4.0, 2.0, "t").unwrap();
-        let out = offset(&t, 3.0, "o").unwrap();
-        let (r, s) = (4.0f64, 5.0f64);
-        let c = (s * s - r * r).sqrt();
-        let phi = (r / s).acos();
-        close(
-            measure::volume(&out),
-            TAU * (PI * r * s * s + 2.0 * c.powi(3) / 3.0 - r * (s * s * phi - r * c)),
-        );
-        close(
-            measure::area(&out),
-            TAU * (2.0 * r * s * (PI - phi) + 2.0 * s * c),
-        );
+        // A tube about the circle of radius R grown past R: every point within s of the circle,
+        // s the tube's radius and the growth together. Its section is the disk of radius s about
+        // (R, 0) less the part past the axis, which it crosses at heights ±c, c = √(s² − R²), at
+        // the half angle φ = acos(R/s) from the disk's centre. The same apple wherever the torus
+        // stands: at the origin, and tilted some 70 from it.
+        let v = Vec3::from_array;
+        let frames = [
+            ([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]),
+            ([41.3, -37.9, 46.2], [0.3, -0.5, 1.0], [1.0, 0.0, 0.0]),
+            ([-48.7, 22.1, -35.4], [-0.8, 0.1, 0.6], [0.0, 1.0, 0.0]),
+            ([12.9, 49.6, -44.4], [0.2, 0.9, -0.4], [0.0, 0.0, 1.0]),
+        ]
+        .map(|(o, z, x)| Frame::new(v(o), v(z), v(x)).unwrap());
+        for (r, tube, d) in [(4.0f64, 2.0, 3.0), (5.0, 2.0, 5.0)] {
+            let s = tube + d;
+            let c = (s * s - r * r).sqrt();
+            let phi = (r / s).acos();
+            for f in &frames {
+                let t = crate::primitive::torus(f, r, tube, "t").unwrap();
+                let out = offset(&t, d, "o").unwrap();
+                close(
+                    measure::volume(&out),
+                    TAU * (PI * r * s * s + 2.0 * c.powi(3) / 3.0 - r * (s * s * phi - r * c)),
+                );
+                close(
+                    measure::area(&out),
+                    TAU * (2.0 * r * s * (PI - phi) + 2.0 * s * c),
+                );
+            }
+        }
     }
 
     #[test]
