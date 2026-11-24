@@ -13,7 +13,7 @@ not apply.
 [CONTRIBUTING.md](https://github.com/springcraft-ai/springrep/blob/main/.github/CONTRIBUTING.md#where-the-work-comes-from)
 explains each line.
 
-- [ ] I wrote this change, or I have the right to submit it under this repository's MIT licence.
+- [ ] I wrote this change, or I have the right to submit it under the MIT and Apache-2.0 licences.
 - [ ] None of it is derived from proprietary source code, from decompiled or disassembled code, or
       from documentation I hold under a non-disclosure agreement or a licence that restricts its
       use.
