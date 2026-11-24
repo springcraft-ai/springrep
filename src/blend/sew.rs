@@ -705,30 +705,46 @@ fn crossed(out: &Brep, f: FaceId, fresh: &dyn Fn(EdgeId) -> bool) -> Option<Poin
             let (Some(ca), Some(cb)) = (&ea.curve, &eb.curve) else {
                 continue;
             };
-            // Two edges that leave a vertex tangent to each other, as a blend's end and the edge
-            // of the face it touches do, run within the tolerance of each other for a stretch,
-            // and are found to meet anywhere along it.
-            let shared = |p: Point3| {
-                [ea.start, ea.end].iter().any(|v| {
-                    let at = out.vertex(*v).point;
-                    let (from, to) = (ca.project(at, ea.range.0, ea.range.1), {
-                        ca.project(p, ea.range.0, ea.range.1)
-                    });
-                    [eb.start, eb.end].contains(v)
-                        && (1..=4).all(|k| {
-                            let q = ca.eval(from + (to - from) * k as f64 / 4.0);
-                            curve_distance(cb, eb.range, q).0 <= 2.0 * tol::LINEAR
-                        })
-                })
-            };
             let at_pole = |p: Point3| poles.iter().any(|q| q.dist(p) <= tol::LINEAR);
             let hits = curve_curve(ca, ea.range, cb, eb.range);
+            let shared = |p: Point3| at_shared_vertex(out, a, b, p);
             if let Some(p) = hits.into_iter().find(|&p| !shared(p) && !at_pole(p)) {
                 return Some(p);
             }
         }
     }
     None
+}
+
+/// Whether `p`, where edges `a` and `b` meet, is at a vertex the two share. Two edges that leave
+/// a vertex tangent to each other, as a blend's end and the edge of the face it touches do, run
+/// within the tolerance of each other for a stretch, and are found to meet anywhere along it.
+fn at_shared_vertex(out: &Brep, a: EdgeId, b: EdgeId, p: Point3) -> bool {
+    let (ea, eb) = (out.edge(a), out.edge(b));
+    let (Some(ca), Some(cb)) = (&ea.curve, &eb.curve) else {
+        return false;
+    };
+    [ea.start, ea.end].iter().any(|v| {
+        if ![eb.start, eb.end].contains(v) {
+            return false;
+        }
+        let at = out.vertex(*v).point;
+        if at.dist(p) <= tol::LINEAR {
+            return true;
+        }
+        // A closed edge's vertex lies at both ends of its range: the stretch runs from the end
+        // nearer `p`.
+        let to = ca.project(p, ea.range.0, ea.range.1);
+        let mut from = ca.project(at, ea.range.0, ea.range.1);
+        let span = ea.range.1 - ea.range.0;
+        if ea.start == ea.end && (to - from).abs() > 0.5 * span {
+            from += if to > from { span } else { -span };
+        }
+        (1..=4).all(|k| {
+            let q = ca.eval(from + (to - from) * k as f64 / 4.0);
+            curve_distance(cb, eb.range, q).0 <= 2.0 * tol::LINEAR
+        })
+    })
 }
 
 /// The edges that lie wholly under the blend where they leave a picked edge's end `v` along the
@@ -1256,6 +1272,37 @@ mod tests {
 
     fn named(b: &Brep, name: &str) -> usize {
         b.name_counts().get(name).copied().unwrap_or(0)
+    }
+
+    #[test]
+    fn a_seam_meets_a_whole_circle_at_their_vertex_from_either_end_of_its_turn() {
+        // A bore's rim circle of radius 2, a whole turn from its one vertex and back to it, and
+        // the bore's seam, a line up from that vertex. Where the two are found to meet lies
+        // within rounding of the vertex, on one side of it round the circle or the other: at
+        // the start of the circle's turn or at its end. Either is the vertex the edges share.
+        use crate::geom::{Circle, Curve, Line};
+        use std::f64::consts::TAU;
+        let mut b = Brep::new();
+        let v = b.add_vertex(Vec3::new(2.0, 0.0, 0.0));
+        let w = b.add_vertex(Vec3::new(2.0, 0.0, 5.0));
+        let circle = Curve::Circle(Circle {
+            frame: up(),
+            radius: 2.0,
+        });
+        let rim = b.add_edge(circle.clone(), (0.0, TAU), v, v);
+        let line = Curve::Line(Line {
+            origin: Vec3::new(2.0, 0.0, 0.0),
+            dir: Vec3::Z,
+        });
+        let seam = b.add_edge(line, (0.0, 5.0), v, w);
+        for turned in [1e-9, -1e-9, 0.0] {
+            let p = circle.eval(turned);
+            assert!(super::at_shared_vertex(&b, rim, seam, p), "{turned}");
+            assert!(super::at_shared_vertex(&b, seam, rim, p), "{turned}");
+        }
+        // A quarter turn on, the circle is 2√2 from the vertex and nowhere near the seam.
+        let far = circle.eval(TAU / 4.0);
+        assert!(!super::at_shared_vertex(&b, rim, seam, far));
     }
 
     #[test]
