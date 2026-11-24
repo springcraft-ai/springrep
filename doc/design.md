@@ -2016,9 +2016,10 @@ solid never pinches.
   revolution, and gives every spline two ends. So everything is written inside the ends of what it
   lies on. An edge that runs past the end of its closed spline's turn is written on the spline of
   one turn from the edge's start. A face's coedges' pcurves are moved by whole periods so each
-  loop meets end to end within one turn of its surface, placed by a box each is known to lie in (a
-  line's ends, a spline's control points over eight stretches of its edge), not by points along
-  it. A face whose box runs past the end of the surface's turn is written on its surface over the
+  loop meets end to end within one turn of its surface, a pole's line across the parameter plane
+  among them, placed by a box each is known to lie in (a line's ends, a spline's control points
+  over eight stretches of its edge), not by points along it, so a seam's two pcurves stay a turn
+  apart. A face whose box runs past the end of the surface's turn is written on its surface over the
   turn with the face in the middle, clear of both ends: the extrusion or the revolution of its
   curve's turn from there, or the NURBS surface's net over that turn. A turn from anywhere is cut
   by knot insertion out of two turns of the spline, clamped at the ends of its own turn (a file's
@@ -2027,10 +2028,12 @@ solid never pinches.
   kernel's parameters there, and the pcurves keep theirs. A NURBS surface's rows each take their
   own scale, which moves the surface by at most the ratio of the largest to the smallest less one,
   times half the widest box of one patch's control points: a surface the kernel finds closed meets
-  at one scale but for rounding, which moves it by nothing measurable. One whose scales would move
-  it by more than a tenth of the tolerance has no exact form from where a face starts, and a face
-  across its join is an explicit error. So is an edge round its closed curve more than once, or a
-  face whose loop winds round its surface with no seam, which the kernel never makes.
+  at one scale but for rounding, which moves it by nothing measurable. A face that fits no one turn
+  is written as before, on its surface as the kernel has it and without pcurves, leaving a reader
+  to find its course: a loop that runs round a closed direction and on across its own seam, as a
+  slab tilted through a ring's tube can leave, or a face across the join of a surface whose scales
+  would move it by more than a tenth of the tolerance. An edge round its closed curve more than
+  once, which the kernel never makes, is an explicit error.
 - **Writing an assembly** ([`write_assembly`](../src/step/write.rs)) puts several parts in one file.
   Each part is a product with its own advanced B-rep, written once however often it is used, and
   each instance is a use of its part's product under the assembly's, placed by its motion. A part

@@ -144,7 +144,8 @@ fn one_turn(
         let k = two.iter().find(|&&k| (k - t).abs() <= slack);
         k.copied().unwrap_or(t)
     };
-    let (start, end) = (near(start), near(start + period));
+    let start = near(start);
+    let end = near(start + period);
     let mut out = (Vec::new(), Vec::with_capacity(rows.len()), Vec::new());
     for (_, r) in &clamped {
         let s = scale(r);
@@ -280,14 +281,20 @@ pub(super) enum Rebased {
 }
 
 /// How a face is written on its surface: the domain of the surface as written in each direction it
-/// has ends in that the kernel's does not, its coedges' pcurves moved by whole periods so that the
-/// face lies in that domain and each loop's pcurves meet end to end, and the surface itself where
-/// it is written from the face's own start. A face on any other surface keeps its pcurves as
-/// [`pcurve`] finds them.
+/// has ends in that the kernel's does not, the whole periods by which each coedge is moved so that
+/// the face lies in that domain and each loop meets end to end, a pole's coedge among them, its
+/// coedges' pcurves so moved, and the surface itself where it is written from the face's own
+/// start. A face on any other surface keeps its pcurves as [`pcurve`] finds them.
+///
+/// A face that fits no one turn of its surface, as a loop that runs round a closed direction and
+/// on across its own seam does, has no such form: it is `kept` on its surface as the kernel has
+/// it, and written without pcurves, which leaves a reader to find its course on the surface.
 pub(super) struct FaceForm {
     pub(super) ended: Ends,
+    pub(super) shift: HashMap<CoedgeId, Vec2>,
     pcurves: HashMap<CoedgeId, Curve2>,
     pub(super) surface: Option<Rebased>,
+    pub(super) kept: bool,
 }
 
 impl FaceForm {
@@ -355,11 +362,16 @@ pub(super) fn course(b: &Brep, c: CoedgeId, c2: Option<&Curve2>) -> ([Vec2; 2], 
                     [ctrl[i].x * w, ctrl[i].y * w, 0.0, w]
                 })
                 .collect();
+            // Each cut once, the last on the end itself, so no stretch reaches past the domain.
+            let cut = |k: usize| {
+                if k == 8 {
+                    s1
+                } else {
+                    s0 + (s1 - s0) * k as f64 / 8.0
+                }
+            };
             for k in 0..8 {
-                let (a, z) = (
-                    s0 + (s1 - s0) * k as f64 / 8.0,
-                    s0 + (s1 - s0) * (k + 1) as f64 / 8.0,
-                );
+                let (a, z) = (cut(k), cut(k + 1));
                 if a < z {
                     let (_, piece) = crate::geom::spline_piece(p, knots, &h, (a, z));
                     pts.extend(cartesian(&piece).iter().map(|q| Vec2::new(q.x, q.y)));
@@ -386,23 +398,29 @@ pub(super) fn course(b: &Brep, c: CoedgeId, c2: Option<&Curve2>) -> ([Vec2; 2], 
     ([ends[0], ends[1]], [lo, hi])
 }
 
-/// How face `f` is written; see [`FaceForm`]. Every face that wraps a period carries a seam, so
-/// each loop closes in one turn of its surface; a face whose loop does not is refused. So is a face
-/// across the join of a NURBS surface whose rows meet at weights so far from one scale that its
-/// turn from there would move by more than a tenth of the tolerance ([`turned_net`]).
-pub(super) fn face_form(b: &Brep, f: FaceId) -> Result<FaceForm> {
+/// How face `f` is written; see [`FaceForm`]. A face is `kept` where a loop does not close within
+/// one turn, where the face spans more than one, and across the join of a NURBS surface whose rows
+/// meet at weights so far from one scale that its turn from there would move by more than a tenth
+/// of the tolerance ([`turned_net`]).
+pub(super) fn face_form(b: &Brep, f: FaceId) -> FaceForm {
     let face = b.face(f);
     let s = &face.surface;
     let domains = ended(s);
     let mut form = FaceForm {
         ended: domains,
+        shift: HashMap::new(),
         pcurves: HashMap::new(),
         surface: None,
+        kept: false,
     };
     let dom = [domains.0, domains.1];
     if dom == [None, None] {
-        return Ok(form);
+        return form;
     }
+    let kept = |mut form: FaceForm| {
+        form.kept = true;
+        form
+    };
     let of = |v: Vec2| [v.x, v.y];
     let whole = |d: [f64; 2]| -> [f64; 2] {
         let mut out = [0.0; 2];
@@ -423,14 +441,24 @@ pub(super) fn face_form(b: &Brep, f: FaceId) -> Result<FaceForm> {
         let (mut first, mut prev): (Option<[f64; 2]>, Option<[f64; 2]>) = (None, None);
         let mut cs = Vec::new();
         for &c in &b.lp(lp).coedges {
-            if b.edge(b.coedge(c).edge).is_degenerate() {
-                continue;
-            }
-            let c2 = pcurve(b, c);
-            let (ends, bounds) = course(b, c, c2.as_ref());
-            if let Some(c2) = c2 {
-                fitted.insert(c, c2);
-            }
+            // A pole's coedge has no curve and no pcurve written, but the loop runs along its line
+            // in the parameter plane, across the closed direction where the pole spans it.
+            let (ends, bounds) = if b.edge(b.coedge(c).edge).is_degenerate() {
+                let co = b.coedge(c);
+                let (t0, t1) = b.edge(co.edge).range;
+                let ts = if co.reversed { [t1, t0] } else { [t0, t1] };
+                let e = b.coedge_uvs(c, &ts);
+                let lo = Vec2::new(e[0].x.min(e[1].x), e[0].y.min(e[1].y));
+                let hi = Vec2::new(e[0].x.max(e[1].x), e[0].y.max(e[1].y));
+                ([e[0], e[1]], [lo, hi])
+            } else {
+                let c2 = pcurve(b, c);
+                let course = course(b, c, c2.as_ref());
+                if let Some(c2) = c2 {
+                    fitted.insert(c, c2);
+                }
+                course
+            };
             let (start, end) = (of(ends[0]), of(ends[1]));
             let by = prev.map_or([0.0; 2], |p| whole([p[0] - start[0], p[1] - start[1]]));
             for i in 0..2 {
@@ -445,15 +473,12 @@ pub(super) fn face_form(b: &Brep, f: FaceId) -> Result<FaceForm> {
         if let (Some(a), Some(z)) = (first, prev)
             && whole([z[0] - a[0], z[1] - a[1]]) != [0.0; 2]
         {
-            return Err(Error::InvalidInput(format!(
-                "STEP: a loop of a face on a {} winds round it with no seam across it",
-                s.kind()
-            )));
+            return kept(form);
         }
         loops.push((cs, lo, hi));
     }
     let Some((_, lo0, hi0)) = loops.first().cloned() else {
-        return Ok(form);
+        return form;
     };
     // The outer loop from where its low end falls in the surface's own turn. Where it then runs
     // past the turn's end, the surface is written over the turn with the face in its middle, clear
@@ -467,10 +492,7 @@ pub(super) fn face_form(b: &Brep, f: FaceId) -> Result<FaceForm> {
         let slack = 1e-9 * period;
         let span = hi0[i] - lo0[i];
         if span > period + slack {
-            return Err(Error::InvalidInput(format!(
-                "STEP: a face spans more than one turn of its {}",
-                s.kind()
-            )));
+            return kept(form);
         }
         let moved = -((lo0[i] - a) / period).floor() * period;
         place[0][i] = moved;
@@ -501,24 +523,20 @@ pub(super) fn face_form(b: &Brep, f: FaceId) -> Result<FaceForm> {
         _ => None,
     };
     if start != [None, None] && rebased.is_none() {
-        return Err(Error::Unsupported(format!(
-            "STEP: a face across the join of a {} whose ends meet at different weights has no \
-             exact form from where it starts",
-            s.kind()
-        )));
+        return kept(form);
     }
     form.surface = rebased;
     form.ended = (written[0], written[1]);
     for ((cs, _, _), by) in loops.iter().zip(&place) {
         for c in cs {
-            let own = shift[c];
+            let own = Vec2::new(shift[c][0] + by[0], shift[c][1] + by[1]);
+            form.shift.insert(*c, own);
             if let Some(c2) = fitted.remove(c) {
-                let moved = c2.shifted(Vec2::new(own[0] + by[0], own[1] + by[1]));
-                form.pcurves.insert(*c, moved);
+                form.pcurves.insert(*c, c2.shifted(own));
             }
         }
     }
-    Ok(form)
+    form
 }
 
 /// A closed NURBS surface over one turn from `start` along each direction that has one, in its own
@@ -655,13 +673,12 @@ impl Writer {
         }
     }
 
-    fn form(&mut self, b: &Brep, f: FaceId) -> Result<std::rc::Rc<FaceForm>> {
-        if let Some(form) = self.forms.get(&f) {
-            return Ok(std::rc::Rc::clone(form));
-        }
-        let form = std::rc::Rc::new(face_form(b, f)?);
-        self.forms.insert(f, std::rc::Rc::clone(&form));
-        Ok(form)
+    fn form(&mut self, b: &Brep, f: FaceId) -> std::rc::Rc<FaceForm> {
+        let form = self
+            .forms
+            .entry(f)
+            .or_insert_with(|| std::rc::Rc::new(face_form(b, f)));
+        std::rc::Rc::clone(form)
     }
 
     fn add(&mut self, body: impl AsRef<str>) -> usize {
@@ -950,7 +967,7 @@ impl Writer {
 
     /// Coedge `c`'s pcurve on its face's surface, when [`pcurve`] finds one.
     fn pcurve(&mut self, b: &Brep, c: CoedgeId) -> Result<Option<usize>> {
-        let form = self.form(b, b.coedge_face(c))?;
+        let form = self.form(b, b.coedge_face(c));
         let Some(c2) = form.pcurve(b, c) else {
             return Ok(None);
         };
@@ -980,7 +997,7 @@ impl Writer {
         if let Some(&id) = self.surfaces.get(&f) {
             return Ok(id);
         }
-        let form = self.form(b, f)?;
+        let form = self.form(b, f);
         let id = match &form.surface {
             None => self.surface(&b.face(f).surface)?,
             Some(Rebased::Extrusion { curve, dir }) => {
@@ -1777,6 +1794,7 @@ impl Writer {
         self.edges.clear();
         self.fans.clear();
         self.surfaces.clear();
+        self.forms.clear();
         self.faces.clear();
         // Other systems read one uncertainty for the whole part: where imported geometry meets
         // only to local tolerances, the widest of them, so that they accept its edges as the
@@ -2086,5 +2104,104 @@ mod tests {
         let rounding = scaled_rows_move(&net, (3, 2), (2, 1), &[1.0, 1.0 + 4.0 * f64::EPSILON]);
         assert!(rounding < 1e-3 * tol::LINEAR);
         assert_eq!(scaled_rows_move(&net, (3, 2), (2, 1), &[0.7, 0.7]), 0.0);
+    }
+
+    /// The largest distance between `n` and its turn from `start`, read at the same parameters
+    /// over the turn: the turn keeps the surface's own parameters there.
+    fn turned_gap(n: &crate::geom::NurbsSurface, start: [Option<f64>; 2]) -> f64 {
+        let Some(Rebased::Nurbs {
+            degrees,
+            knots,
+            counts,
+            ctrl,
+            weights,
+        }) = turned_net(n, start)
+        else {
+            panic!("no turn from {start:?}");
+        };
+        let (du, dv) = n.domain();
+        let t = crate::geom::NurbsSurface::new(degrees, knots, counts, ctrl, weights).unwrap();
+        let (got_u, got_v) = t.domain();
+        let want_u = start[0].map_or(du, |s| (s, s + (du.1 - du.0)));
+        let want_v = start[1].map_or(dv, |s| (s, s + (dv.1 - dv.0)));
+        assert!((got_u.0 - want_u.0).abs() < 1e-9 && (got_u.1 - want_u.1).abs() < 1e-9);
+        assert!((got_v.0 - want_v.0).abs() < 1e-9 && (got_v.1 - want_v.1).abs() < 1e-9);
+        let mut worst = 0.0f64;
+        for i in 0..=40 {
+            for j in 0..=40 {
+                let u = got_u.0 + (got_u.1 - got_u.0) * i as f64 / 40.0;
+                let v = got_v.0 + (got_v.1 - got_v.0) * j as f64 / 40.0;
+                worst = worst.max(t.eval(u, v).dist(n.eval(u, v)));
+            }
+        }
+        worst
+    }
+
+    #[test]
+    fn a_net_closed_both_ways_is_turned_either_way_from_anywhere() {
+        // A cubic net on even knots round a torus, its first three rows and columns again at the
+        // end, closed along `u` and along `v`: turned from points on knots, beside them, between
+        // them and whole periods away, it is the surface at the same parameters.
+        let (nu, nv) = (8usize, 6usize);
+        let mut ctrl = Vec::new();
+        for i in 0..nu + 3 {
+            for j in 0..nv + 3 {
+                let a = std::f64::consts::TAU * (i % nu) as f64 / nu as f64;
+                let c = std::f64::consts::TAU * (j % nv) as f64 / nv as f64;
+                let r = 10.0 + 3.0 * c.cos() + 0.7 * (2.0 * a).cos();
+                ctrl.push(Vec3::new(r * a.cos(), r * a.sin(), 3.0 * c.sin()));
+            }
+        }
+        let ku: Vec<f64> = (0..nu + 7).map(|i| i as f64).collect();
+        let kv: Vec<f64> = (0..nv + 7).map(|i| i as f64).collect();
+        let n =
+            crate::geom::NurbsSurface::new((3, 3), (ku, kv), (nu + 3, nv + 3), ctrl, None).unwrap();
+        assert_eq!((n.u_period(), n.v_period()), (Some(8.0), Some(6.0)));
+        for start in [
+            [Some(5.3), Some(7.9)],
+            [Some(3.0), None],
+            [None, Some(8.999999)],
+            [Some(10.9999999999999), Some(3.0000000000001)],
+            [Some(-2.5), Some(20.25)],
+            [Some(7.0 + 1e-11), Some(6.0 - 1e-11)],
+        ] {
+            let gap = turned_gap(&n, start);
+            assert!(gap < 1e-9, "{start:?}: {gap}");
+        }
+    }
+
+    #[test]
+    fn a_rational_tube_whose_ends_meet_at_other_weights_is_turned() {
+        // A tube whose sections are the unit circle scaled, the last quarter run at another rate
+        // so the circle ends on weight 4, and each row's weights scaled again along the tube.
+        let (w, l) = (std::f64::consts::FRAC_1_SQRT_2, 2.0);
+        let square = [
+            (1.0, 0.0),
+            (1.0, 1.0),
+            (0.0, 1.0),
+            (-1.0, 1.0),
+            (-1.0, 0.0),
+            (-1.0, -1.0),
+            (0.0, -1.0),
+            (1.0, -1.0),
+            (1.0, 0.0),
+        ];
+        let wu = [1.0, w, 1.0, w, 1.0, w, 1.0, w * l, l * l];
+        let (mut ctrl, mut ws) = (Vec::new(), Vec::new());
+        for i in 0..9 {
+            for j in 0..3 {
+                let r = 5.0 + 2.0 * (j as f64 - 1.0).powi(2);
+                ctrl.push(Vec3::new(r * square[i].0, r * square[i].1, 4.0 * j as f64));
+                ws.push(wu[i] * [1.0, 0.8, 1.3][j]);
+            }
+        }
+        let ku = vec![0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 4.0];
+        let kv = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let n = crate::geom::NurbsSurface::new((2, 2), (ku, kv), (9, 3), ctrl, Some(ws)).unwrap();
+        assert_eq!(n.u_period(), Some(4.0));
+        for start in [[Some(0.5), None], [Some(3.75), None], [Some(-1.5), None]] {
+            let gap = turned_gap(&n, start);
+            assert!(gap < 1e-12, "{start:?}: {gap}");
+        }
     }
 }
