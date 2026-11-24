@@ -2062,6 +2062,29 @@ fn rim_rounds_whose_crease_leaves_no_room_between_its_ends_are_built_or_refused(
 }
 
 #[test]
+fn a_foot_blend_over_the_pole_from_the_side_the_seam_leaves_it_is_built_or_refused_truly() {
+    // The post 8 by 30 at (−5, 3) has its wall `u_max` at x = −1, facing the pole 1 mm away,
+    // and the ball's seam runs on from the pole away from the post. A blend of 2 at that wall's
+    // foot reaches over the pole, which is a point of the ball like any other and bounds
+    // nothing: the blend fits. Alone it is built, on a round of 2 and of 5.92 and a chamfer.
+    let (c, s) = (Vec2::new(-5.0, 3.0), Vec2::new(8.0, 30.0));
+    assert!(wall_place(c, s, 1).0 == -1.0);
+    for size in [Size::Round(2.0), FILLET, Size::Bevel(2.0)] {
+        assert_foot((c, s), size, &[1], &[free(c, s, 1)], &[]);
+    }
+    // With its neighbours' it crosses the seam where no edge of the post meets it, which is
+    // what it is refused for.
+    let pairs: Vec<(&str, &str)> = WALLS.iter().map(|w| (w.0, "ball.skin")).collect();
+    let Err(Error::Unsupported(why)) = fillet(&post_on_ball(c, s), &pairs, 2.0, "foot") else {
+        panic!("rounds over a seam");
+    };
+    assert!(
+        why.contains("crosses another edge of that face at ("),
+        "{why}"
+    );
+}
+
+#[test]
 fn fillets_at_the_foot_of_a_leaning_wall_and_an_upright_one_cross_past_their_corner() {
     // A post on a plate, 20 square at its foot, whose wall `lean` leans in by 0.1 for each 1 up
     // while its other walls stand upright, with the feet of `lean` and of the upright wall

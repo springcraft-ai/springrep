@@ -2199,6 +2199,10 @@ fn check_width(body: &Brep, pk: &Picked, s: &Section, o: &Outline) -> Result<Vec
                 {
                     continue;
                 }
+                // A sphere's pole is a point of its face like any other, and bounds nothing.
+                if edge.curve.is_none() && matches!(body.face(f).surface, Surface::Sphere(_)) {
+                    continue;
+                }
                 let (t0, t1) = edge.range;
                 let mut crossing: Vec<Point3> = Vec::new();
                 for i in 0..=SAMPLES {
