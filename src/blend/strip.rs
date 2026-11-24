@@ -119,7 +119,8 @@ impl Lane {
             .segment
             .clone();
         let swept = match s.path {
-            Path::Prism { frame, length } => sweep::extrude(
+            // Only the blend face is kept, and the solid it is sewn into is checked whole.
+            Path::Prism { frame, length } => sweep::extrude_unchecked(
                 &o.profile,
                 &frame.translated(frame.z * -reach[0]),
                 length + reach[0] + reach[1],
@@ -151,7 +152,7 @@ impl Lane {
                     return Err("a blend on most of a circle that ends on other faces".into());
                 }
                 let f = ring_frame(&circle, t0 - turn[0]);
-                sweep::revolve(&o.profile, &f, circle.origin, circle.z, total, feature)
+                sweep::revolve_unchecked(&o.profile, &f, circle.origin, circle.z, total, feature)
             }
         }
         .map_err(|e| e.to_string())?;

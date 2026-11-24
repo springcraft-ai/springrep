@@ -1169,9 +1169,17 @@ little past both ends, and its blend face is rebuilt alone, each contact curve s
 end's curve meets it and the end's curves put in place of the sweep's own
 ([`blend/strip.rs`](../src/blend/strip.rs)). A plane's cut of a cylinder or a plane is the conic;
 of a torus or a cone it is held on both surfaces as a crease is. These faces are sewn as the
-tools' are. A square post's four mitred foot rounds on a plate take 0.3 ms this way against 3.8
-cut, and on a ball 7.4 ms against 26; what the ball's still take is the sewn solid's check and
-the merging of the two halves of a round the ball's seam parts.
+tools' are. Two pieces whose edges are stretches of one line or circle parted at a vertex, as
+a wall's foot is where the ball's seam meets it, are swept as one strip: its contact with the
+wall is one edge, and its contact with the ball is parted where the seam ends on it, so no two
+faces are left to merge. The strips' own sweeps are not checked, since only their blend faces
+are kept and the sewn solid is checked whole. A square post's four mitred foot rounds on a plate
+take 0.23 ms this way against 3.8 cut, and on a ball 3.1 ms against 26. About 1.3 ms of the
+ball's is the fit of its four creases, each a plane's cut of a torus, which no closed form
+gives; 1.5 ms is the sewn solid's check, which settles which way the solid faces by its volume
+and searches each two faces that meet at a corner for a crossing, where a plate's faces are
+settled by a ray: no closed form gives where two tori cross, so the ray's proof is not to be
+had.
 
 An edge of the body that leaves the joint between two pieces along their end section there, and
 stops short of the contact curve, lies wholly under the blend: a ball's seam from the foot of a
@@ -2217,7 +2225,10 @@ solid never pinches.
 parameter domain becomes a boundary integral by Green's theorem; the inner integral runs along a
 parameter in which the integrand is a low-order polynomial or trigonometric polynomial (so a fixed
 Gauss rule is exact to rounding; on a B-spline surface the held parameter's basis is summed into one
-iso-line per boundary point), and the boundary integral is adaptive. Its tolerance halves with each
+iso-line per boundary point), and the boundary integral is adaptive. Along a plane and round the
+axis of a cylinder, cone, sphere or torus the inner integral is taken in closed form: each of
+the four is a circle turned about its axis, so the point and `su × sv` are trigonometric
+polynomials of degree one in the angle. Its tolerance halves with each
 halving of a piece, so where the two rules differ by noise in the integrand rather than by their
 error (the inner rule's own error, near 1e-8 of `|su × sv|` on a fitted sheet, jumps each time the
 boundary point crosses a knot), they miss it by about as many times at every depth; once a halving

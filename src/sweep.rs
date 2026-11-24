@@ -208,6 +208,17 @@ fn place(profile: &Profile, frame: &Frame) -> Vec<PlacedLoop> {
 /// Sweeps `profile`, drawn on `frame`'s xy plane, `distance` along the frame's normal (against it
 /// when negative). `start` is the cap on the sketch plane.
 pub fn extrude(profile: &Profile, frame: &Frame, distance: f64, feature: &str) -> Result<Brep> {
+    finish(extrude_unchecked(profile, frame, distance, feature)?)
+}
+
+/// [`extrude`] without the check of its result, for a caller that keeps only some of its faces
+/// and checks the solid it builds them into.
+pub(crate) fn extrude_unchecked(
+    profile: &Profile,
+    frame: &Frame,
+    distance: f64,
+    feature: &str,
+) -> Result<Brep> {
     if !distance.is_finite() {
         return invalid("extrusion distance must be finite");
     }
@@ -346,7 +357,7 @@ pub fn extrude(profile: &Profile, frame: &Frame, distance: f64, feature: &str) -
     }
     let shell = b.add_shell(faces);
     b.add_solid(vec![shell]);
-    finish(b)
+    Ok(b)
 }
 
 /// How a swept face's surface parameterises the profile curve at angle 0: `v = v0 + dv·t`. A
@@ -468,6 +479,20 @@ fn revolution(axis: &Axis, curve: &Curve) -> Sweep {
 /// through `origin` along `dir`, which must lie in the sketch plane and not cross the profile. A
 /// partial turn has `start` and `end` caps; a full one has none.
 pub fn revolve(
+    profile: &Profile,
+    frame: &Frame,
+    origin: Point3,
+    dir: Vec3,
+    angle: f64,
+    feature: &str,
+) -> Result<Brep> {
+    finish(revolve_unchecked(
+        profile, frame, origin, dir, angle, feature,
+    )?)
+}
+
+/// [`revolve`] without the check of its result, as [`extrude_unchecked`].
+pub(crate) fn revolve_unchecked(
     profile: &Profile,
     frame: &Frame,
     origin: Point3,
@@ -781,5 +806,5 @@ pub fn revolve(
     }
     let shell_ids: Vec<_> = shells.into_iter().map(|f| b.add_shell(f)).collect();
     b.add_solid(shell_ids);
-    finish(b)
+    Ok(b)
 }
