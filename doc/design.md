@@ -2144,7 +2144,9 @@ solid never pinches.
   are read as planes bounded by straight edges, each side shared with the face across it.
 - **Contacts and voids.** Within one solid, vertices that coincide and then edges that coincide over
   their whole range are joined: a valid solid has no two vertices that close, so they are the two
-  sides of a contact the file wrote apart, and the edge four faces use comes back. A bound that runs
+  sides of a contact the file wrote apart, and the edge four faces use comes back. An edge whose two
+  ends are then one vertex, on a curve that does not close, and no longer than `LINEAR` between them
+  is no edge, and each loop goes on without it; one that is all of a loop is kept. A bound that runs
   along an edge and back is a slit and is kept, as a point bound is: each marks where something
   touched the face. A loop tries a seam's second use a period away before taking it as running back
   over the first. A shell is the way the volume it encloses says, outer positive and void negative:

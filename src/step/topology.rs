@@ -145,6 +145,56 @@ fn without_split(mut raw: Raw, splits: &HashMap<usize, [usize; 2]>) -> Raw {
     raw
 }
 
+/// Whether the stretch of `c` between the points nearest `a` and `b` is no longer than
+/// [`tol::LINEAR`], where `c` does not close: on a closed curve two coincident ends bound either
+/// none of it or all of it, and the edge is read as all of it.
+fn no_length(c: &Curve, a: Point3, b: Point3) -> bool {
+    let (d0, d1) = c.domain();
+    let closes = d0.is_finite() && d1.is_finite() && c.eval(d0).dist(c.eval(d1)) <= tol::LINEAR;
+    if c.period().is_some() || closes {
+        return false;
+    }
+    let (t0, t1) = (param_of(c, a), param_of(c, b));
+    let at = |k: usize| c.eval(t0 + (t1 - t0) * k as f64 / 16.0);
+    (0..16).map(|k| at(k).dist(at(k + 1))).sum::<f64>() <= tol::LINEAR
+}
+
+/// `raw` without the edges `null` marks, and their uses. An edge is kept where it is all of a
+/// loop, which would be left with nothing to bound.
+fn without_null(mut raw: Raw, null: &[bool]) -> Raw {
+    let mut null = null.to_vec();
+    for f in &raw.faces {
+        for (_, uses) in &f.bounds {
+            if uses.iter().all(|u| null[u.edge]) {
+                for u in uses {
+                    null[u.edge] = false;
+                }
+            }
+        }
+    }
+    if !null.contains(&true) {
+        return raw;
+    }
+    let mut index = vec![usize::MAX; raw.edges.len()];
+    let mut kept = Vec::with_capacity(raw.edges.len());
+    for (i, e) in raw.edges.drain(..).enumerate() {
+        if !null[i] {
+            index[i] = kept.len();
+            kept.push(e);
+        }
+    }
+    raw.edges = kept;
+    for f in &mut raw.faces {
+        for (_, uses) in &mut f.bounds {
+            uses.retain(|u| !null[u.edge]);
+            for u in uses {
+                u.edge = index[u.edge];
+            }
+        }
+    }
+    raw
+}
+
 /// `raw` with its coincident vertices made one, and then its coincident edges. A solid that
 /// touches itself is written, as STEP's manifold solids require, with each side of the contact
 /// given its own vertices and edges; two vertices of one valid solid are never that close, so
@@ -176,6 +226,17 @@ fn join_contacts(mut raw: Raw) -> Raw {
             }
         }
     }
+    // An edge whose two ends are now one vertex, on a curve that does not close, and no longer
+    // than the kernel tolerance between them, is no edge: its ends were written apart only to be
+    // joined. Each loop that uses it goes straight on from the edge before it to the edge after.
+    let null: Vec<bool> = raw
+        .edges
+        .iter()
+        .map(|e| {
+            root(&mut parent, e.start) == root(&mut parent, e.end)
+                && no_length(&e.curve, raw.points[e.start], raw.points[e.end])
+        })
+        .collect();
     if joined {
         // The points kept, renumbered in order.
         let mut index = vec![usize::MAX; n];
@@ -200,6 +261,7 @@ fn join_contacts(mut raw: Raw) -> Raw {
             }
         }
     }
+    let mut raw = without_null(raw, &null);
     // Edges between the same vertices that lie along each other: each later one is the first,
     // its uses turned where it runs the other way.
     let mut ends: HashMap<(usize, usize), Vec<usize>> = HashMap::new();

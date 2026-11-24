@@ -3685,3 +3685,26 @@ fn a_face_on_the_far_nappe_of_its_cone_is_read_and_cut() {
         }
     }
 }
+
+#[test]
+fn an_edge_of_no_length_between_coincident_vertices_is_dropped() {
+    // A 10 mm cube whose corner at the origin is written as two vertices at one point, joined by a
+    // line edge of length 0 that the faces x = 0 and y = 0 use, one each way. Joined, the two
+    // vertices are the cube's corner and the edge is no edge: the cube is read with its 8
+    // vertices, 12 edges and 6 faces, volume 1000 and area 600, as the file's own geometry.
+    let text = include_bytes!("fixtures/zero-length-edge.step");
+    for options in [ReadOptions::default(), ReadOptions::default().strict(true)] {
+        let imp = read_with(text, "cube", &options).unwrap();
+        assert!(imp.rejected.is_empty(), "{:?}", imp.rejected);
+        assert!(imp.healed.is_empty() && imp.tolerant.is_empty());
+        let b = &imp.brep;
+        assert!(check::check(b).is_empty(), "{:?}", check::check(b));
+        assert_eq!(
+            (b.vertex_ids().count(), b.edge_ids().count(), b.face_count()),
+            (8, 12, 6)
+        );
+        assert!((measure::volume(b) - 1000.0).abs() <= 1e-9 * 1000.0);
+        assert!((measure::area(b) - 600.0).abs() <= 1e-9 * 600.0);
+    }
+    round_trip(&read(text, "cube").unwrap().brep);
+}
