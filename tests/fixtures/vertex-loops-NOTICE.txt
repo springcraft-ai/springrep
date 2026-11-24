@@ -1,0 +1,4 @@
+vertex-loop-on-seam.step and vertex-loop-off-seam.step were written for springrep by its
+contributors, entity by entity from the ISO 10303-42 definitions by a short script, with no CAD
+program and from no other file. They are under springrep's licence, MIT OR Apache-2.0, as the
+rest of the repository is.

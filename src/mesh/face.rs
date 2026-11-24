@@ -62,7 +62,25 @@ pub(super) fn mesh_face(
     let mut loops: Loops = Vec::new();
     let mut poles: HashMap<u32, Vec2> = HashMap::new();
     let mut runs: Vec<Vec<super::Run>> = Vec::new();
+    // A point the face holds that is already a sample of its boundary (one on its seam) is
+    // meshed there, and not again as a loop of its own.
+    let on_boundary: HashSet<u32> = face
+        .loops
+        .iter()
+        .filter(|&&lp| !b.is_vertex_loop(lp))
+        .flat_map(|&lp| &b.lp(lp).coedges)
+        .flat_map(|&co| samples[b.coedge(co).edge.index()].iter().map(|x| x.1))
+        .collect();
     for &lp in &face.loops {
+        if b.is_vertex_loop(lp) {
+            let e = b.coedge(b.lp(lp).coedges[0]).edge;
+            if samples[e.index()]
+                .iter()
+                .all(|x| on_boundary.contains(&x.1))
+            {
+                continue;
+            }
+        }
         let mut pts = Vec::new();
         let mut run = Vec::new();
         for &co in &b.lp(lp).coedges {

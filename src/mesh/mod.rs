@@ -330,10 +330,62 @@ fn tessellate_on(threads: usize, b: &Brep, opt: &MeshOptions) -> Result<Mesh> {
             .collect();
         samples.push(s);
     }
+    held_points_on_edges(b, &mut samples);
     uncross(threads, b, &edges, &mut samples, &mut mesh.positions);
     drop_unresolved(b, &edges, &mut samples);
     faces(threads, b, opt, &samples, &mut mesh)?;
     Ok(mesh)
+}
+
+/// Makes each point a face holds (a vertex loop, where something touches the face) that lies on
+/// one of the face's own edges a sample of that edge, at the point's parameter along it. On a
+/// periodic face such a point can lie on the seam, and the seam's chord would then run through a
+/// boundary point of the face, on both sides of the seam. Sampled there, the chords end at it on
+/// both sides, and on the next face along any other edge, so the mesh stays watertight. A point
+/// within the tolerance of a sample already there, a vertex among them, is that sample: the loop
+/// takes its mesh point. The face then meshes the point once, as a sample of its boundary.
+fn held_points_on_edges(b: &Brep, samples: &mut [Vec<(f64, u32)>]) {
+    for f in b.face_ids() {
+        let face = b.face(f);
+        for &lp in face.loops.iter().filter(|&&lp| b.is_vertex_loop(lp)) {
+            let held = b.coedge(b.lp(lp).coedges[0]).edge;
+            let v = b.edge(held).start;
+            // The point's mesh point, as an earlier face holding it may have made it a sample.
+            let (p, mut g) = (b.vertex(v).point, samples[held.index()][0].1);
+            for &other in face.loops.iter().filter(|&&o| !b.is_vertex_loop(o)) {
+                for &co in &b.lp(other).coedges {
+                    let e = b.coedge(co).edge;
+                    let edge = b.edge(e);
+                    let Some(curve) = &edge.curve else { continue };
+                    let near = b.edge_tolerance(e).max(b.vertex_tolerance(v));
+                    let (t0, t1) = edge.range;
+                    let t = curve.project(p, t0.min(t1), t0.max(t1));
+                    if curve.eval(t).dist(p) > near {
+                        continue;
+                    }
+                    let s = &mut samples[e.index()];
+                    if s.iter().any(|x| x.1 == g) {
+                        continue;
+                    }
+                    let ascending = s[0].0 <= s[s.len() - 1].0;
+                    let k = s.partition_point(|x| (x.0 < t) == ascending);
+                    let close = |i: &usize| curve.eval(s[*i].0).dist(p) <= near;
+                    match [k.wrapping_sub(1), k]
+                        .into_iter()
+                        .filter(|&i| i < s.len())
+                        .find(close)
+                    {
+                        Some(i) => g = s[i].1,
+                        None if 0 < k && k < s.len() => s.insert(k, (t, g)),
+                        None => {}
+                    }
+                }
+            }
+            for x in &mut samples[held.index()] {
+                x.1 = g;
+            }
+        }
+    }
 }
 
 /// Splits boundary segments that cross another of the same face's segments in its parameter
