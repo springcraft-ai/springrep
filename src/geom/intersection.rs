@@ -539,11 +539,9 @@ impl IntersectionCurve {
         ))
     }
 
-    /// The curve through `sample(s, _)` for `s` over `range`, where `sample` gives points exactly
-    /// on both surfaces (a closed form of the intersection), so nothing is refined numerically
-    /// and a touching point inside the range is never lost to a step. `sample` is also given
-    /// the point of the curve so far at the same fraction of its span, where there is one: a
-    /// point near the one asked for, which it may start from.
+    /// The curve through `sample(s)` for `s` over `range`, where `sample` gives points exactly on
+    /// both surfaces (a closed form of the intersection), so nothing is refined numerically and a
+    /// touching point inside the range is never lost to a step.
     ///
     /// The curve interpolates `sample` at its spans' ends, and a quarter, a half and three
     /// quarters of the way along every span it lies within half the tolerance of both surfaces
@@ -555,6 +553,19 @@ impl IntersectionCurve {
     /// the curve returned, since an interpolant through new points moves everywhere; but no
     /// point is sampled twice, a span's three points being the ones it is parted at.
     pub fn fit_sampled(
+        sample: &dyn Fn(f64) -> Point3,
+        range: (f64, f64),
+        a: Surface,
+        b: Surface,
+        closed: bool,
+        n0: usize,
+    ) -> Result<IntersectionCurve> {
+        Self::fit_sampled_seeded(&|s, _| sample(s), range, a, b, closed, n0)
+    }
+
+    /// [`Self::fit_sampled`], with `sample` also given a seed where there is one: the curve so far
+    /// at the same fraction of its span, a point near the one asked for, to start a search from.
+    pub(crate) fn fit_sampled_seeded(
         sample: &dyn Fn(f64, Option<Point3>) -> Point3,
         range: (f64, f64),
         a: Surface,
@@ -735,7 +746,8 @@ mod tests {
         };
         let range = (0.2, 2.9);
         let c =
-            IntersectionCurve::fit_sampled(&sample, range, a.clone(), b.clone(), false, 4).unwrap();
+            IntersectionCurve::fit_sampled_seeded(&sample, range, a.clone(), b.clone(), false, 4)
+                .unwrap();
         let asked = asked.into_inner();
         let mut at: Vec<u64> = asked.iter().map(|x| x.0.to_bits()).collect();
         at.sort_unstable();

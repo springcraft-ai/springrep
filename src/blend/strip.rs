@@ -454,7 +454,7 @@ fn crossing(lane: &Lane, other: &Surface, a: Point3, b: Point3) -> Result<Run, S
             }
         }
     }
-    let fitted = IntersectionCurve::fit_sampled(
+    let fitted = IntersectionCurve::fit_sampled_seeded(
         &sample,
         (0.0, 1.0),
         lane.surface().clone(),

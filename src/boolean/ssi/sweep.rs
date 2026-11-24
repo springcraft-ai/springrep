@@ -192,7 +192,7 @@ impl Out {
         a: &Surface,
         b: &Surface,
     ) -> Result<()> {
-        let c = IntersectionCurve::fit_sampled(
+        let c = IntersectionCurve::fit_sampled_seeded(
             &|s, _| sample(s),
             range,
             a.clone(),

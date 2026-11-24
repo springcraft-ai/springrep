@@ -936,7 +936,7 @@ while the radii's and the axes' gaps sum to `LINEAR`: the ellipses, about the ax
 mean radius, then lie within half `LINEAR` of each. The points come from the closed form and are
 fitted with points added until, a quarter, a half and three quarters along every span, the spline
 lies within half `LINEAR` of both surfaces and of the closed form itself
-(`IntersectionCurve::fit_sampled`), so nothing is refined numerically and no step can lose a
+(`IntersectionCurve::fit_sampled_seeded`), so nothing is refined numerically and no step can lose a
 touching point. A span that strays is parted in two, four or eight by how far it strays, a
 cubic's error falling as the fourth power of its spans, and every span is tried again on the
 spline returned; a span's three points are the ones it is parted at, so no point of the closed
