@@ -22,7 +22,10 @@
 //! sphere touching them all, the rolling ball's corner (Rossignac and Requicha 1984), or where no
 //! one ball touches four planes, with two such corners and a round between them ([`ridge`]). Where
 //! the balls at an edge's two ends take the whole edge, as a plate's full round does, the edge has
-//! no piece and the two corners meet on the section through both balls' centre. Three or more
+//! no piece and the two corners meet on the section through both balls' centre. Balls within the
+//! tolerance of that take it too: the strip left between them, or their overlap, is no wider than
+//! two points the kernel holds to be one, so the fillet is built at the radius, within the
+//! tolerance of the one asked for, at which the balls' centres are one point. Three or more
 //! chamfers close with the plane through the points where their contact lines cross.
 
 pub(crate) mod shaped;
@@ -608,6 +611,23 @@ fn blend_picked(
     feature: &str,
     swing: bool,
 ) -> Result<Brep> {
+    blend_settled(body, pairs, skip, picked, kind, feature, swing, false)
+}
+
+/// [`blend_picked`]; `settled` once a fillet's radius has been moved, within the tolerance, to the
+/// one at which its corner balls take an edge whole ([`whole_edge`]).
+#[allow(clippy::too_many_arguments)]
+fn blend_settled(
+    body: &Brep,
+    pairs: &[EdgeName],
+    skip: &[Point3],
+    picked: Vec<Picked>,
+    kind: Kind,
+    feature: &str,
+    swing: bool,
+    settled: bool,
+) -> Result<Brep> {
+    let asked = picked.clone();
     // A tangent chain with an edge no constant section sweeps (neither a line nor a circle about
     // both faces' axis) takes the rolling ball's surface all along. Each such chain is filleted
     // in turn and the rest picked again from the result, where that chain's edges are gone.
@@ -890,6 +910,19 @@ fn blend_picked(
         }
     }
 
+    // Balls within the tolerance of taking an edge whole take it whole: a strip no wider than the
+    // tolerance is no face. The fillet is the full round, at the radius that is one exactly.
+    if let Kind::Fillet { radius } = kind
+        && !settled
+        && let Some(full) = (0..picked.len()).find_map(|i| whole_edge(&sections[i], ends[i]))
+        && full * radius != radius
+    {
+        let kind = Kind::Fillet {
+            radius: full * radius,
+        };
+        return blend_settled(body, pairs, skip, asked, kind, feature, swing, true);
+    }
+
     // A piece whose corner balls take its whole edge has no tool: the balls meet on the end
     // section they share.
     let mut tools: Vec<Option<Brep>> = Vec::with_capacity(picked.len());
@@ -908,6 +941,16 @@ fn blend_picked(
             feature,
         )?;
         tools.push(Some(spilled(body, tool, &spills[i], feature)?));
+    }
+    // The balls at the two ends of such a piece are one sphere.
+    for (i, tool) in tools.iter().enumerate() {
+        if let (None, Path::Prism { frame, .. }) = (tool, sections[i].path) {
+            for (at, ball) in &mut corners {
+                if at.contains(&i) {
+                    ball.whole = Some(frame.z);
+                }
+            }
+        }
     }
     let sewing = std::time::Instant::now();
     let sew_tools = if spills.iter().any(|s| !s.is_empty()) {
@@ -985,13 +1028,14 @@ fn blend_picked(
     let sewn = if balls.iter().any(|(_, b)| !b.convex) {
         Err("a fillet with a concave corner ball".to_string())
     } else if let Kind::Fillet { radius } = kind
-        && rounds_meet(body, &picked, &sections, radius)
+        && rounds_meet(body, &picked, &sections, &ends, radius)
     {
         Err("a fillet whose rounds of two edges meet".to_string())
     } else if !ridges.is_empty() {
         Err("a fillet whose corner splits along a ridge".to_string())
     } else if corner_tools.is_empty() && saddles.is_empty() {
         sew_tools.and_then(|(tools, beyond)| {
+            let balls = joined_balls(&tools, &balls)?;
             sew::sewn(
                 body, &picked, &tools, &beyond, &convex, &names, &balls, feature,
             )
@@ -2129,7 +2173,13 @@ fn spill(body: &Brep, g: FaceId, crossing: &[Point3], width: f64, o: &Outline) -
 /// the other. Rounds whose balls only overlap cross at an angle, which the checker sees. A ball
 /// that reaches past the body's walls is no round's: the paths of a short edge's two neighbours
 /// cross beyond their rounds' trimmed ends.
-fn rounds_meet(body: &Brep, picked: &[Picked], sections: &[Section], radius: f64) -> bool {
+fn rounds_meet(
+    body: &Brep,
+    picked: &[Picked],
+    sections: &[Section],
+    ends: &[[End; 2]],
+    radius: f64,
+) -> bool {
     const SAMPLES: usize = 16;
     // A path's balls' centres: samples, and the length, so that every centre is within half a
     // step's length of a sample.
@@ -2216,6 +2266,19 @@ fn rounds_meet(body: &Brep, picked: &[Picked], sections: &[Section], radius: f64
                 .iter()
                 .any(|v| *v == ea.start || *v == ea.end);
             if shares_vertex || !a.faces.iter().any(|f| b.faces.contains(f)) {
+                continue;
+            }
+            if vanishes(&sections[i], ends[i]) || vanishes(&sections[j], ends[j]) {
+                continue;
+            }
+            // Two rounds on one axis from end to end are one round, the face between them gone.
+            if let (Some(sa), Some(sb)) = (
+                spine(&sections[i], ends[i], radius),
+                spine(&sections[j], ends[j], radius),
+            ) && [sb, [sb[1], sb[0]]]
+                .iter()
+                .any(|sb| (0..2).all(|k| sa[k].dist(sb[k]) <= tol::LINEAR))
+            {
                 continue;
             }
             let (Some(ra), Some(rb)) = (&runs[i], &runs[j]) else {
@@ -2771,8 +2834,12 @@ struct Ends<'a> {
     creases: &'a [[(usize, usize); 2]],
 }
 
+/// Each piece's tool to sew, and what each of its ends takes off past its edge.
+type Sewing = (Vec<Option<Brep>>, Vec<[run::Beyond; 2]>);
+
 /// The tools to sew, with what each end takes off past its edge; or why they cannot be sewn. A
-/// piece whose end runs past a short edge is trimmed further by the faces past it. Pieces that
+/// piece with no tool ([`vanishes`]) stays without one. A piece whose end runs past a short edge
+/// is trimmed further by the faces past it. Pieces that
 /// cross at a crease end on each other's wall instead of running on through it, and are joined
 /// into one tool, so the curve where their blend surfaces cross is an edge of it; each keeps its
 /// own blend and side faces by their marks.
@@ -2782,7 +2849,7 @@ fn sewing_tools(
     tools: &[Option<Brep>],
     e: &Ends,
     feature: &str,
-) -> std::result::Result<(Vec<Brep>, Vec<[run::Beyond; 2]>), String> {
+) -> std::result::Result<Sewing, String> {
     let mut ends = e.ends.to_vec();
     let mut group: Vec<usize> = (0..tools.len()).collect();
     fn root(group: &mut [usize], mut i: usize) -> usize {
@@ -2805,11 +2872,13 @@ fn sewing_tools(
     let mut out = Vec::with_capacity(tools.len());
     let mut taken = Vec::with_capacity(tools.len());
     for (i, tool) in tools.iter().enumerate() {
-        let Some(tool) = tool else {
-            return Err("a fillet whose corners meet along an edge".into());
-        };
         let [b0, b1] = &e.beyonds[i];
         let b = [b0.clone()?, b1.clone()?];
+        let Some(tool) = tool else {
+            out.push(None);
+            taken.push(b);
+            continue;
+        };
         if !e.sections[i].convex && b.iter().any(|bk| !bk.gone.is_empty()) {
             return Err("a concave blend that runs on past a short edge".into());
         }
@@ -2826,7 +2895,7 @@ fn sewing_tools(
             let fresh = piece(s, o, ends[i], feature).map_err(|x| x.to_string())?;
             trimmed(fresh, s, o, ends[i], &e.beyonds[i], feature).map_err(|x| x.to_string())?
         };
-        out.push(sew::marked(tool, i));
+        out.push(Some(sew::marked(tool, i)));
         taken.push(b);
     }
     for i in 0..out.len() {
@@ -2834,9 +2903,12 @@ fn sewing_tools(
         if r == i {
             continue;
         }
-        let joined = boolean::union(&out[r], &out[i])
-            .map_err(|x| format!("joining the tools of a crease: {x}"))?;
-        out[r] = joined;
+        let (Some(a), Some(b)) = (&out[r], &out[i]) else {
+            return Err("a crease at a piece its corners take whole".into());
+        };
+        let joined =
+            boolean::union(a, b).map_err(|x| format!("joining the tools of a crease: {x}"))?;
+        out[r] = Some(joined);
     }
     for i in 0..out.len() {
         let r = root(&mut group, i);
@@ -2926,14 +2998,37 @@ fn extent(s: &Section, o: &Outline) -> f64 {
     far
 }
 
+/// The factor on a fillet's radius at which the corner balls of a straight piece take its edge
+/// whole, where they come within the tolerance of that: each ball stands back in proportion to
+/// the radius.
+fn whole_edge(s: &Section, ends: [End; 2]) -> Option<f64> {
+    let (Path::Prism { length, .. }, [End::Short(a), End::Short(b)]) = (s.path, ends) else {
+        return None;
+    };
+    let at = s.path.place(s.p, false);
+    tol::within((length - a - b).abs(), tol::LINEAR, at).then_some(length / (a + b))
+}
+
 /// Whether a straight piece's corner balls take its whole edge, so it leaves no material.
 fn vanishes(s: &Section, ends: [End; 2]) -> bool {
-    match (s.path, ends) {
-        (Path::Prism { length, .. }, [End::Short(a), End::Short(b)]) => {
-            (length - a - b).abs() <= tol::LINEAR
+    whole_edge(s, ends).is_some()
+}
+
+/// The two ends of the axis of a straight round that stops square to its edge at both ends.
+fn spine(s: &Section, ends: [End; 2], radius: f64) -> Option<[Point3; 2]> {
+    let Path::Prism { frame, length } = s.path else {
+        return None;
+    };
+    let c = fillet_centre(s, radius, if s.convex { -1.0 } else { 1.0 }).ok()?;
+    let mut z = [0.0, length];
+    for (k, end) in ends.into_iter().enumerate() {
+        match end {
+            End::Exact => {}
+            End::Short(d) => z[k] += if k == 0 { d } else { -d },
+            End::Trim(_) => return None,
         }
-        _ => false,
     }
+    Some(z.map(|z| frame.to_world(Vec3::new(c.x, c.y, z))))
 }
 
 /// The solid of one picked edge's blend material, finished at both ends.
@@ -3414,6 +3509,7 @@ fn renamed(mut tool: Brep, blend: &str, names: &BTreeSet<FaceName>) -> Brep {
 /// spherical polygon of the feet, whatever the angles between the planes. More than three planes
 /// have such a ball only where the planes `radius` in from them meet in one point (an octahedron's
 /// corner); a pyramid's apex on a rectangle splits along a ridge ([`ridge`]).
+#[derive(Clone)]
 pub(super) struct Ball {
     centre: Point3,
     radius: f64,
@@ -3423,6 +3519,9 @@ pub(super) struct Ball {
     /// The corner, and the directions its filleted edges leave it in.
     corner: Point3,
     edges: Vec<Vec3>,
+    /// The direction of an edge this corner's ball and the next's take whole ([`vanishes`]): the
+    /// two are one sphere, each corner's patch a part of it.
+    whole: Option<Vec3>,
 }
 
 impl Ball {
@@ -3436,14 +3535,23 @@ impl Ball {
     /// to the patch's middle, the seam on the far side.
     fn surface(&self) -> Result<crate::geom::Sphere> {
         let m = self.middle();
-        let axis = self
-            .feet
-            .iter()
-            .filter_map(|f| m.cross(*f).unit())
-            .next()
-            .ok_or_else(|| Error::Numerical("a corner whose normals are parallel".into()))?;
+        let parallel = || Error::Numerical("a corner whose normals are parallel".into());
+        // Two corners on one sphere share its frame, clear of both patches. Together they meet
+        // the great circle square to the edge between them only from one of that edge's faces to
+        // the other, less than a quarter turn either side of the direction to the edge: the poles
+        // go on that circle a quarter turn from that direction, the seam opposite it.
+        let (axis, seam) = match self.whole {
+            Some(along) => {
+                let to_edge = (m - along * m.dot(along)).unit().ok_or_else(parallel)?;
+                (to_edge.cross(along), -to_edge)
+            }
+            None => {
+                let mut axes = self.feet.iter().filter_map(|f| m.cross(*f).unit());
+                (axes.next().ok_or_else(parallel)?, -m)
+            }
+        };
         Ok(crate::geom::Sphere {
-            frame: Frame::new(self.centre, axis, -m)?,
+            frame: Frame::new(self.centre, axis, seam)?,
             radius: self.radius,
         })
     }
@@ -3526,6 +3634,7 @@ fn corner_ball(
         convex,
         corner,
         edges,
+        whole: None,
     };
     // Each foot must lie on the near side of the patch's middle, so the sphere's poles and seam
     // stay off the patch.
@@ -3534,6 +3643,64 @@ fn corner_ball(
         return unsupported("too sharp for its ball's patch");
     }
     Ok(ball)
+}
+
+/// The corner balls as the sewing closes them: the two at the ends of a piece its corners take
+/// whole ([`vanishes`], no tool) are one ball, whose patch is both corners' and lies between the
+/// end sections of the other pieces at either. The middle of that patch is toward the edge taken.
+/// The cutting takes each corner's own part of the patch off, and the two merge.
+fn joined_balls(
+    tools: &[Option<Brep>],
+    balls: &[(Vec<usize>, Ball)],
+) -> std::result::Result<Vec<(Vec<usize>, Ball)>, String> {
+    let mut out = Vec::with_capacity(balls.len());
+    let mut used = vec![false; balls.len()];
+    for (k, (at, ball)) in balls.iter().enumerate() {
+        if used[k] {
+            continue;
+        }
+        let whole: Vec<usize> = at.iter().copied().filter(|&i| tools[i].is_none()).collect();
+        let [i] = whole.as_slice() else {
+            if !whole.is_empty() {
+                return Err("a fillet whose corner takes more than one of its edges whole".into());
+            }
+            out.push((at.clone(), ball.clone()));
+            continue;
+        };
+        let other = (k + 1..balls.len()).find(|&l| !used[l] && balls[l].0.contains(i));
+        let (Some(l), Some(along)) = (other, ball.whole) else {
+            return Err("a fillet whose corner takes an edge whole with no corner past it".into());
+        };
+        used[l] = true;
+        let (at_l, ball_l) = &balls[l];
+        if at_l.iter().any(|j| j != i && tools[*j].is_none()) {
+            return Err("a fillet whose corner takes more than one of its edges whole".into());
+        }
+        let mut pieces = Vec::new();
+        let mut edges = Vec::new();
+        for (at, ball) in [(at, ball), (at_l, ball_l)] {
+            for (j, edge) in at.iter().zip(&ball.edges) {
+                if j != i {
+                    pieces.push(*j);
+                    edges.push(*edge);
+                }
+            }
+        }
+        let centre = ball.centre + (ball_l.centre - ball.centre) * 0.5;
+        out.push((
+            pieces,
+            Ball {
+                centre,
+                radius: ball.radius,
+                feet: ball.feet.iter().chain(&ball_l.feet).copied().collect(),
+                convex: ball.convex,
+                corner: ball.corner + along * (centre - ball.corner).dot(along),
+                edges,
+                whole: Some(along),
+            },
+        ));
+    }
+    Ok(out)
 }
 
 /// The solution of the 3 × 3 system `a·x = b`, by Cramer's rule; None where `a` is singular.

@@ -135,6 +135,7 @@ pub(super) fn find(
             convex: true,
             corner,
             edges: vec![di, dj, toward],
+            whole: None,
         };
         let m = ball.middle();
         if ball.feet.iter().any(|f| f.dot(m) <= tol::TANGENT) {

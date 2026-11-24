@@ -13,6 +13,7 @@ use springrep::{
     mesh::{self, MeshOptions},
     profile::{NamedSegment, Profile, ProfileLoop, Segment},
     sweep::extrude,
+    tol,
     topo::Brep,
 };
 
@@ -222,6 +223,166 @@ fn a_rib_rounded_at_half_its_width_is_a_full_round() {
     for i in 0..8 {
         let across = i == 2 || i == 6;
         assert_eq!(names(&b, &format!("f.round_{i}")), usize::from(!across));
+    }
+}
+
+/// The pairs of faces every edge of a prism lies between: its `sides` in order round it, and its
+/// two `caps`.
+fn prism_edges<'a>(sides: &[&'a str; 4], caps: [&'a str; 2]) -> Vec<(&'a str, &'a str)> {
+    let mut pairs = Vec::new();
+    for (i, side) in sides.iter().enumerate() {
+        pairs.push((caps[0], *side));
+        pairs.push((caps[1], *side));
+        pairs.push((*side, sides[(i + 1) % 4]));
+    }
+    pairs
+}
+
+/// The volume and area of every point within `r` of an a × b × c box: the box, a slab `r` thick on
+/// each face, a quarter cylinder along each edge and an eighth of a ball at each corner.
+fn grown_box(a: f64, b: f64, c: f64, r: f64) -> (f64, f64) {
+    let (faces, edges) = (2.0 * (a * b + b * c + c * a), a + b + c);
+    (
+        a * b * c + r * faces + PI * r * r * edges + 4.0 / 3.0 * PI * r.powi(3),
+        faces + 2.0 * PI * r * edges + 4.0 * PI * r * r,
+    )
+}
+
+/// The volume and area of every point within `r` of a flat convex polygon of area `core` and
+/// perimeter `rim`: a slab 2r thick, half a cylinder along each side, and a lune of the ball at
+/// each corner, whose angles add up to the whole ball.
+fn grown_flat(core: f64, rim: f64, r: f64) -> (f64, f64) {
+    (
+        2.0 * r * core + PI * r * r / 2.0 * rim + 4.0 / 3.0 * PI * r.powi(3),
+        2.0 * core + PI * r * rim + 4.0 * PI * r * r,
+    )
+}
+
+fn assert_full_round(b: &Brep, volume: f64, area: f64) {
+    assert_solid(b, volume, area);
+    assert_eq!(b.face_count(), 10);
+    assert_eq!(kinds(b, "plane"), 2);
+    assert_eq!(kinds(b, "cylinder"), 4);
+    assert_eq!(kinds(b, "sphere"), 4);
+}
+
+#[test]
+fn a_plate_within_the_tolerance_of_half_its_thickness_is_the_full_round() {
+    // A radius within the tolerance of half the thickness leaves a side strip, or an overlap, no
+    // wider than the tolerance: the strip is no face, and the solid is the full round at half the
+    // thickness itself, not one within the tolerance of it.
+    let (w, d, h) = (40.0, 30.0, 6.0);
+    let plate = springrep::primitive::block(&Frame::WORLD, Vec3::new(w, d, h), "plate").unwrap();
+    let sides = ["plate.v_min", "plate.u_max", "plate.v_max", "plate.u_min"];
+    let pairs = prism_edges(&sides, ["plate.start", "plate.end"]);
+    let (volume, area) = grown_box(w - h, d - h, 0.0, h / 2.0);
+    for dr in [-0.5 * tol::LINEAR, -1e-9, 1e-9, 0.5 * tol::LINEAR] {
+        let b = fillet(&plate, &pairs, h / 2.0 + dr, "f").unwrap_or_else(|e| panic!("{dr}: {e}"));
+        assert_full_round(&b, volume, area);
+        let v = measure::volume(&b);
+        assert!(
+            (v - volume).abs() <= 1e-12 * volume,
+            "{dr}: {v} vs {volume}"
+        );
+    }
+}
+
+#[test]
+fn a_plate_just_outside_the_tolerance_of_a_full_round_keeps_its_strip_or_is_refused() {
+    // Under half the thickness by more than the tolerance, each side keeps a strip h − 2r high
+    // and each upright edge a round as long: every point within r of the box r in from each face.
+    let (w, d, h) = (40.0, 30.0, 6.0);
+    let plate = springrep::primitive::block(&Frame::WORLD, Vec3::new(w, d, h), "plate").unwrap();
+    let sides = ["plate.v_min", "plate.u_max", "plate.v_max", "plate.u_min"];
+    let pairs = prism_edges(&sides, ["plate.start", "plate.end"]);
+    for under in [2e-7, 1e-6, 1e-5] {
+        let r = h / 2.0 - under;
+        let b = fillet(&plate, &pairs, r, "f").unwrap_or_else(|e| panic!("{under}: {e}"));
+        let (volume, area) = grown_box(w - 2.0 * r, d - 2.0 * r, h - 2.0 * r, r);
+        assert_solid(&b, volume, area);
+        assert_eq!(b.face_count(), 26, "{under}");
+        assert_eq!(kinds(&b, "cylinder"), 12, "{under}");
+        assert_eq!(kinds(&b, "sphere"), 8, "{under}");
+    }
+    // Over it by more, the ball does not fit between the top and the bottom.
+    for over in [2e-7, 1e-6] {
+        let out = fillet(&plate, &pairs, h / 2.0 + over, "f");
+        assert!(
+            matches!(out, Err(Error::InvalidInput(_) | Error::Unsupported(_))),
+            "{over}: {:?}",
+            out.map(|b| b.face_count())
+        );
+    }
+}
+
+#[test]
+fn a_plate_of_slanted_sides_rounded_at_half_its_thickness_is_a_full_round() {
+    // A plate 6 thick whose long sides lean in at 60° and 45°, every edge filleted at 3. The
+    // edges up its ends are not square to the top and bottom: the ball at the foot of the 60°
+    // side stands 3·cot 30° back along the edge and the ball at its head 3·tan 30°, which together
+    // are the edge's whole length 6/sin 60°, and likewise at the 45° side. So all four sides
+    // shrink to nothing, and the solid is every point within 3 of the rectangle at mid-thickness
+    // that lies 3 inside each side: 3·cot(α/2) in from where a side leaning at α meets the bottom.
+    let (base, l, h) = (30.0, 40.0, 6.0);
+    let r = h / 2.0;
+    let (alpha, beta) = (PI / 3.0, PI / 4.0);
+    let pts = [
+        Vec2::new(0.0, 0.0),
+        Vec2::new(base, 0.0),
+        Vec2::new(base - h / beta.tan(), h),
+        Vec2::new(h / alpha.tan(), h),
+    ];
+    let sides = ["p.bottom", "p.right", "p.top", "p.left"];
+    let plate = extrude(
+        &Profile::polygon(&pts, &["bottom", "right", "top", "left"]),
+        &at_z(0.0),
+        l,
+        "p",
+    )
+    .unwrap();
+    let b = fillet(&plate, &prism_edges(&sides, ["p.start", "p.end"]), r, "f").unwrap();
+    let across = base - r / (alpha / 2.0).tan() - r / (beta / 2.0).tan();
+    let (volume, area) = grown_flat(across * (l - h), 2.0 * (across + l - h), r);
+    assert_full_round(&b, volume, area);
+    for gone in ["p.left", "p.right", "p.start", "p.end"] {
+        assert_eq!(names(&b, gone), 0, "{gone}");
+    }
+}
+
+#[test]
+fn a_plate_on_a_parallelogram_rounded_at_half_its_thickness_is_a_full_round() {
+    // A plate 6 thick on a parallelogram of sides 40 and 30 at 60°, every edge filleted at 3. The
+    // balls at a corner of plan angle θ stand 3·cot(θ/2) back along the top and bottom edges, a
+    // different length at each end of every one of them, and 3 back along the upright edge, which
+    // they take whole. The solid is every point within 3 of the parallelogram 3 inside each side
+    // at mid-thickness, whose sides are 2·3/sin 60° shorter.
+    let (p, q, h, theta) = (40.0, 30.0, 6.0, PI / 3.0);
+    let r = h / 2.0;
+    let lean = Vec2::new(q * theta.cos(), q * theta.sin());
+    let pts = [
+        Vec2::new(0.0, 0.0),
+        Vec2::new(p, 0.0),
+        Vec2::new(p, 0.0) + lean,
+        lean,
+    ];
+    let sides = ["p.a", "p.b", "p.c", "p.d"];
+    let plate = extrude(
+        &Profile::polygon(&pts, &["a", "b", "c", "d"]),
+        &at_z(0.0),
+        h,
+        "p",
+    )
+    .unwrap();
+    let b = fillet(&plate, &prism_edges(&sides, ["p.start", "p.end"]), r, "f").unwrap();
+    let cut = 2.0 * r / theta.sin();
+    let (volume, area) = grown_flat(
+        (p - cut) * (q - cut) * theta.sin(),
+        2.0 * (p + q - 2.0 * cut),
+        r,
+    );
+    assert_full_round(&b, volume, area);
+    for gone in sides {
+        assert_eq!(names(&b, gone), 0, "{gone}");
     }
 }
 

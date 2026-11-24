@@ -5,8 +5,10 @@
 //! construction. The faces the edge joins give up the edge for those contact curves, every other
 //! edge at the edge's ends is cut back to where a contact curve meets it, and a face the blend ends
 //! on takes the tool's end section in place of its corner. Nothing is intersected: every curve and
-//! point is one the sweep made or one already on the body. Where the pieces do not close up that
-//! way, the caller cuts the tools instead.
+//! point is one the sweep made or one already on the body. Where two rounds on one axis meet
+//! along the face between them, as a full round's do, their contact curves are one edge and that
+//! face is gone; a piece its corner balls take whole has no tool, and the two balls are one patch.
+//! Where the pieces do not close up that way, the caller cuts the tools instead.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -147,11 +149,12 @@ struct Mapped {
 
 /// The blend sewn into `body`: every piece's blend faces, named `names[i]`, facing out of the body
 /// when the piece is `convex[i]`, cut away from it, and into it otherwise; or why it could not be.
+/// A piece with no tool has no faces.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn sewn(
     body: &Brep,
     picked: &[Picked],
-    tools: &[Brep],
+    tools: &[Option<Brep>],
     beyond: &[[Beyond; 2]],
     convex: &[bool],
     names: &[BTreeSet<FaceName>],
@@ -164,7 +167,13 @@ pub(super) fn sewn(
     let parts: Vec<Parts> = tools
         .iter()
         .enumerate()
-        .map(|(i, t)| parts(t, i))
+        .map(|(i, t)| match t {
+            Some(t) => parts(t, i),
+            None => Some(Parts {
+                blends: Vec::new(),
+                uses: Vec::new(),
+            }),
+        })
         .collect::<Option<_>>()
         .ok_or("a tool whose blend faces meet it other than at its sides and ends")?;
     let picked_of: HashMap<EdgeId, usize> = picked
@@ -205,6 +214,7 @@ pub(super) fn sewn(
     let mut pool: Vec<VertexId> = Vec::new();
     let mut tvmap: Vec<HashMap<VertexId, VertexId>> = vec![HashMap::new(); tools.len()];
     for (i, tool) in tools.iter().enumerate() {
+        let Some(tool) = tool else { continue };
         for &(e, _) in &parts[i].uses {
             let edge = tool.edge(e);
             for v in [edge.start, edge.end] {
@@ -327,6 +337,12 @@ pub(super) fn sewn(
         }
         let (t0, t1) = ranges[e.index()];
         let speed = curve.d1(0.5 * (t0 + t1)).1.norm().max(1e-300);
+        // Cut back from both ends to the one point where the blends at its ends meet, it is gone.
+        let [a, b] = ends[e.index()];
+        if at[0] && at[1] && a == b && (t1 - t0).abs() * speed <= tol::LINEAR {
+            dropped.insert(e);
+            continue;
+        }
         if (t1 - t0) * speed <= tol::LINEAR {
             return Err("an edge a blend cuts back past its other end".into());
         }
@@ -351,7 +367,11 @@ pub(super) fn sewn(
     let mut crosses: Vec<(EdgeId, Point3)> = Vec::new();
     // A crease between two pieces whose tools were joined is one edge of both.
     let mut creases: Vec<(EdgeId, Point3)> = Vec::new();
+    // So is the contact curve of two rounds that meet along the face between them.
+    let mut contacts: Vec<(EdgeId, Point3)> = Vec::new();
+    let mut met: BTreeSet<EdgeId> = BTreeSet::new();
     for (i, tool) in tools.iter().enumerate() {
+        let Some(tool) = tool else { continue };
         for &(e, u) in &parts[i].uses {
             let edge = tool.edge(e);
             let (s, t) = (tvmap[i][&edge.start], tvmap[i][&edge.end]);
@@ -371,7 +391,8 @@ pub(super) fn sewn(
             let shared = match u {
                 Use::Cross => Some(&crosses),
                 Use::Inner => Some(&creases),
-                _ => None,
+                Use::Contact(_) => Some(&contacts),
+                Use::Pole => None,
             };
             if let Some(list) = shared.filter(|_| s != t) {
                 let same = list.iter().find_map(|&(x, m)| {
@@ -381,6 +402,9 @@ pub(super) fn sewn(
                     (ends_match && m.dist(mid) <= tol::LINEAR).then_some((x, xe.start != s))
                 });
                 if let Some((x, flipped)) = same {
+                    if matches!(u, Use::Contact(_)) {
+                        met.insert(x);
+                    }
                     tmap[i].insert(
                         e,
                         Mapped {
@@ -396,7 +420,8 @@ pub(super) fn sewn(
             match u {
                 Use::Cross => crosses.push((x, mid)),
                 Use::Inner => creases.push((x, mid)),
-                _ => {}
+                Use::Contact(_) => contacts.push((x, mid)),
+                Use::Pole => {}
             }
             tmap[i].insert(
                 e,
@@ -412,12 +437,10 @@ pub(super) fn sewn(
 
     // The body's faces, each a face of the input (`Some(0)` to the checker) or one the blend
     // changed.
-    let mut fmap: Vec<FaceId> = Vec::with_capacity(body.face_count());
+    let mut fmap: Vec<Option<FaceId>> = Vec::with_capacity(body.face_count());
     let mut sides: Vec<Option<usize>> = Vec::new();
     for f in body.face_ids() {
         let face = body.face(f);
-        let nf = out.add_face(face.surface.clone(), face.reversed, face.names.clone());
-        fmap.push(nf);
         let mut touched = false;
         let mut loops = Vec::with_capacity(face.loops.len());
         for &lp in &face.loops {
@@ -434,12 +457,23 @@ pub(super) fn sewn(
                     ranges: &ranges,
                     cross_edges: &cross_edges,
                     dropped: &dropped,
+                    met: &met,
                 },
                 &out,
             )?;
             touched |= changed;
             loops.push(specs);
         }
+        // A face the rounds on either side of it meet along is gone.
+        if !loops.is_empty() && loops.iter().all(|specs| specs.is_empty()) {
+            fmap.push(None);
+            continue;
+        }
+        if loops.iter().any(|specs| specs.is_empty()) {
+            return Err("a face that rounds meet along about a loop it keeps".into());
+        }
+        let nf = out.add_face(face.surface.clone(), face.reversed, face.names.clone());
+        fmap.push(Some(nf));
         for specs in loops {
             out.add_loop(nf, specs);
         }
@@ -448,6 +482,7 @@ pub(super) fn sewn(
 
     let mut blend_faces: Vec<(usize, FaceId)> = Vec::new();
     for (i, tool) in tools.iter().enumerate() {
+        let Some(tool) = tool else { continue };
         for &f in &parts[i].blends {
             let face = tool.face(f);
             let nf = out.add_face(
@@ -507,7 +542,7 @@ pub(super) fn sewn(
                 .shell(sh)
                 .faces
                 .iter()
-                .map(|f| fmap[f.index()])
+                .filter_map(|f| fmap[f.index()])
                 .collect();
             let members: BTreeSet<FaceId> = body.shell(sh).faces.iter().copied().collect();
             faces.extend(
@@ -533,22 +568,29 @@ pub(super) fn sewn(
     Ok(out)
 }
 
-/// The sphere octant closing a corner where the pieces `at` stop short: bounded by each one's end
-/// section, a quarter circle of the sphere, and facing out of the body.
+/// The sphere patch closing a corner where the pieces `at` stop short: bounded by each one's end
+/// section, an arc of a great circle of the sphere, and facing out of the body.
 fn corner_face(
     out: &mut Brep,
     ball: &Ball,
     at: &[usize],
     tmap: &[HashMap<EdgeId, Mapped>],
-    tools: &[Brep],
+    tools: &[Option<Brep>],
     parts: &[Parts],
     feature: &str,
 ) -> Result<FaceId, String> {
     let sphere = ball.surface().map_err(|e| e.to_string())?;
-    let on_ball = |p: Point3| (p.dist(ball.centre) - ball.radius).abs() <= tol::LINEAR;
     let mut arcs: Vec<EdgeId> = Vec::new();
-    for &i in at {
-        let tool = &tools[i];
+    for (&i, &along) in at.iter().zip(&ball.edges) {
+        let Some(tool) = &tools[i] else {
+            return Err("a corner piece its corners take whole".into());
+        };
+        // On the plane through the centre square to the piece's edge: the far end section of a
+        // piece much shorter than the radius lies within the tolerance of the sphere too.
+        let on_ball = |p: Point3| {
+            (p.dist(ball.centre) - ball.radius).abs() <= tol::LINEAR
+                && (p - ball.centre).dot(along).abs() <= tol::LINEAR
+        };
         let mut ends = parts[i].uses.iter().filter(|u| {
             let e = tool.edge(u.0);
             u.1 == Use::Cross
@@ -611,12 +653,14 @@ struct Rebuild<'a> {
     picked: &'a [Picked],
     picked_of: &'a HashMap<EdgeId, usize>,
     parts: &'a [Parts],
-    tools: &'a [Brep],
+    tools: &'a [Option<Brep>],
     tmap: &'a [HashMap<EdgeId, Mapped>],
     emap: &'a [Option<EdgeId>],
     ranges: &'a [(f64, f64)],
     cross_edges: &'a [EdgeId],
     dropped: &'a BTreeSet<EdgeId>,
+    /// The contact curves two rounds share.
+    met: &'a BTreeSet<EdgeId>,
 }
 
 /// A coedge spec's ends in `out`.
@@ -631,7 +675,7 @@ fn spec_ends(out: &Brep, s: &CoedgeSpec) -> (VertexId, VertexId) {
 
 /// Body loop `lp` with each picked edge replaced by its piece's contact curve on this face, each
 /// edge cut back to its new ends, and an end section across each corner the blend took off; and
-/// whether anything changed.
+/// whether anything changed. Empty where the blends leave nothing of the loop.
 fn rebuild_loop(
     body: &Brep,
     lp: crate::topo::LoopId,
@@ -653,6 +697,8 @@ fn rebuild_loop(
         };
         if let Some(&i) = r.picked_of.get(&co.edge) {
             changed = true;
+            // The corners at the two ends of a piece with no tool meet where it would lie.
+            let Some(tool) = &r.tools[i] else { continue };
             let k = r.picked[i]
                 .faces
                 .iter()
@@ -672,7 +718,6 @@ fn rebuild_loop(
                     return Err("a piece with its contact on a face in other than one edge".into());
                 }
             };
-            let tool = &r.tools[i];
             let tc = tool.edge(*ce);
             let tcurve = tc.curve.as_ref().expect("checked in parts");
             let curve = edge.curve.as_ref().expect("a picked edge has a curve");
@@ -680,8 +725,8 @@ fn rebuild_loop(
             let (p, d) = curve.d1(tm);
             let d = if co.reversed { -d } else { d };
             let (_, s) = curve_distance(tcurve, tc.range, p);
-            let reversed = tcurve.d1(s).1.dot(d) < 0.0;
             let m = r.tmap[i][ce];
+            let reversed = (tcurve.d1(s).1.dot(d) < 0.0) != m.flipped;
             let spec_edge = out.edge(m.edge);
             let start = if reversed {
                 spec_edge.end
@@ -761,6 +806,15 @@ fn rebuild_loop(
                 pcurve: PCurve::Projected { seed },
             });
         }
+    }
+    // A contact curve two rounds share, run out and back, has nothing of the face between.
+    while let Some(i) = (0..joined.len()).find(|&i| {
+        let (a, b) = (&joined[i], &joined[(i + 1) % joined.len()]);
+        joined.len() > 1 && a.edge == b.edge && a.reversed != b.reversed && r.met.contains(&a.edge)
+    }) {
+        let j = (i + 1) % joined.len();
+        joined.remove(i.max(j));
+        joined.remove(i.min(j));
     }
     Ok((joined, true))
 }
@@ -1401,5 +1455,114 @@ mod tests {
             seg(9.0, 1.0) + 50.0 * PI + 80.0 + 40.0 * PI + straight + ring,
         );
         assert_eq!(b.face_count(), 6);
+    }
+
+    const SIDES: [&str; 4] = ["b.v_min", "b.u_max", "b.v_max", "b.u_min"];
+
+    /// The pairs of faces along the edges of a block's top and, where `bottom`, its bottom, and
+    /// along its upright edges.
+    fn block_edges(bottom: bool) -> Vec<(&'static str, &'static str)> {
+        let mut pairs = Vec::new();
+        for (i, side) in SIDES.iter().enumerate() {
+            pairs.push(("b.end", *side));
+            if bottom {
+                pairs.push(("b.start", *side));
+            }
+            pairs.push((*side, SIDES[(i + 1) % 4]));
+        }
+        pairs
+    }
+
+    #[test]
+    fn a_plate_rounded_at_half_its_thickness_is_sewn() {
+        // Every edge of a 40 × 30 × 6 plate rounded at 3: every point within 3 of the 34 × 24
+        // rectangle at mid-height. The sides are gone, the top and bottom rounds along each are
+        // one half cylinder, and the two balls at each upright edge one quarter ball.
+        let (core, rim, r) = (34.0 * 24.0, 2.0 * (34.0 + 24.0), 3.0);
+        let b = sewn_as_tools(
+            &|| fillet(&block(40.0, 30.0, 6.0), &block_edges(true), r, "f"),
+            2.0 * r * core + PI * r * r / 2.0 * rim + 4.0 / 3.0 * PI * r.powi(3),
+            2.0 * core + PI * r * rim + 4.0 * PI * r * r,
+        );
+        assert_eq!(b.face_count(), 10);
+        assert_eq!(named(&b, "f.corner"), 4);
+        for side in SIDES {
+            assert_eq!(named(&b, side), 0, "{side}");
+        }
+    }
+
+    #[test]
+    fn a_rib_rounded_at_half_its_width_is_sewn() {
+        // The top and upright edges of a 40 × 6 × 10 rib rounded at 3. Its plan is a stadium on a
+        // 34 × 6 rectangle; above the rounds' axis at height 7 it is half a cylinder 34 long and
+        // two quarter balls. The top and both ends are gone, and the bottom edge of each end with
+        // them: the bottom's outline runs from one upright round's foot straight into the next.
+        let (c, r, h) = (34.0, 3.0, 10.0);
+        let (plan, rim) = (2.0 * r * c + PI * r * r, 2.0 * c + 2.0 * PI * r);
+        let b = sewn_as_tools(
+            &|| fillet(&block(40.0, 6.0, h), &block_edges(false), r, "f"),
+            plan * (h - r) + PI * r * r / 2.0 * c + 2.0 / 3.0 * PI * r.powi(3),
+            plan + rim * (h - r) + PI * r * c + 2.0 * PI * r * r,
+        );
+        assert_eq!(b.face_count(), 8);
+        assert_eq!(named(&b, "f.corner"), 2);
+        for gone in ["b.end", "b.u_min", "b.u_max"] {
+            assert_eq!(named(&b, gone), 0, "{gone}");
+        }
+    }
+
+    #[test]
+    fn a_plate_of_slanted_sides_rounded_at_half_its_thickness_is_sewn() {
+        // A plate 6 thick, 40 long, on a section 30 wide at the bottom whose sides lean in at 60°
+        // and 45°, rounded at 3. The balls at the foot and head of a side leaning at α stand
+        // 3·cot(α/2) and 3·tan(α/2) back along the edge up it, its whole length 6/sin α. The solid
+        // is every point within 3 of the rectangle at mid-thickness 3 inside each side, which
+        // lies 3·cot(α/2) in from where the side meets the bottom.
+        let (base, l, h, r) = (30.0, 40.0, 6.0, 3.0_f64);
+        let (alpha, beta) = (PI / 3.0, PI / 4.0);
+        let pts = [
+            Vec2::new(0.0, 0.0),
+            Vec2::new(base, 0.0),
+            Vec2::new(base - h / beta.tan(), h),
+            Vec2::new(h / alpha.tan(), h),
+        ];
+        let body = prism(
+            &Profile::polygon(&pts, &["bottom", "right", "top", "left"]),
+            l,
+            "b",
+        );
+        let sides = ["b.bottom", "b.right", "b.top", "b.left"];
+        let mut pairs = Vec::new();
+        for (i, side) in sides.iter().enumerate() {
+            pairs.push(("b.start", *side));
+            pairs.push(("b.end", *side));
+            pairs.push((*side, sides[(i + 1) % 4]));
+        }
+        let across = base - r / (alpha / 2.0).tan() - r / (beta / 2.0).tan();
+        let (core, rim) = (across * (l - h), 2.0 * (across + l - h));
+        let b = sewn_as_tools(
+            &|| fillet(&body, &pairs, r, "f"),
+            2.0 * r * core + PI * r * r / 2.0 * rim + 4.0 / 3.0 * PI * r.powi(3),
+            2.0 * core + PI * r * rim + 4.0 * PI * r * r,
+        );
+        assert_eq!(b.face_count(), 10);
+        assert_eq!(named(&b, "f.corner"), 4);
+    }
+
+    #[test]
+    fn a_round_far_shorter_than_its_radius_between_two_corners_is_sewn() {
+        // A 40 × 30 × 6 plate rounded at 3 − 1e-5: each upright edge keeps a round 2e-5 long,
+        // both of whose end sections lie within the tolerance of either corner's sphere. The
+        // solid is every point within r of the box r inside each face.
+        let r = 3.0 - 1e-5;
+        let (a, b, c) = (40.0 - 2.0 * r, 30.0 - 2.0 * r, 6.0 - 2.0 * r);
+        let (faces, edges) = (2.0 * (a * b + b * c + c * a), a + b + c);
+        let out = sewn_as_tools(
+            &|| fillet(&block(40.0, 30.0, 6.0), &block_edges(true), r, "f"),
+            a * b * c + r * faces + PI * r * r * edges + 4.0 / 3.0 * PI * r.powi(3),
+            faces + 2.0 * PI * r * edges + 4.0 * PI * r * r,
+        );
+        assert_eq!(out.face_count(), 26);
+        assert_eq!(named(&out, "f.corner"), 8);
     }
 }

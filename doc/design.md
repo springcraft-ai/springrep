@@ -1094,6 +1094,21 @@ Three ends need more than the edge's own corner, and each is still read from top
   at a tower's rim), and each piece keeps its own blend and side faces by marks set before the
   union; the crease is one edge of both pieces' faces. The joined tool's faces past the crease are
   the end sections where one round crosses the other's wall.
+- **Along a face the rounds close.** A full round (every edge of a plate filleted at half its
+  thickness, a rib's top at half its width) leaves nothing of the faces between its rounds. The
+  balls at the two ends of an edge take the whole edge, so that edge has no piece, and the two
+  corners are one ball: its patch is one face, bounded by the end arcs of the other pieces at both
+  corners, on a sphere whose poles and seam lie on the great circle square to the edge, which the
+  patch meets only between the edge's two faces. The rounds along a face's two long edges then run
+  on one axis between the same two balls, so their contact curves on that face are one line: it
+  is one edge of both rounds, the face's loop runs out along it and back and is dropped with the
+  face, an edge cut back from both ends to one point is dropped, and the two rounds merge into one
+  half cylinder. Balls within the tolerance of taking an edge whole would leave a strip, or an
+  overlap, narrower than two points the kernel holds to be one. Each ball stands back from its
+  corner in proportion to the radius, so the radius at which the balls' centres are one point is
+  the one asked for times the edge's length over the two set-backs' sum; the fillet is built at
+  that radius, and is the full round exactly. Past the tolerance a narrower radius keeps its strip,
+  however thin, and a wider one is refused, since its ball does not fit.
 
 Where the pieces do not close up that way the tools are used instead: each is cut away at a convex
 edge and added at a concave one with a boolean, so the result is split, sewn, merged and checked as
