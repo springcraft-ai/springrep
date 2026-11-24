@@ -371,23 +371,61 @@ fn refined(n: &NurbsSurface, spans: usize) -> Option<NurbsSurface> {
     NurbsSurface::new((du, dv), (ku, kv), (nu, nv), ctrl, weights).ok()
 }
 
-/// Groups of control points that coincide, as each point's group and the number of groups.
+/// Groups of control points that coincide, as each point's group and the number of groups. In
+/// index order, each point not yet grouped starts a group that takes every later point not yet
+/// grouped within [`tol::LINEAR`] of it.
 fn control_groups(ctrl: &[Point3]) -> (Vec<usize>, usize) {
+    let (group_of, groups, _) = control_groups_counted(ctrl);
+    (group_of, groups)
+}
+
+/// [`control_groups`], and the number of pairs of points it compared.
+///
+/// The points are binned into cubes of side 2 [`tol::LINEAR`], so two points within
+/// [`tol::LINEAR`] of each other lie in the same cube or in adjacent ones, and each point is
+/// compared only with those in the 27 cubes around its own: the cell method for fixed-radius near
+/// neighbours of Bentley, Stanat and Williams, "The complexity of finding fixed-radius near
+/// neighbors", Information Processing Letters 6 (1977) 209–212. A net of n points then costs the
+/// pairs that share a neighbourhood, about n when only a collapsed row or a seam coincides, rather
+/// than all n² pairs. The cube side is twice the tolerance so that rounding in the division cannot
+/// part two such points by more than one cube; a coordinate too large, or not a number, saturates
+/// into the outermost cube or the cube at 0, which only adds pairs to compare.
+fn control_groups_counted(ctrl: &[Point3]) -> (Vec<usize>, usize, usize) {
+    let side = 2.0 * tol::LINEAR;
+    let cell = |p: Point3| [p.x, p.y, p.z].map(|c| (c / side).floor() as i64);
+    let mut cells: HashMap<[i64; 3], Vec<usize>> = HashMap::new();
+    for (i, &p) in ctrl.iter().enumerate() {
+        cells.entry(cell(p)).or_default().push(i);
+    }
     let mut group_of = vec![usize::MAX; ctrl.len()];
-    let mut groups = 0;
+    let (mut groups, mut compared) = (0, 0);
     for i in 0..ctrl.len() {
         if group_of[i] != usize::MAX {
             continue;
         }
         group_of[i] = groups;
-        for j in i + 1..ctrl.len() {
-            if group_of[j] == usize::MAX && ctrl[i].dist(ctrl[j]) <= tol::LINEAR {
-                group_of[j] = groups;
+        let at = cell(ctrl[i]);
+        let mut around: Vec<[i64; 3]> = Vec::with_capacity(27);
+        for k in 0..27 {
+            let step = [k / 9, k / 3 % 3, k % 3].map(|d| d - 1);
+            let c = [0, 1, 2].map(|a| at[a].saturating_add(step[a]));
+            if !around.contains(&c) {
+                around.push(c);
+            }
+        }
+        for c in &around {
+            for &j in cells.get(c).map_or(&[][..], Vec::as_slice) {
+                if j > i && group_of[j] == usize::MAX {
+                    compared += 1;
+                    if ctrl[i].dist(ctrl[j]) <= tol::LINEAR {
+                        group_of[j] = groups;
+                    }
+                }
             }
         }
         groups += 1;
     }
-    (group_of, groups)
+    (group_of, groups, compared)
 }
 
 /// A sparse system `A x = b`, solved for the `x` of least weighted norm `Σ wⱼ xⱼ²`.
@@ -787,5 +825,95 @@ fn moved(s: &Surface, dofs: &Dofs, xs: &[f64]) -> Option<Surface> {
                 && m.v_period().is_some() == n.v_period().is_some();
             same.then(|| Surface::Nurbs(Box::new(m)))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{control_groups, control_groups_counted};
+    use crate::{math::Point3, tol};
+    use std::f64::consts::{PI, TAU};
+
+    /// Points on a ball of radius 10, `rows` × `cols`, laid out as a B-spline surface's control
+    /// net is: rows from pole to pole, each a ring whose first and last points are both at φ = 0.
+    /// Only which points coincide matters here, and that is the same as for the ball's own net.
+    fn ball_net(rows: usize, cols: usize) -> Vec<Point3> {
+        let mut net = Vec::with_capacity(rows * cols);
+        for i in 0..rows {
+            let theta = PI * i as f64 / (rows - 1) as f64;
+            for j in 0..cols {
+                let phi = TAU * j as f64 / (cols - 1) as f64;
+                let (r, z) = (10.0 * theta.sin(), 10.0 * theta.cos());
+                net.push(Point3::new(r * phi.cos(), r * phi.sin(), z));
+            }
+        }
+        net
+    }
+
+    #[test]
+    fn a_ball_s_poles_and_seam_are_one_group_each() {
+        // Each pole row collapses to one point, and on every other row the ring's last point
+        // is its first: (rows − 2)(cols − 1) points, and the two poles.
+        let (rows, cols) = (7, 9);
+        let (group_of, groups) = control_groups(&ball_net(rows, cols));
+        assert_eq!(groups, (rows - 2) * (cols - 1) + 2);
+        assert!(group_of[..cols].iter().all(|&g| g == 0));
+        assert!(
+            group_of[(rows - 1) * cols..]
+                .iter()
+                .all(|&g| g == groups - 1)
+        );
+        for i in 1..rows - 1 {
+            assert_eq!(group_of[i * cols], group_of[i * cols + cols - 1]);
+        }
+    }
+
+    #[test]
+    fn a_group_takes_the_points_near_its_first_point_not_a_chain_of_them() {
+        // 0.75 tolerance from the first point, the second joins it; the third, 1.5 from the first,
+        // is near only the second and starts a group of its own. The fourth, in a cube before the
+        // first's but later in the net, joins the first; the fifth, far from all, is alone.
+        let t = tol::LINEAR;
+        let at = |x: f64| Point3::new(x * t, 0.0, 0.0);
+        let net = [
+            at(0.0),
+            at(0.75),
+            at(1.5),
+            at(-0.5),
+            Point3::new(1.0, 0.0, 0.0),
+        ];
+        assert_eq!(control_groups(&net), (vec![0, 0, 1, 0, 2], 3));
+    }
+
+    #[test]
+    fn a_large_net_compares_only_the_points_that_coincide() {
+        // 300 × 240 points, the size of nets real files hold. Each pole's first point is compared
+        // with the cols − 1 others of its pole and each other row's first point with its last:
+        // (rows − 2) + 2 (cols − 1) pairs, where comparing every pair not yet grouped took
+        // billions, minutes across an import's steps.
+        let (rows, cols) = (300, 240);
+        let (group_of, groups, compared) = control_groups_counted(&ball_net(rows, cols));
+        assert_eq!(groups, (rows - 2) * (cols - 1) + 2);
+        assert_eq!(group_of[cols - 1], 0);
+        assert_eq!(group_of[cols], 1);
+        assert_eq!(group_of[2 * cols - 1], 1);
+        assert_eq!(compared, (rows - 2) + 2 * (cols - 1));
+    }
+
+    #[test]
+    fn points_too_far_out_or_not_numbers_are_still_grouped_by_distance() {
+        // Coordinates past what a cube index holds share the outermost cube, and a coordinate
+        // that is not a number shares the cube at 0: neither joins a point it is not near.
+        let big = 1e300;
+        let net = [
+            Point3::new(big, 0.0, 0.0),
+            Point3::new(f64::NAN, 0.0, 0.0),
+            Point3::new(big, 0.5 * tol::LINEAR, 0.0),
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(2.0 * big, 0.0, 0.0),
+            Point3::new(f64::INFINITY, 0.0, 0.0),
+            Point3::new(f64::INFINITY, 0.0, 0.0),
+        ];
+        assert_eq!(control_groups(&net), (vec![0, 1, 0, 2, 3, 4, 5], 6));
     }
 }
