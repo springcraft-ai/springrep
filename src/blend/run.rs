@@ -41,6 +41,17 @@ pub(super) struct Beyond {
     pub on_vertex: bool,
 }
 
+impl Beyond {
+    /// Whether the end takes nothing past its own edge.
+    pub(super) fn takes_nothing(&self) -> bool {
+        self.gone.is_empty()
+            && self.dropped.is_empty()
+            && self.extra.is_empty()
+            && !self.overhung
+            && !self.on_vertex
+    }
+}
+
 /// Whether the edge from `near` to `far` of `curve` leaves `v` onto the outer side of the end face
 /// `end_face` there: the piece, which stops on the end face, never reaches it.
 fn rises_off(

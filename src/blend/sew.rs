@@ -79,7 +79,7 @@ fn role(tool: &Brep, f: FaceId, i: usize) -> Role {
 
 /// What an edge of a piece's blend faces is.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Use {
+pub(super) enum Use {
     /// Where the blend leaves the picked edge's face `k`.
     Contact(usize),
     /// Where the blend ends, on a face of the body or on the next piece's end.
@@ -161,9 +161,6 @@ pub(super) fn sewn(
     balls: &[(Vec<usize>, Ball)],
     feature: &str,
 ) -> Result<Brep, String> {
-    if body.has_tolerances() {
-        return Err("a body with local tolerances".into());
-    }
     let parts: Vec<Parts> = tools
         .iter()
         .enumerate()
@@ -176,6 +173,61 @@ pub(super) fn sewn(
         })
         .collect::<Option<_>>()
         .ok_or("a tool whose blend faces meet it other than at its sides and ends")?;
+    sewn_parts(
+        body, picked, tools, parts, false, beyond, convex, names, balls, feature,
+    )
+}
+
+/// [`sewn`] of pieces each built as its blend face alone ([`super::strip`]), which ends on
+/// nothing past its own edge and closes no corner with a ball.
+pub(super) fn sewn_strips(
+    body: &Brep,
+    picked: &[Picked],
+    strips: Vec<super::strip::Strip>,
+    convex: &[bool],
+    names: &[BTreeSet<FaceName>],
+    feature: &str,
+) -> Result<Brep, String> {
+    let mut tools = Vec::with_capacity(strips.len());
+    let mut parts = Vec::with_capacity(strips.len());
+    for strip in strips {
+        parts.push(Parts {
+            blends: strip.face.face_ids().collect(),
+            uses: strip.uses,
+        });
+        tools.push(Some(strip.face));
+    }
+    let beyond = vec![[Beyond::default(), Beyond::default()]; tools.len()];
+    sewn_parts(
+        body,
+        picked,
+        &tools,
+        parts,
+        true,
+        &beyond,
+        convex,
+        names,
+        &[],
+        feature,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sewn_parts(
+    body: &Brep,
+    picked: &[Picked],
+    tools: &[Option<Brep>],
+    parts: Vec<Parts>,
+    alone: bool,
+    beyond: &[[Beyond; 2]],
+    convex: &[bool],
+    names: &[BTreeSet<FaceName>],
+    balls: &[(Vec<usize>, Ball)],
+    feature: &str,
+) -> Result<Brep, String> {
+    if body.has_tolerances() {
+        return Err("a body with local tolerances".into());
+    }
     let picked_of: HashMap<EdgeId, usize> = picked
         .iter()
         .enumerate()
@@ -325,9 +377,21 @@ pub(super) fn sewn(
                     corner.z
                 ));
             };
-            if hits.iter().any(|h| h.0 != w) {
-                return Err("an edge at a blend's end that two contact curves meet".into());
-            }
+            // Strips that cross past a corner at nearly one height bring two of their corners
+            // to this edge within the tolerance: it ends at the farther, where the higher strip's
+            // contact does, and the strip's own end runs on from there to the nearer.
+            let (w, t) = if hits.iter().any(|h| h.0 != w) {
+                if !alone {
+                    return Err("an edge at a blend's end that two contact curves meet".into());
+                }
+                let far = |h: &&(VertexId, f64)| out.vertex(h.0).point.dist(corner);
+                *hits
+                    .iter()
+                    .max_by(|a, b| far(a).total_cmp(&far(b)))
+                    .expect("two hits")
+            } else {
+                (w, t)
+            };
             ends[e.index()][k] = Some(w);
             if k == 0 {
                 ranges[e.index()].0 = t;

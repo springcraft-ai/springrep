@@ -1126,7 +1126,7 @@ was run over, every sewn blend agrees to 3e-16, except the two whose ends are tr
 edge, where both ways intersect a cone or cylinder with a traced curve: 1.8e-12 in area and 5.3e-12
 in volume (a notch's chamfer) and 4.9e-11 and 1.4e-10 (the notch's round).
 
-Each piece ends where its edge does, in one of nine ways:
+Each piece ends where its edge does, in one of ten ways:
 
 - **On a neighbour's section.** Pieces whose edges continue each other tangentially share their end
   section exactly. They are glued into one tool along it without a boolean: the two blend surfaces
@@ -1137,8 +1137,35 @@ Each piece ends where its edge does, in one of nine ways:
   middle of a ball). The mirror then takes one blend surface onto the other, so they cross on the
   mirror plane, and each piece runs past the corner and is cut there. Two rounds between a plane
   and a sphere are tori about different axes, and their crease is the mirror plane's cut of
-  either. A corner no such plane mirrors (the same post off the middle of the ball) is refused:
-  its two surfaces differ and cross on no plane.
+  either.
+- **Crossing at a corner** ([`blend/strip.rs`](../src/blend/strip.rs)). Two pieces, both convex
+  or both concave, sharing one face at a vertex of three faces, across a sharp edge between two
+  plane walls that no plane mirrors (a post off the middle of a ball, or longer than it is wide; a
+  post on a plate with one wall leaning more than the next; a square hole's rim; a bar's end). The
+  two blend surfaces cross on a curve of their own, the crease, and both its ends are known
+  outright. The far end is where the two contact curves on the shared face meet: both surfaces
+  touch that face there, and so each other. At the near end one piece, the lower, comes to the
+  edge between the walls nearer the corner. Where that edge bends the other way from the blends
+  (the post, the hole), its contact curve runs on past the edge over its own wall's plane until
+  it meets the other piece's surface; where the edge bends the same way (the bar), the higher
+  piece has taken the edge that far and the lower's contact stops short of it, on the higher's
+  surface. The crease starts at that point, and the higher piece ends on the lower's wall plane
+  from the edge to it. Between its ends the crease is held on both surfaces, through points each
+  solved on a line across the lower piece's strip laid flat, within the box the two ends are
+  corners of: the two surfaces cross a second time through the far end, where they touch, and
+  that second curve lies outside the box. On a post 5 by 3 off the middle of a ball, rounded at
+  0.5 to 12, the solid holds the volume and area worked by hand to 8e-12, each corner's volume
+  being worked two ways that agree to 1e-10.
+
+Where every piece ends square on its own section, on one plane (another face's, or a mitre's
+mirror) or at such a corner, no tool is made and nothing is cut: each piece's section is swept a
+little past both ends, and its blend face is rebuilt alone, each contact curve stopped where the
+end's curve meets it and the end's curves put in place of the sweep's own
+([`blend/strip.rs`](../src/blend/strip.rs)). A plane's cut of a cylinder or a plane is the conic;
+of a torus or a cone it is held on both surfaces as a crease is. These faces are sewn as the
+tools' are. A square post's four mitred foot rounds on a plate take 0.3 ms this way against 3.8
+cut, and on a ball 7.4 ms against 26; what the ball's still take is the sewn solid's check and
+the merging of the two halves of a round the ball's seam parts.
 - **Through into air.** Two convex pieces sharing one face, at a vertex of three faces where each
   edge runs on past the vertex through the other's wall into air (a tower's rim where a square side
   meets a leaning cut), each run past the vertex and clear of that wall. Cutting both leaves the
@@ -1282,9 +1309,13 @@ What the region form cannot reach comes back as `Error::Unsupported`, never as a
   than a run of its end face's edges; and a fillet larger than a convex corner round in its chain
   (the exact path reaches past the corner's axis);
 - blends meeting at a vertex other than as a tangent chain, a mirrored mitre, a convex corner they
-  run through, a sphere corner, a ridge or a flat corner (the error names the vertex and the
-  faces), and an edge ending where several other faces meet it other than at a convex corner of
-  planes, or where a face other than a plane, cylinder or cone meets it;
+  run through, a corner they cross at, a sphere corner, a ridge or a flat corner (the error names
+  the vertex and the faces), and an edge ending where several other faces meet it other than at a
+  convex corner of planes, or where a face other than a plane, cylinder or cone meets it;
+- blends that cross at a corner whose faces cannot be sewn (the error names the corner and why):
+  beside a piece that must be cut, where the two pieces come to the edge between their walls
+  between 1e-7 and about 1e-6 mm apart, where the blends cover a pole of the ball they stand on,
+  and for the largest rounds of a hole's rim;
 - a blend wider than a face it sits on, including one whose strip would cross onto the next face
   along its edge, such as where its edge runs on, tangent, as a curve other than a line or circle.
 
