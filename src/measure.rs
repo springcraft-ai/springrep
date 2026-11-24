@@ -212,6 +212,11 @@ fn face_integrals_anew(b: &Brep, f: FaceId, c: Point3, scale: f64, rel: f64) -> 
                     / 3.0;
                 return [r * h, vol];
             }
+            (Surface::Cone(_) | Surface::Sphere(_) | Surface::Torus(_), false) => {
+                if let Some(turned) = round_axis(s, at, (lo, to), c) {
+                    return turned;
+                }
+            }
             _ => {}
         }
         let line = match s {
@@ -224,6 +229,54 @@ fn face_integrals_anew(b: &Brep, f: FaceId, c: Point3, scale: f64, rel: f64) -> 
     let tol = [rel * scale * scale, rel * scale * scale * scale];
     let [a, v] = face_sum(b, f, inner_v, &inner, tol, rel);
     (sigma * a, v)
+}
+
+/// `∫ |n| du` and `⅓∫ (p − c)·n du` round the axis of a cone, sphere or torus from `lo` to `to`
+/// at the parameter `v`, `n = su × sv`, in closed form. Each is a circle `ρ(v)` from the axis at
+/// the height `ζ(v)` turned through `u`: `p = o + ρ·e(u) + ζ·z` with `e = x cos u + y sin u`, so
+/// `n = ρ·(ζ′·(a cos u + b sin u) − ρ′·x × y)` with `a = y × z` and `b = z × x`. The point and the
+/// normal are trigonometric polynomials of degree one in `u`, and their product of degree two.
+fn round_axis(s: &Surface, v: f64, (lo, to): (f64, f64), c: Point3) -> Option<[f64; 2]> {
+    let (f, [rho, zeta, d_rho, d_zeta]) = match s {
+        Surface::Cone(k) => {
+            let (sa, ca) = k.half_angle.sin_cos();
+            (&k.frame, [k.radius + v * sa, v * ca, sa, ca])
+        }
+        Surface::Sphere(k) => {
+            let (sv, cv) = v.sin_cos();
+            let r = k.radius;
+            (&k.frame, [r * cv, r * sv, -r * sv, r * cv])
+        }
+        Surface::Torus(k) => {
+            let (sv, cv) = v.sin_cos();
+            let r = k.minor;
+            (&k.frame, [k.major + r * cv, r * sv, -r * sv, r * cv])
+        }
+        _ => return None,
+    };
+    let (a, b, w) = (f.y.cross(f.z), f.z.cross(f.x), f.x.cross(f.y));
+    let from = f.origin + f.z * zeta - c;
+    let h = to - lo;
+    let m = 0.5 * (lo + to);
+    let (sm, cm) = m.sin_cos();
+    let (s2m, c2m) = (2.0 * m).sin_cos();
+    let (sh2, sh) = ((0.5 * h).sin(), h.sin());
+    let (int_cos, int_sin) = (2.0 * cm * sh2, 2.0 * sm * sh2);
+    let int_cos2 = 0.5 * h + 0.5 * c2m * sh;
+    let int_sin2 = 0.5 * h - 0.5 * c2m * sh;
+    let int_sc = 0.5 * s2m * sh;
+    let along = d_zeta
+        * (from.dot(a) * int_cos
+            + from.dot(b) * int_sin
+            + rho
+                * (f.x.dot(a) * int_cos2
+                    + (f.x.dot(b) + f.y.dot(a)) * int_sc
+                    + f.y.dot(b) * int_sin2));
+    let across = d_rho * (from.dot(w) * h + rho * (f.x.dot(w) * int_cos + f.y.dot(w) * int_sin));
+    Some([
+        rho.abs() * d_rho.hypot(d_zeta) * h,
+        rho * (along - across) / 3.0,
+    ])
 }
 
 /// The face's contributions to the volume, first and second moments of its solid about `c`:
@@ -255,7 +308,12 @@ fn face_exact(b: &Brep, f: FaceId, c: Point3, scale: f64) -> (f64, f64) {
     let face = b.face(f);
     if matches!(
         face.surface,
-        Surface::Plane(_) | Surface::Extrusion(_) | Surface::Cylinder(_)
+        Surface::Plane(_)
+            | Surface::Extrusion(_)
+            | Surface::Cylinder(_)
+            | Surface::Cone(_)
+            | Surface::Sphere(_)
+            | Surface::Torus(_)
     ) {
         return face_integrals(b, f, c, scale, EXACT);
     }
@@ -1988,6 +2046,56 @@ mod tests {
         assert!((got[0] - 1.0 / 3.0).abs() <= 1e-15, "{}", got[0]);
         assert!((got[1] - want).abs() <= 1e-9, "{}", got[1]);
         assert!(calls.get() <= 10_000, "{} calls", calls.get());
+    }
+
+    #[test]
+    fn the_integral_round_an_axis_in_closed_form_is_the_rule_s_and_a_zone_s_by_hand() {
+        use crate::geom::{Cone, Sphere, Torus};
+        // A frame off the origin and tilted, the volume taken about a point off its axis.
+        let frame = Frame::new(
+            Vec3::new(3.0, -2.0, 5.0),
+            Vec3::new(1.0, 2.0, 2.0),
+            Vec3::new(2.0, 1.0, -2.0),
+        )
+        .unwrap();
+        let c = Vec3::new(-7.0, 4.0, 1.5);
+        let surfaces = [
+            Surface::Cone(Cone {
+                frame,
+                radius: 4.0,
+                half_angle: 0.3,
+            }),
+            Surface::Sphere(Sphere { frame, radius: 9.0 }),
+            Surface::Torus(Torus {
+                frame,
+                major: 11.0,
+                minor: 3.0,
+            }),
+        ];
+        let density = |p: Point3, n: Vec3| [n.norm(), (p - c).dot(n) / 3.0];
+        for s in &surfaces {
+            for (v, lo, to) in [(0.4, -1.0, 2.5), (-1.1, 0.3, -4.0), (2.0, 0.0, TAU)] {
+                let closed = round_axis(s, v, (lo, to), c).unwrap();
+                let rule = inner_rule(s, None, false, 24, (lo, v, to), &density);
+                for k in 0..2 {
+                    let scale = rule[k].abs().max(1.0);
+                    assert!(
+                        (closed[k] - rule[k]).abs() <= 1e-13 * scale,
+                        "{} at {v}: {} vs the rule's {}",
+                        s.kind(),
+                        closed[k],
+                        rule[k]
+                    );
+                }
+            }
+        }
+        // By hand: the zone of a sphere of radius 9 at the latitude v is a circle 2π·9·cos v
+        // round, and `n` there is 81·cos v long, pointing out, so about the sphere's centre
+        // the volume's share is a third of 9·(2π·81·cos v).
+        let v = 0.4f64;
+        let zone = round_axis(&surfaces[1], v, (0.0, TAU), frame.origin).unwrap();
+        assert!((zone[0] - TAU * 81.0 * v.cos()).abs() <= 1e-12);
+        assert!((zone[1] - TAU * 243.0 * v.cos()).abs() <= 1e-12);
     }
 
     #[test]
