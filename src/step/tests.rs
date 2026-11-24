@@ -3514,3 +3514,149 @@ fn splines_whose_kind_implies_their_knots_are_read() {
     assert!((measure::volume(&c) - 180.0).abs() <= 1e-9 * 180.0);
     assert!((measure::area(&c) - 2.0 * (60.0 + 30.0 + 18.0)).abs() <= 1e-9 * 216.0);
 }
+
+/// `text` with the placement of each `CONICAL_SURFACE` moved onto its other nappe: the same apex,
+/// the axis turned over, and the origin as far past the apex as it was before it, so the cone is
+/// the same point set and the face on it lies on the nappe the new placement calls far.
+fn cones_from_their_far_nappes(text: &str) -> String {
+    let file = super::part21::parse(text.as_bytes()).unwrap();
+    let ids = text
+        .lines()
+        .filter_map(|l| l.strip_prefix('#')?.split('=').next()?.parse::<u64>().ok());
+    let mut next = ids.max().unwrap() + 1;
+    let mut added = String::new();
+    let mut out = text.to_string();
+    for line in text.lines() {
+        let Some((id, body)) = line.strip_prefix('#').and_then(|l| l.split_once('=')) else {
+            continue;
+        };
+        let Some(args) = body.strip_prefix("CONICAL_SURFACE('',#") else {
+            continue;
+        };
+        let place: u64 = args.split(',').next().unwrap().parse().unwrap();
+        let cone = file
+            .get(id.parse().unwrap())
+            .unwrap()
+            .part("CONICAL_SURFACE")
+            .unwrap();
+        let (radius, half_angle) = (cone[2].as_f64().unwrap(), cone[3].as_f64().unwrap());
+        let axes = file
+            .get(place)
+            .unwrap()
+            .part("AXIS2_PLACEMENT_3D")
+            .unwrap()
+            .to_vec();
+        let point = |r: u64| -> Vec3 {
+            let p = file.get(r).unwrap().part("CARTESIAN_POINT").unwrap()[1]
+                .as_list()
+                .unwrap();
+            Vec3::new(
+                p[0].as_f64().unwrap(),
+                p[1].as_f64().unwrap(),
+                p[2].as_f64().unwrap(),
+            )
+        };
+        let dir = |r: u64| -> Vec3 {
+            let d = file.get(r).unwrap().part("DIRECTION").unwrap()[1]
+                .as_list()
+                .unwrap();
+            Vec3::new(
+                d[0].as_f64().unwrap(),
+                d[1].as_f64().unwrap(),
+                d[2].as_f64().unwrap(),
+            )
+        };
+        let (o, z) = (
+            point(axes[1].as_ref().unwrap()),
+            dir(axes[2].as_ref().unwrap()),
+        );
+        let x = axes[3].as_ref().unwrap();
+        let apex = o - z * (radius / half_angle.tan());
+        let o2 = apex * 2.0 - o;
+        let (p, d, a) = (next, next + 1, next + 2);
+        next += 3;
+        added += &format!(
+            "#{p}=CARTESIAN_POINT('',({:?},{:?},{:?}));\n#{d}=DIRECTION('',({:?},{:?},{:?}));\n\
+             #{a}=AXIS2_PLACEMENT_3D('',#{p},#{d},#{x});\n",
+            o2.x, o2.y, o2.z, -z.x, -z.y, -z.z
+        );
+        out = out.replace(
+            &format!("#{id}=CONICAL_SURFACE('',#{place},"),
+            &format!("#{id}=CONICAL_SURFACE('',#{a},"),
+        );
+    }
+    out.replace("ENDSEC;\nEND-ISO", &format!("{added}ENDSEC;\nEND-ISO"))
+}
+
+#[test]
+fn a_face_on_the_far_nappe_of_its_cone_is_read_and_cut() {
+    // A frustum of radii 6 and 3 and height 5, its cone written about the other nappe: its volume,
+    // 105π, read back, and 100π once bored through by a coaxial rod of radius 1.
+    let pts: Vec<Vec2> = [(0.0, 0.0), (6.0, 0.0), (3.0, 5.0), (0.0, 5.0)]
+        .iter()
+        .map(|&(x, y)| Vec2::new(x, y))
+        .collect();
+    let p = Profile::polygon(&pts, &["a", "b", "c", "d"]);
+    let frustum = revolve(&p, &xz(), Vec3::ZERO, Vec3::Z, TAU, "f").unwrap();
+    for pcurves in [true, false] {
+        let text = write_with(&frustum, "f", &WriteOptions::default().pcurves(pcurves)).unwrap();
+        let far = cones_from_their_far_nappes(&text);
+        assert_ne!(far, text);
+        let read_back = read(far.as_bytes(), "far").unwrap();
+        assert!(read_back.rejected.is_empty(), "{:?}", read_back.rejected);
+        let b = read_back.brep;
+        assert!(check::check(&b).is_empty(), "{:?}", check::check(&b));
+        assert!((measure::volume(&b) - 105.0 * PI).abs() <= 1e-9 * 105.0 * PI);
+        let rod = extrude(
+            &Profile::circle(Vec2::ZERO, 2.0),
+            &Frame::new(Vec3::new(0.0, 0.0, -1.0), Vec3::Z, Vec3::X).unwrap(),
+            7.0,
+            "rod",
+        )
+        .unwrap();
+        let bored = boolean::difference(&b, &rod).unwrap();
+        assert!(check::check(&bored).is_empty());
+        assert!((measure::volume(&bored) - 100.0 * PI).abs() <= 1e-9 * 100.0 * PI);
+        // A coaxial rod of radius 4 cuts the cone face itself, at the height 10/3 where the
+        // frustum's radius 6 − 0.6·z is 4: what is left is π times the integral of
+        // (6 − 0.6·z)² − 16 up to there, 280π/9.
+        let rod = extrude(
+            &Profile::circle(Vec2::ZERO, 8.0),
+            &Frame::new(Vec3::new(0.0, 0.0, -1.0), Vec3::Z, Vec3::X).unwrap(),
+            7.0,
+            "rod",
+        )
+        .unwrap();
+        let ring = boolean::difference(&b, &rod).unwrap();
+        assert!(check::check(&ring).is_empty());
+        let want = 280.0 * PI / 9.0;
+        assert!((measure::volume(&ring) - want).abs() <= 1e-9 * want);
+        // The plane x = 1 along the axis cuts the cone face in a hyperbola. Each section of what
+        // is left beyond it is the disc of radius R = 6 − 0.6·z less its segment past x = 1,
+        // R²·acos(1/R) − √(R² − 1), integrated up the height by Simpson's rule.
+        let cut =
+            boolean::difference(&b, &block("x", [1.0, -10.0, -1.0], [10.0, 10.0, 6.0])).unwrap();
+        assert!(check::check(&cut).is_empty());
+        let section = |z: f64| {
+            let r = 6.0 - 0.6 * z;
+            PI * r * r - (r * r * (1.0 / r).acos() - (r * r - 1.0).sqrt())
+        };
+        let n = 2000;
+        let h = 5.0 / n as f64;
+        let simpson: f64 = (0..=n)
+            .map(|k| {
+                let w = if k == 0 || k == n {
+                    1.0
+                } else if k % 2 == 1 {
+                    4.0
+                } else {
+                    2.0
+                };
+                w * section(k as f64 * h)
+            })
+            .sum::<f64>()
+            * h
+            / 3.0;
+        assert!((measure::volume(&cut) - simpson).abs() <= 1e-9 * simpson);
+    }
+}

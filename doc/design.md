@@ -941,7 +941,8 @@ within `LINEAR` of both, so the vertices placed on the exact loop fell off it an
 dropped. A plane against a cone ([`ssi/conic.rs`](../src/boolean/ssi/conic.rs)) meets each generator
 once: an ellipse within the region's reach of the apex is built exactly from its vertices and the
 point a quarter turn round; any other section is followed along the generators only as far as the
-region reaches, on the cone's own nappe, which is the one its parameters and projection describe. A
+region reaches, on the cone's own nappe, the one its placement's origin lies on, which every cone
+face does (the STEP reader turns over a file's cone whose face lies past the apex). A
 plane all but parallel to a generator cuts an ellipse some 1e16 mm long, which is followed as a
 parabola is. That part of a parabola or of a hyperbola's branch is stored as the curve it is, not
 fitted: a conic arc with no point at infinity is the image of a circle's arc, so a rational
@@ -2082,6 +2083,10 @@ solid never pinches.
   horn torus's pole does, of a point the way the edge bends; where `v` is free (a B-spline blend's
   pole along `u = const`), the `v` whose `u`-line leaves the pole along the edge, from the surface's
   own derivative, since projecting a point beside the pole of a thin patch lands at any `v`.
+- **A cone face lies on its cone's own nappe.** A file's cone is the whole double cone, and a face
+  may lie past its apex from where the placement sits. The reader gives such a cone the placement
+  about the axis turned over, from the point as far past the apex as the old origin is before it:
+  the same point set, with the face on its own nappe, as every cone face the kernel makes is.
 - **Healing** ([`heal.rs`](../src/step/heal.rs)). Exporters hold vertices, curves and surfaces
   together only to their own tolerance (an assembly's file may declare 0.01 mm). Wherever it can,
   the imported geometry moves instead, until each solid closes at `LINEAR`:

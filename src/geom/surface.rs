@@ -3,7 +3,7 @@
 //! Each surface's natural normal is `∂S/∂u × ∂S/∂v`; a face whose material lies on that side is
 //! not reversed. On every surface swept about an axis `u` is the angle about it.
 
-use std::f64::consts::TAU;
+use std::f64::consts::{PI, TAU};
 
 use super::{Curve, NurbsSurface};
 use crate::{
@@ -339,6 +339,27 @@ impl Surface {
         }
     }
 
+    /// `p`'s parameters on the generator of a cone, or the tube circle of a torus, in the half plane
+    /// through `p` and the axis: the foot on that line or circle, though the other one in the same
+    /// meridian plane may be nearer. Its `u` is `p`'s own angle, so it turns with `p` along a
+    /// path, as a pcurve carried across a spindle torus's axis needs. Any other surface's
+    /// [`Surface::project`].
+    pub(crate) fn project_in_half_plane(&self, p: Point3) -> Vec2 {
+        match self {
+            Surface::Cone(s) => {
+                let l = s.frame.to_local(p);
+                let (sa, ca) = s.half_angle.sin_cos();
+                Vec2::new(angle_of(l), (l.x.hypot(l.y) - s.radius) * sa + l.z * ca)
+            }
+            Surface::Torus(s) => {
+                let l = s.frame.to_local(p);
+                let rho = l.x.hypot(l.y);
+                Vec2::new(angle_of(l), l.z.atan2(rho - s.major).rem_euclid(TAU))
+            }
+            _ => self.project(p),
+        }
+    }
+
     /// The parameters of the surface point nearest `p`. A periodic parameter comes back in its
     /// first period.
     pub fn project(&self, p: Point3) -> Vec2 {
@@ -351,11 +372,20 @@ impl Surface {
                 let l = s.frame.to_local(p);
                 Vec2::new(angle_of(l), l.z)
             }
+            // The meridian plane through `p` holds two of a cone's generators, the one at `p`'s
+            // own angle and the one half a turn round, which crosses the apex onto `p`'s side; so
+            // it holds two of a torus's tube circles, and a spindle torus's far one reaches past
+            // the axis to `p`'s side. The nearest point is on the nearer of the two.
             Surface::Cone(s) => {
                 let l = s.frame.to_local(p);
                 let rho = l.x.hypot(l.y);
                 let (sa, ca) = s.half_angle.sin_cos();
-                Vec2::new(angle_of(l), (rho - s.radius) * sa + l.z * ca)
+                let u = angle_of(l);
+                self.nearer(
+                    p,
+                    Vec2::new(u, (rho - s.radius) * sa + l.z * ca),
+                    Vec2::new((u + PI).rem_euclid(TAU), (-rho - s.radius) * sa + l.z * ca),
+                )
             }
             Surface::Sphere(s) => {
                 let l = s.frame.to_local(p);
@@ -364,7 +394,16 @@ impl Surface {
             Surface::Torus(s) => {
                 let l = s.frame.to_local(p);
                 let rho = l.x.hypot(l.y);
-                Vec2::new(angle_of(l), l.z.atan2(rho - s.major).rem_euclid(TAU))
+                let u = angle_of(l);
+                let near = Vec2::new(u, l.z.atan2(rho - s.major).rem_euclid(TAU));
+                if s.minor <= s.major {
+                    return near;
+                }
+                let far = Vec2::new(
+                    (u + PI).rem_euclid(TAU),
+                    l.z.atan2(-rho - s.major).rem_euclid(TAU),
+                );
+                self.nearer(p, near, far)
             }
             Surface::Extrusion(s) if s.curve.spline().is_some() => {
                 let (a, b) = s.curve.domain();
@@ -500,6 +539,15 @@ impl Surface {
             shift(uv.x, hint.x, self.u_period())
         };
         Vec2::new(u, shift(uv.y, hint.y, self.v_period()))
+    }
+
+    /// Of the parameters `a` and `b`, those whose point is nearer `p`; `a` where they are as near.
+    fn nearer(&self, p: Point3, a: Vec2, b: Vec2) -> Vec2 {
+        if self.eval(b.x, b.y).dist(p) < self.eval(a.x, a.y).dist(p) {
+            b
+        } else {
+            a
+        }
     }
 
     fn refine_projection(&self, p: Point3, seeds: impl Iterator<Item = Vec2>) -> Vec2 {
@@ -952,5 +1000,95 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A tilted cone, and a tilted spindle torus whose tube is wider than its reach from the axis,
+    /// with points in a box round each, below the cone's apex and inside the torus's spindle too.
+    fn far_sheets() -> Vec<(Surface, Vec<Point3>)> {
+        let f = frame();
+        let cone = Surface::Cone(Cone {
+            frame: f,
+            radius: 2.0,
+            half_angle: 0.4,
+        });
+        let spindle = Surface::Torus(Torus {
+            frame: f,
+            major: 2.0,
+            minor: 3.0,
+        });
+        let grid = |half: f64, below: f64| -> Vec<Point3> {
+            let mut pts = Vec::new();
+            for i in 0..9 {
+                for j in 0..9 {
+                    for k in 0..9 {
+                        let at = |n: usize, lo: f64, hi: f64| lo + (hi - lo) * n as f64 / 8.0;
+                        let l = Vec3::new(
+                            at(i, -half, half) + 0.013,
+                            at(j, -half, half) - 0.007,
+                            at(k, below, half),
+                        );
+                        pts.push(f.to_world(l));
+                    }
+                }
+            }
+            pts
+        };
+        vec![(cone, grid(12.0, -16.0)), (spindle, grid(7.0, -7.0))]
+    }
+
+    /// The distance from a point at `rho` from the axis and `z` along it to a cone or a torus, in
+    /// the meridian plane through the point: two lines through the cone's apex, two circles of the
+    /// torus's tube, one each side of the axis, the nearer of the two the nearest point's.
+    fn meridian_gap(s: &Surface, rho: f64, z: f64) -> f64 {
+        match s {
+            Surface::Cone(c) => {
+                let (sa, ca) = c.half_angle.sin_cos();
+                let near = ((rho - c.radius) * ca - z * sa).abs();
+                let far = ((rho + c.radius) * ca + z * sa).abs();
+                near.min(far)
+            }
+            Surface::Torus(t) => {
+                let near = ((rho - t.major).hypot(z) - t.minor).abs();
+                let far = ((rho + t.major).hypot(z) - t.minor).abs();
+                near.min(far)
+            }
+            _ => unreachable!("cones and tori"),
+        }
+    }
+
+    fn frame_of(s: &Surface) -> Frame {
+        match s {
+            Surface::Cone(c) => c.frame,
+            Surface::Torus(t) => t.frame,
+            _ => unreachable!("cones and tori"),
+        }
+    }
+
+    #[test]
+    fn a_point_projects_onto_the_far_sheet_of_a_cone_or_a_spindle_torus_where_that_is_nearer() {
+        for (s, pts) in far_sheets() {
+            let f = frame_of(&s);
+            for p in pts {
+                let l = f.to_local(p);
+                let want = meridian_gap(&s, l.x.hypot(l.y), l.z);
+                let uv = s.project(p);
+                let got = s.eval(uv.x, uv.y).dist(p);
+                assert!(
+                    (got - want).abs() <= 1e-9,
+                    "{} at {l:?}: {got} vs {want}",
+                    s.kind()
+                );
+            }
+        }
+        // The cone and point of the report: the nearest point is on the other nappe, past the apex.
+        let cone = Surface::Cone(Cone {
+            frame: Frame::new(Vec3::ZERO, Vec3::Z, Vec3::X).unwrap(),
+            radius: 2.0,
+            half_angle: 0.4,
+        });
+        let p = Vec3::new(3.0, 0.0, -10.0);
+        let uv = cone.project(p);
+        assert!((cone.eval(uv.x, uv.y).dist(p) - meridian_gap(&cone, 3.0, -10.0)).abs() < 1e-12);
+        assert!((uv.x - std::f64::consts::PI).abs() < 1e-12);
     }
 }

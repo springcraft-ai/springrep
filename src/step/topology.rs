@@ -12,7 +12,7 @@ use super::heal;
 use super::part21::Param;
 use crate::{
     Error, Result, check,
-    geom::{Circle, Curve, Line, Surface},
+    geom::{Circle, Cone, Curve, Line, Surface},
     math::{Frame, Point3, Vec2},
     tol,
     topo::{Brep, CoedgeSpec, EdgeId, FaceId, PCurve, ShellId, SolidId, VertexId, project_on},
@@ -1473,6 +1473,63 @@ fn farther(a: Option<heal::Healed>, b: Option<heal::Healed>) -> Option<heal::Hea
 /// disagrees with itself, and checked. Returns the solid, its faces' STEP ids and names in order,
 /// and how far healing moved its geometry. `strict` builds it only where the file's geometry
 /// already agrees with itself, and is an error naming where it does not.
+/// Each cone face on its cone's own nappe. A file may place a face on the nappe past the apex from
+/// its cone's placement, which no cone the kernel makes does and which its intersections and
+/// projections onto a face's cone do not follow. The same cone about its axis turned over, from the
+/// point as far past the apex as the placement's origin is before it, holds that face on its own
+/// nappe; the face turns over where the natural normal there turns with it.
+fn own_nappes(mut raw: Raw) -> Raw {
+    for f in 0..raw.faces.len() {
+        let Surface::Cone(c) = &raw.faces[f].surface else {
+            continue;
+        };
+        let (sa, ca) = c.half_angle.sin_cos();
+        if sa.abs() <= tol::ANGULAR || ca.abs() <= tol::ANGULAR {
+            continue;
+        }
+        // The face's point furthest from the apex says which nappe it lies on: a face reaches the
+        // apex at most at a point.
+        let mut pts = Vec::new();
+        for (_, uses) in &raw.faces[f].bounds {
+            for u in uses {
+                let e = &raw.edges[u.edge];
+                let (ps, pe) = (raw.points[e.start], raw.points[e.end]);
+                pts.extend([ps, pe]);
+                if let Some((t0, t1)) = edge_range(&e.curve, ps, pe, e.start == e.end) {
+                    pts.push(e.curve.eval(0.5 * (t0 + t1)));
+                }
+            }
+        }
+        let radius_at = |q: Point3| c.radius + c.frame.to_local(q).z / ca * sa;
+        let Some(far) = pts
+            .iter()
+            .copied()
+            .max_by(|&a, &b| radius_at(a).abs().total_cmp(&radius_at(b).abs()))
+        else {
+            continue;
+        };
+        if radius_at(far) >= -tol::LINEAR {
+            continue;
+        }
+        let apex = c.frame.origin + c.frame.z * (-c.radius / sa * ca);
+        let Ok(frame) = Frame::new(apex * 2.0 - c.frame.origin, -c.frame.z, c.frame.x) else {
+            continue;
+        };
+        let own = Surface::Cone(Cone {
+            frame,
+            radius: c.radius,
+            half_angle: c.half_angle,
+        });
+        let old = &raw.faces[f].surface;
+        let (a, b) = (old.project(far), own.project(far));
+        let turns = old.normal(a.x, a.y).dot(own.normal(b.x, b.y)) < 0.0;
+        let face = &mut raw.faces[f];
+        face.surface = own;
+        face.reversed ^= turns;
+    }
+    raw
+}
+
 pub(super) fn solid(geo: &mut Geometry, id: u64, strict: bool) -> Result<ReadSolid> {
     if geo
         .file
@@ -1495,7 +1552,7 @@ pub(super) fn solid(geo: &mut Geometry, id: u64, strict: bool) -> Result<ReadSol
     };
     rd.solid(id)?;
     let uncertainty = rd.geo.uncertainty();
-    let file = join_contacts(without_split(rd.raw, &rd.splits));
+    let file = own_nappes(join_contacts(without_split(rd.raw, &rd.splits)));
     let mut raw = file.clone();
     let names = || file.faces.iter().map(|f| (f.id, f.name.clone())).collect();
     if strict {

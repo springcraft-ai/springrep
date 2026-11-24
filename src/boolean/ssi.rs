@@ -566,12 +566,32 @@ fn meridian_points(a: Meridian, b: Meridian) -> Option<Vec<([f64; 2], bool)>> {
     }
 }
 
-/// Two surfaces of revolution about one axis meet in circles about it.
+/// The meridian turned half a turn about the axis: its mirror across `ρ = 0`.
+fn mirrored(m: Meridian) -> Meridian {
+    match m {
+        Meridian::Line { p, d } => Meridian::Line {
+            p: [-p[0], p[1]],
+            d: [-d[0], d[1]],
+        },
+        Meridian::Circle { c, r } => Meridian::Circle {
+            c: [-c[0], c[1]],
+            r,
+        },
+    }
+}
+
+/// Two surfaces of revolution about one axis meet in circles about it. A whole meridian plane
+/// cuts each surface in its meridian and that meridian's mirror across the axis, and a cone's
+/// other nappe or a spindle torus's far circle lies on the near side only in the mirror; so one
+/// meridian is met by the other and by its mirror.
 fn coaxial(a: &Surface, b: &Surface, axis: Axis) -> Option<Ssi> {
     let (ma, mb) = (meridian(a, axis)?, meridian(b, axis)?);
-    let Some(pts) = meridian_points(ma, mb) else {
+    let (Some(mut pts), Some(across)) =
+        (meridian_points(ma, mb), meridian_points(ma, mirrored(mb)))
+    else {
         return Some(Ssi::Coincident);
     };
+    pts.extend(across);
     let x_hint = match a {
         Surface::Cylinder(c) => c.frame.x,
         Surface::Cone(c) => c.frame.x,
@@ -1346,8 +1366,9 @@ mod tests {
             radius: 1.0,
             half_angle: 0.4,
         });
+        // One circle on each nappe: radius 3 above the apex, and radius 3 past it below.
         let (cs, _) = curves(&c, &cone);
-        assert_eq!(cs.len(), 1);
+        assert_eq!(cs.len(), 2);
         on_both(&c, &cone, &cs);
         let d = cyl([4.0, 0.0, 0.0], [0.0, 0.0, 1.0], 2.0);
         let (cs, _) = curves(&c, &d);
