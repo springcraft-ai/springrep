@@ -776,10 +776,10 @@ fn weight(file: &File, solid: u64) -> usize {
             };
             let Some(e) = file.get(s) else { continue };
             // A complex instance's B_SPLINE_SURFACE part has no name before its degrees.
-            let net = match (
-                e.part("B_SPLINE_SURFACE"),
-                e.part("B_SPLINE_SURFACE_WITH_KNOTS"),
-            ) {
+            let simple = super::geometry::SPLINE_SURFACES
+                .iter()
+                .find_map(|k| e.part(k));
+            let net = match (e.part("B_SPLINE_SURFACE"), simple) {
                 (Some(p), _) => p.get(2),
                 (None, Some(p)) => p.get(3),
                 _ => None,

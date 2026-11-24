@@ -3304,3 +3304,213 @@ fn a_cut_spline_face_s_trimmed_edges_are_placed_within_their_pcurves() {
     }
     assert_eq!(written, 9);
 }
+
+#[test]
+fn a_spline_whose_kind_implies_its_knots_has_them() {
+    let knots = |kind: &str, degree: usize, n: usize| {
+        super::geometry::implied_knots(0, kind, degree, n).unwrap()
+    };
+    assert_eq!(
+        knots("UNIFORM_CURVE", 2, 5),
+        [-2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+    );
+    assert_eq!(
+        knots("QUASI_UNIFORM_CURVE", 2, 5),
+        [0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 3.0, 3.0]
+    );
+    assert_eq!(
+        knots("BEZIER_SURFACE", 2, 5),
+        [0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 2.0]
+    );
+    assert_eq!(knots("QUASI_UNIFORM_CURVE", 1, 2), [0.0, 0.0, 1.0, 1.0]);
+    assert!(super::geometry::implied_knots(0, "BEZIER_CURVE", 2, 4).is_err());
+    assert!(super::geometry::implied_knots(0, "UNIFORM_CURVE", 3, 3).is_err());
+    assert!(super::geometry::implied_knots(0, "B_SPLINE_CURVE", 2, 5).is_err());
+}
+
+#[test]
+fn quadratic_splines_whose_kind_implies_their_knots_pass_through_their_closed_form_points() {
+    let points = "#1=CARTESIAN_POINT('',(0.,0.,0.));#2=CARTESIAN_POINT('',(1.,0.,0.));\
+                  #3=CARTESIAN_POINT('',(2.,2.,0.));#4=CARTESIAN_POINT('',(4.,1.,0.));\
+                  #5=CARTESIAN_POINT('',(5.,3.,1.));#6=CARTESIAN_POINT('',(0.,1.,0.));\
+                  #7=CARTESIAN_POINT('',(1.,1.,4.));#8=CARTESIAN_POINT('',(2.,1.,0.));\
+                  #9=CARTESIAN_POINT('',(0.,2.,0.));#10=CARTESIAN_POINT('',(2.,0.,0.));\
+                  #16=CARTESIAN_POINT('',(1.,2.,0.));";
+    let curves = "#11=UNIFORM_CURVE('',2,(#1,#2,#3,#4,#5),.UNSPECIFIED.,.F.,.F.);\
+                  #12=QUASI_UNIFORM_CURVE('',2,(#1,#2,#3,#4,#5),.UNSPECIFIED.,.F.,.F.);\
+                  #13=BEZIER_CURVE('',2,(#1,#2,#3,#4,#5),.UNSPECIFIED.,.F.,.F.);";
+    // A 3 × 3 net on the grid (i, j, 0) with its middle point raised to z = 4.
+    let net = "((#1,#6,#9),(#2,#7,#16),(#10,#8,#3))";
+    let surfaces = format!(
+        "#14=UNIFORM_SURFACE('',2,2,{net},.UNSPECIFIED.,.F.,.F.,.F.);\
+         #15=QUASI_UNIFORM_SURFACE('',2,2,{net},.UNSPECIFIED.,.F.,.F.,.F.);"
+    );
+    let text =
+        format!("ISO-10303-21;\nDATA;\n{points}{curves}{surfaces}ENDSEC;\nEND-ISO-10303-21;\n");
+    let file = super::part21::parse(text.as_bytes()).unwrap();
+    let mut g = super::geometry::Geometry::new(&file);
+    let at =
+        |c: &Curve, t: f64, p: Vec3| assert!(c.eval(t).dist(p) < 1e-14, "{t}: {:?}", c.eval(t));
+    // Uniform: a span starts halfway between its first two control points, and its middle lies at
+    // (P0 + 6 P1 + P2) / 8.
+    let uniform = g.curve(11).unwrap();
+    assert_eq!(uniform.domain(), (0.0, 3.0));
+    at(&uniform, 0.0, Vec3::new(0.5, 0.0, 0.0));
+    at(&uniform, 0.5, Vec3::new(1.0, 0.25, 0.0));
+    at(&uniform, 3.0, Vec3::new(4.5, 2.0, 0.5));
+    let quasi = g.curve(12).unwrap();
+    assert_eq!(quasi.domain(), (0.0, 3.0));
+    at(&quasi, 0.0, Vec3::new(0.0, 0.0, 0.0));
+    at(&quasi, 3.0, Vec3::new(5.0, 3.0, 1.0));
+    // Bézier: two pieces joined at P2, the first's middle at (P0 + 2 P1 + P2) / 4.
+    let bezier = g.curve(13).unwrap();
+    assert_eq!(bezier.domain(), (0.0, 2.0));
+    at(&bezier, 0.5, Vec3::new(1.0, 0.5, 0.0));
+    at(&bezier, 1.0, Vec3::new(2.0, 2.0, 0.0));
+    at(&bezier, 2.0, Vec3::new(5.0, 3.0, 1.0));
+    // A uniform net of one span starts at the mean of its first 2 × 2 points; a quasi-uniform one
+    // of one span is a Bézier patch, through its corner and, in the middle, a quarter of z = 4.
+    let uniform = g.surface(14).unwrap();
+    assert!(uniform.eval(0.0, 0.0).dist(Vec3::new(0.5, 0.5, 1.0)) < 1e-14);
+    let quasi = g.surface(15).unwrap();
+    assert!(quasi.eval(0.0, 0.0).dist(Vec3::new(0.0, 0.0, 0.0)) < 1e-14);
+    assert!(quasi.eval(0.5, 0.5).dist(Vec3::new(1.0, 1.0, 1.0)) < 1e-14);
+}
+
+/// `text`, written without pcurves, with each edge's line and each face's plane given in a form
+/// whose kind implies its knots, the kinds taken in turn: a line as the degree-1 spline between its
+/// edge's ends, a plane as the bilinear patch over a square of side 200 about its origin.
+fn with_implied_knots(text: &str) -> String {
+    let file = super::part21::parse(text.as_bytes()).unwrap();
+    let point = |r: u64| -> Vec3 {
+        let p = file.get(r).unwrap().part("CARTESIAN_POINT").unwrap()[1]
+            .as_list()
+            .unwrap();
+        Vec3::new(
+            p[0].as_f64().unwrap(),
+            p[1].as_f64().unwrap(),
+            p[2].as_f64().unwrap(),
+        )
+    };
+    let dir = |r: u64| -> Vec3 {
+        let d = file.get(r).unwrap().part("DIRECTION").unwrap()[1]
+            .as_list()
+            .unwrap();
+        Vec3::new(
+            d[0].as_f64().unwrap(),
+            d[1].as_f64().unwrap(),
+            d[2].as_f64().unwrap(),
+        )
+    };
+    let id_of = |l: &str| l.strip_prefix('#')?.split('=').next()?.parse::<u64>().ok();
+    let mut next = text.lines().filter_map(id_of).max().unwrap() + 1;
+    let mut added = String::new();
+    let mut new_point = |q: Vec3, added: &mut String| {
+        let id = next;
+        next += 1;
+        *added += &format!(
+            "#{id}=CARTESIAN_POINT('',({:?},{:?},{:?}));\n",
+            q.x, q.y, q.z
+        );
+        id
+    };
+    // Each line's edge, by the line's id: its two vertices' points.
+    let mut ends: std::collections::HashMap<u64, (u64, u64)> = Default::default();
+    for line in text.lines() {
+        let Some(id) = id_of(line) else { continue };
+        let Some(e) = file.get(id).and_then(|e| e.part("EDGE_CURVE")) else {
+            continue;
+        };
+        let vertex = |k: usize| {
+            let v = e[k].as_ref().unwrap();
+            file.get(v).unwrap().part("VERTEX_POINT").unwrap()[1]
+                .as_ref()
+                .unwrap()
+        };
+        let geometry = e[3].as_ref().unwrap();
+        if e[4].as_bool() == Some(true) {
+            ends.insert(geometry, (vertex(1), vertex(2)));
+        } else {
+            ends.insert(geometry, (vertex(2), vertex(1)));
+        }
+    }
+    let curves = [
+        "UNIFORM_CURVE",
+        "QUASI_UNIFORM_CURVE",
+        "BEZIER_CURVE",
+        "RATIONAL",
+    ];
+    let surfaces = ["UNIFORM_SURFACE", "QUASI_UNIFORM_SURFACE", "BEZIER_SURFACE"];
+    let (mut nc, mut ns) = (0, 0);
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let id = id_of(line);
+        let e = id.and_then(|id| file.get(id));
+        if let (Some(id), Some(_)) = (id, e.and_then(|e| e.part("LINE"))) {
+            let (a, b) = ends[&id];
+            let kind = curves[nc % curves.len()];
+            nc += 1;
+            out.push(if kind == "RATIONAL" {
+                format!(
+                    "#{id}=(BOUNDED_CURVE() B_SPLINE_CURVE(1,(#{a},#{b}),.UNSPECIFIED.,.F.,.F.) \
+                     CURVE() GEOMETRIC_REPRESENTATION_ITEM() QUASI_UNIFORM_CURVE() \
+                     RATIONAL_B_SPLINE_CURVE((2.,2.)) REPRESENTATION_ITEM(''));"
+                )
+            } else {
+                format!("#{id}={kind}('',1,(#{a},#{b}),.UNSPECIFIED.,.F.,.F.);")
+            });
+            continue;
+        }
+        if let (Some(id), Some(p)) = (id, e.and_then(|e| e.part("PLANE"))) {
+            let place = file.get(p[1].as_ref().unwrap()).unwrap();
+            let axes = place.part("AXIS2_PLACEMENT_3D").unwrap();
+            let o = point(axes[1].as_ref().unwrap());
+            let z = dir(axes[2].as_ref().unwrap());
+            let x = dir(axes[3].as_ref().unwrap());
+            let y = z.cross(x);
+            let mut net = Vec::new();
+            for i in [-100.0, 100.0] {
+                let row: Vec<String> = [-100.0, 100.0]
+                    .iter()
+                    .map(|&j| format!("#{}", new_point(o + x * i + y * j, &mut added)))
+                    .collect();
+                net.push(format!("({})", row.join(",")));
+            }
+            let kind = surfaces[ns % surfaces.len()];
+            ns += 1;
+            out.push(format!(
+                "#{id}={kind}('',1,1,({}),.UNSPECIFIED.,.F.,.F.,.F.);",
+                net.join(",")
+            ));
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    assert!(nc >= curves.len() && ns >= surfaces.len());
+    out.join("\n")
+        .replace("ENDSEC;\nEND-ISO", &format!("{added}ENDSEC;\nEND-ISO"))
+}
+
+#[test]
+fn splines_whose_kind_implies_their_knots_are_read() {
+    // The block's every edge and face, in turn uniform, quasi-uniform, Bézier and rational: the
+    // same block, 10 by 6 by 3, read back.
+    let b = block("blk", [0.0, 0.0, 0.0], [10.0, 6.0, 3.0]);
+    let text = write_with(&b, "blk", &WriteOptions::default().pcurves(false)).unwrap();
+    let implied = with_implied_knots(&text);
+    for kind in [
+        "UNIFORM_CURVE(",
+        "QUASI_UNIFORM_SURFACE(",
+        "BEZIER_CURVE(",
+        "QUASI_UNIFORM_CURVE()",
+    ] {
+        assert!(implied.contains(kind), "{kind}");
+    }
+    let read_back = read(implied.as_bytes(), "imp").unwrap();
+    assert!(read_back.rejected.is_empty(), "{:?}", read_back.rejected);
+    let c = read_back.brep;
+    assert!(check::check(&c).is_empty(), "{:?}", check::check(&c));
+    assert_eq!(c.face_count(), 6);
+    assert!((measure::volume(&c) - 180.0).abs() <= 1e-9 * 180.0);
+    assert!((measure::area(&c) - 2.0 * (60.0 + 30.0 + 18.0)).abs() <= 1e-9 * 216.0);
+}

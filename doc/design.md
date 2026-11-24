@@ -2051,7 +2051,12 @@ solid never pinches.
   and copies it to each placement. A transformation that scales uniformly builds its solid in scaled
   units, so every placement the kernel applies stays rigid; a mirroring one is an explicit error.
   Faces of another system's file are named `<feature>.face_<i>` in placement order.
-- **Entities.** An `OFFSET_SURFACE` of a plane, cylinder, cone, sphere or torus is read as the
+- **Entities.** A B-spline curve or surface whose kind implies its knots (`UNIFORM_CURVE`,
+  `QUASI_UNIFORM_CURVE`, `BEZIER_CURVE` and their surfaces, simple or rational) is read with the
+  knots its kind gives, whole numbers: a uniform spline's each once, from minus its degree up; a
+  quasi-uniform spline's from 0, each end one more time than its degree and each other once; a
+  Bézier spline's from 0, each end one more time than its degree and each join as many times as
+  its degree. An `OFFSET_SURFACE` of a plane, cylinder, cone, sphere or torus is read as the
   surface of the same kind it is; an offset of any other surface is an explicit error, never an
   approximation. A `VERTEX_LOOP` on a cone or sphere, the apex the face closes on, becomes a seam (a
   generator or a meridian) from the face's other bound up to the apex and back, as the kernel's own

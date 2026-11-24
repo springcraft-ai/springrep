@@ -495,7 +495,7 @@ impl<'a> Geometry<'a> {
 
     fn make_curve(&mut self, id: u64) -> Result<Curve> {
         let e = self.entity(id)?;
-        if e.has("B_SPLINE_CURVE_WITH_KNOTS") {
+        if SPLINE_CURVES.iter().any(|k| e.has(k)) {
             return self.bspline_curve(id, e).map(|c| Curve::Nurbs(Box::new(c)));
         }
         let (kind, a) = &e.parts[0];
@@ -550,20 +550,30 @@ impl<'a> Geometry<'a> {
     }
 
     fn bspline_curve(&mut self, id: u64, e: &Entity) -> Result<NurbsCurve> {
-        let k = self.params(id, "B_SPLINE_CURVE_WITH_KNOTS")?;
+        let kind = *SPLINE_CURVES
+            .iter()
+            .find(|k| e.has(k))
+            .expect("the caller found one");
+        let k = self.params(id, kind)?;
         // A simple instance carries name, degree, points, form, closed, self-intersect, then the
-        // knot attributes; a complex one splits them between B_SPLINE_CURVE and _WITH_KNOTS.
+        // knot attributes where it writes them out; a complex one splits them between
+        // B_SPLINE_CURVE and its kind.
+        let written = kind == SPLINE_CURVES[0];
         let (head, knots): (&[Param], &[Param]) = match e.part("B_SPLINE_CURVE") {
             Some(h) => (h, k),
-            None if k.len() >= 9 => (&k[1..6], &k[6..]),
-            None => return bad(id, "short B_SPLINE_CURVE_WITH_KNOTS"),
+            None if k.len() >= if written { 9 } else { 6 } => (&k[1..6], &k[6..]),
+            None => return bad(id, &format!("short {kind}")),
         };
         let degree = self.degree(id, head.first())?;
         let mut ctrl = Vec::new();
         for p in head.get(1).and_then(Param::as_list).unwrap_or(&[]) {
             ctrl.push(self.point(self.reference(id, Some(p))?)?);
         }
-        let knots = self.knot_vector(id, knots.first(), knots.get(1))?;
+        let knots = if written {
+            self.knot_vector(id, knots.first(), knots.get(1))?
+        } else {
+            implied_knots(id, kind, degree, ctrl.len())?
+        };
         let weights = match e.part("RATIONAL_B_SPLINE_CURVE") {
             Some(w) => Some(self.reals(id, w.first())?),
             None => None,
@@ -582,7 +592,7 @@ impl<'a> Geometry<'a> {
 
     fn make_surface(&mut self, id: u64) -> Result<Surface> {
         let e = self.entity(id)?;
-        if e.has("B_SPLINE_SURFACE_WITH_KNOTS") {
+        if SPLINE_SURFACES.iter().any(|k| e.has(k)) {
             return self
                 .bspline_surface(id, e)
                 .map(|s| Surface::Nurbs(Box::new(s)));
@@ -642,11 +652,16 @@ impl<'a> Geometry<'a> {
     }
 
     fn bspline_surface(&mut self, id: u64, e: &Entity) -> Result<NurbsSurface> {
-        let k = self.params(id, "B_SPLINE_SURFACE_WITH_KNOTS")?;
+        let kind = *SPLINE_SURFACES
+            .iter()
+            .find(|k| e.has(k))
+            .expect("the caller found one");
+        let k = self.params(id, kind)?;
+        let written = kind == SPLINE_SURFACES[0];
         let (head, knots): (&[Param], &[Param]) = match e.part("B_SPLINE_SURFACE") {
             Some(h) => (h, k),
-            None if k.len() >= 13 => (&k[1..8], &k[8..]),
-            None => return bad(id, "short B_SPLINE_SURFACE_WITH_KNOTS"),
+            None if k.len() >= if written { 13 } else { 8 } => (&k[1..8], &k[8..]),
+            None => return bad(id, &format!("short {kind}")),
         };
         let du = self.degree(id, head.first())?;
         let dv = self.degree(id, head.get(1))?;
@@ -666,8 +681,17 @@ impl<'a> Geometry<'a> {
                 ctrl.push(self.point(self.reference(id, Some(p))?)?);
             }
         }
-        let ku = self.knot_vector(id, knots.first(), knots.get(2))?;
-        let kv = self.knot_vector(id, knots.get(1), knots.get(3))?;
+        let (ku, kv) = if written {
+            (
+                self.knot_vector(id, knots.first(), knots.get(2))?,
+                self.knot_vector(id, knots.get(1), knots.get(3))?,
+            )
+        } else {
+            (
+                implied_knots(id, kind, du, nu)?,
+                implied_knots(id, kind, dv, nv)?,
+            )
+        };
         let weights = match e.part("RATIONAL_B_SPLINE_SURFACE") {
             Some(w) => {
                 let mut out = Vec::with_capacity(nu * nv);
@@ -680,6 +704,60 @@ impl<'a> Geometry<'a> {
         };
         NurbsSurface::new((du, dv), (ku, kv), (nu, nv), ctrl, weights).map_err(|err| at(id, err))
     }
+}
+
+/// The B-spline curves the reader takes: one whose knots are written out, then those whose kind
+/// implies them.
+pub(super) const SPLINE_CURVES: [&str; 4] = [
+    "B_SPLINE_CURVE_WITH_KNOTS",
+    "UNIFORM_CURVE",
+    "QUASI_UNIFORM_CURVE",
+    "BEZIER_CURVE",
+];
+
+/// The B-spline surfaces the reader takes, as [`SPLINE_CURVES`].
+pub(super) const SPLINE_SURFACES: [&str; 4] = [
+    "B_SPLINE_SURFACE_WITH_KNOTS",
+    "UNIFORM_SURFACE",
+    "QUASI_UNIFORM_SURFACE",
+    "BEZIER_SURFACE",
+];
+
+/// The knots a B-spline of `degree` over `n` control points has where its kind implies them,
+/// one knot apart. A uniform spline's are single, from `−degree`. A quasi-uniform spline's ends
+/// are each `degree + 1` alike, so it starts and ends on its end points, with single knots
+/// between. A Bézier spline is a chain of pieces of `degree`, each `degree` points on from the
+/// last: its ends `degree + 1` alike and each join `degree` alike.
+pub(super) fn implied_knots(id: u64, kind: &str, degree: usize, n: usize) -> Result<Vec<f64>> {
+    if n <= degree {
+        return bad(id, "fewer control points than the degree needs");
+    }
+    let repeat = |x: usize, times: usize| std::iter::repeat_n(x as f64, times);
+    let mut knots = Vec::with_capacity(n + degree + 1);
+    match kind {
+        "UNIFORM_CURVE" | "UNIFORM_SURFACE" => {
+            knots.extend((0..n + degree + 1).map(|i| i as f64 - degree as f64));
+        }
+        "QUASI_UNIFORM_CURVE" | "QUASI_UNIFORM_SURFACE" => {
+            let spans = n - degree;
+            knots.extend(repeat(0, degree + 1));
+            knots.extend((1..spans).map(|i| i as f64));
+            knots.extend(repeat(spans, degree + 1));
+        }
+        "BEZIER_CURVE" | "BEZIER_SURFACE" => {
+            if !(n - 1).is_multiple_of(degree) {
+                return bad(id, "a Bézier spline's control points are not whole pieces");
+            }
+            let pieces = (n - 1) / degree;
+            knots.extend(repeat(0, degree + 1));
+            for j in 1..pieces {
+                knots.extend(repeat(j, degree));
+            }
+            knots.extend(repeat(pieces, degree + 1));
+        }
+        other => return bad(id, &format!("{other} does not imply its knots")),
+    }
+    Ok(knots)
 }
 
 /// `basis` moved by `d` along its normal, where that is a surface of the same kind; a positive
