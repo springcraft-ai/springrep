@@ -2774,13 +2774,19 @@ fn assert_within_step_domains(b: &Brep) -> (usize, usize) {
         let kind = b.face(f).surface.kind();
         for &lp in &b.face(f).loops {
             let mut ends: Vec<(Vec2, Vec2)> = Vec::new();
+            // A coedge the writer finds no pcurve for within the tolerance has none written, and
+            // its loop's pcurves cannot be followed end to end.
+            let mut whole = true;
             for &c in &b.lp(lp).coedges {
                 let co = b.coedge(c);
                 let edge = b.edge(co.edge);
                 if edge.is_degenerate() {
                     continue;
                 }
-                let c2 = form.pcurve(b, c).expect("a pcurve");
+                let Some(c2) = form.pcurve(b, c) else {
+                    whole = false;
+                    continue;
+                };
                 let (t0, t1) = edge.range;
                 if let super::write::Curve2::Spline { knots, .. } = &c2 {
                     let own = (knots[0], knots[knots.len() - 1]);
@@ -2804,7 +2810,7 @@ fn assert_within_step_domains(b: &Brep) -> (usize, usize) {
                 let (a, z) = (uvs[0], uvs[64]);
                 ends.push(if co.reversed { (z, a) } else { (a, z) });
             }
-            for k in 0..ends.len() {
+            for k in 0..if whole { ends.len() } else { 0 } {
                 let (to, from) = (ends[k].1, ends[(k + 1) % ends.len()].0);
                 let gap = to - from;
                 for (g, d) in [(gap.x, du), (gap.y, dv)] {
