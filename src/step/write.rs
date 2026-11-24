@@ -56,11 +56,83 @@ fn ints(xs: &[f64]) -> String {
 }
 
 /// A curve as a B-spline: degree, knots, control points and weights (`None` when polynomial).
-struct Spline {
-    degree: usize,
-    knots: Vec<f64>,
-    ctrl: Vec<Point3>,
-    weights: Option<Vec<f64>>,
+pub(super) struct Spline {
+    pub(super) degree: usize,
+    pub(super) knots: Vec<f64>,
+    pub(super) ctrl: Vec<Point3>,
+    pub(super) weights: Option<Vec<f64>>,
+}
+
+/// A closed spline as the spline of one turn from `range.0`, for an edge whose `range` runs past
+/// where the curve's own turn ends. A STEP spline has two ends, and a reader takes an edge from its
+/// first vertex along the curve to its second, which it cannot do across them. `None` for an edge
+/// that lies within the curve's turn, and for a curve that is not a closed spline.
+pub(super) fn turn_from(curve: &Curve, range: (f64, f64)) -> Option<Spline> {
+    let period = curve.period()?;
+    let (a, b) = curve.domain();
+    let slack = 1e-12 * period;
+    if range.0 >= a - slack && range.1 <= b + slack {
+        return None;
+    }
+    // Two turns of the curve as one spline with ends, which holds a turn from anywhere in the first.
+    let (p, knots, ctrl, weights) = match curve {
+        Curve::BSpline(s) => two_turns(s, period),
+        Curve::Intersection(ic) => two_turns(&ic.approx, period),
+        Curve::Nurbs(n) => {
+            let (p, k, c) = (n.degree(), n.knots(), n.control_points());
+            let m = c.len();
+            let clamped = k[..=p].iter().all(|&x| x == a) && k[m..].iter().all(|&x| x == b);
+            let w = n.weights();
+            if !clamped || w.is_some_and(|w| (w[0] - w[m - 1]).abs() > 1e-12 * w[0].abs()) {
+                return None;
+            }
+            let mut knots = k[..m + p].to_vec();
+            knots.extend(k[p + 1..].iter().map(|x| x + period));
+            let twice = |v: &[f64]| [v, &v[1..]].concat();
+            (p, knots, [c, &c[1..]].concat(), w.map(twice))
+        }
+        _ => return None,
+    };
+    let near = |t: f64| {
+        let k = knots.iter().find(|&&k| (k - t).abs() <= slack);
+        k.copied().unwrap_or(t)
+    };
+    let start = near(range.0 - period * ((range.0 - a) / period).floor());
+    let end = near(start + period);
+    let pts: Vec<[f64; 4]> = (0..ctrl.len())
+        .map(|i| {
+            let w = weights.as_ref().map_or(1.0, |w| w[i]);
+            [ctrl[i].x * w, ctrl[i].y * w, ctrl[i].z * w, w]
+        })
+        .collect();
+    let (knots, pts) = crate::geom::spline_piece(p, &knots, &pts, (start, end));
+    Some(Spline {
+        degree: p,
+        // From the edge's own start to the bit, where its pcurves start too, and no shorter than it.
+        knots: knots
+            .iter()
+            .map(|&k| match k {
+                k if k == start => range.0,
+                k if k == end => range.1.max(range.0 + period),
+                k => k + (range.0 - start),
+            })
+            .collect(),
+        ctrl: pts
+            .iter()
+            .map(|q| Vec3::new(q[0] / q[3], q[1] / q[3], q[2] / q[3]))
+            .collect(),
+        weights: weights.map(|_| pts.iter().map(|q| q[3]).collect()),
+    })
+}
+
+/// A periodic spline of `period` run on for a second turn: its degree, knots, control points and
+/// no weights.
+fn two_turns(s: &BSpline, period: f64) -> (usize, Vec<f64>, Vec<Point3>, Option<Vec<f64>>) {
+    let (p, k, c) = (s.degree(), s.knots(), s.control_points());
+    let n = c.len() - p;
+    let mut knots = k.to_vec();
+    knots.extend(k[2 * p + 1..].iter().map(|x| x + period));
+    (p, knots, [&c[..n], c].concat(), None)
 }
 
 /// How a STEP file is written. The default writes each edge with its pcurve on every face that uses
@@ -494,7 +566,10 @@ impl Writer {
         };
         let s = self.vertex(b, edge.start, at_start)?;
         let t = self.vertex(b, edge.end, at_end)?;
-        let c = self.curve(curve)?;
+        let c = match turn_from(curve, edge.range) {
+            Some(turn) => self.spline_curve(&turn)?,
+            None => self.curve(curve)?,
+        };
         // The curve with its pcurve on each face that uses it, which other kernels integrate
         // and check along instead of projecting the curve themselves. A seam needs both.
         let uses: Vec<CoedgeId> = if mate == co {
@@ -843,6 +918,14 @@ pub(super) fn pcurve(b: &Brep, c: CoedgeId) -> Option<Curve2> {
                 ctrl: ctrl.iter().map(|&p| local(p)).collect(),
                 weights: weights.map(<[f64]>::to_vec),
             };
+        if let Some(turn) = turn_from(curve, edge.range) {
+            return Some(spline(
+                turn.degree,
+                &turn.knots,
+                &turn.ctrl,
+                turn.weights.as_deref(),
+            ));
+        }
         match curve {
             Curve::Line(l) => {
                 return Some(Curve2::Line {

@@ -2581,3 +2581,155 @@ fn an_open_conic_that_closes_on_itself_is_refused() {
         imp.rejected
     );
 }
+
+/// A hole of radius 2.4 drilled along a radius into a cylinder of radius 56.4, the hole turned
+/// `turn` about the cylinder's axis.
+fn drilled_cylinder(turn: f64) -> Brep {
+    let big = crate::primitive::cylinder(&Frame::WORLD, 56.4, 20.0, "big").unwrap();
+    let dir = Vec3::new(turn.cos(), turn.sin(), 0.0);
+    let frame = Frame::new(Vec3::new(0.0, 0.0, 10.0) + dir * 40.0, dir, Vec3::Z).unwrap();
+    let hole = crate::primitive::cylinder(&frame, 2.4, 30.0, "hole").unwrap();
+    boolean::difference(&big, &hole).unwrap()
+}
+
+#[test]
+fn an_edge_past_the_end_of_a_closed_spline_is_written_on_a_spline_that_starts_at_it() {
+    // At no turn the hole's mouth is two edges, split where it crosses the cylinder's seam, and
+    // one of them runs past where the mouth's curve ends; turned, it is one edge all the way
+    // round, from a vertex a quarter of the way along the curve.
+    for (turn, closed) in [(0.0, false), (0.3, true)] {
+        let b = drilled_cylinder(turn);
+        let dir = Vec3::new(turn.cos(), turn.sin(), 0.0);
+        let mut past = 0;
+        for e in b.edge_ids() {
+            let edge = b.edge(e);
+            let Some(curve @ Curve::Intersection(_)) = &edge.curve else {
+                continue;
+            };
+            let Some(turned) = super::write::turn_from(curve, edge.range) else {
+                assert!(edge.range.1 <= curve.domain().1 + 1e-9);
+                continue;
+            };
+            past += 1;
+            assert_eq!(edge.start == edge.end, closed);
+            let (t0, t1) = edge.range;
+            assert_eq!(turned.knots[0], t0);
+            assert!(turned.knots[turned.knots.len() - 1] >= t1);
+            assert!(turned.ctrl[0].dist(b.vertex(edge.start).point) < crate::tol::LINEAR);
+            if closed {
+                let last = turned.ctrl[turned.ctrl.len() - 1];
+                assert!(last.dist(b.vertex(edge.end).point) < crate::tol::LINEAR);
+            }
+            let spline =
+                crate::geom::BSpline::new(turned.degree, turned.knots, turned.ctrl).unwrap();
+            for i in 0..=64 {
+                let p = spline.eval(t0 + (t1 - t0) * i as f64 / 64.0);
+                // On the cylinder, 56.4 from its axis, and on the hole, 2.4 from its own.
+                assert!((p.x.hypot(p.y) - 56.4).abs() < crate::tol::LINEAR);
+                let off = p - Vec3::new(0.0, 0.0, 10.0);
+                let out = off - dir * off.dot(dir);
+                assert!((out.norm() - 2.4).abs() < crate::tol::LINEAR);
+            }
+        }
+        assert_eq!(past, 1, "turn {turn}");
+        assert_pcurves_follow(&b);
+        round_trip(&b);
+    }
+}
+
+#[test]
+fn a_plane_s_edge_past_the_end_of_a_closed_spline_has_that_spline_for_its_pcurve() {
+    // A ring of tube radius 2 round a circle of radius 8, tilted, cut out of a slab through its
+    // top at z = 10: each mouth it leaves in that plane is a closed curve of the two.
+    let tilt = 0.6f64;
+    let axis = Vec3::new(tilt.sin(), 0.0, tilt.cos());
+    let centre = Vec3::new(0.0, 0.0, 10.0);
+    let frame = Frame::new(centre, axis, Vec3::Y).unwrap();
+    let ring = crate::primitive::torus(&frame, 8.0, 2.0, "ring").unwrap();
+    let slab = block("slab", [-20.0, -20.0, 0.0], [20.0, 20.0, 10.0]);
+    let b = boolean::difference(&slab, &ring).unwrap();
+    let (mut whole, mut part) = (0, 0);
+    for c in b.coedge_ids() {
+        let edge = b.edge(b.coedge(c).edge);
+        let Some(curve @ Curve::Intersection(_)) = &edge.curve else {
+            continue;
+        };
+        if !matches!(b.face(b.coedge_face(c)).surface, Surface::Plane(_)) {
+            continue;
+        }
+        let Some(turned) = super::write::turn_from(curve, edge.range) else {
+            continue;
+        };
+        if edge.start == edge.end {
+            whole += 1;
+        } else {
+            part += 1;
+        }
+        let Some(super::write::Curve2::Spline { knots, ctrl, .. }) = super::write::pcurve(&b, c)
+        else {
+            panic!("a spline on a plane has a spline for its pcurve");
+        };
+        assert_eq!(knots, turned.knots);
+        assert_eq!(knots[0], edge.range.0);
+        assert_eq!(ctrl.len(), turned.ctrl.len());
+        assert!(turned.ctrl[0].dist(b.vertex(edge.start).point) < crate::tol::LINEAR);
+        let spline = crate::geom::BSpline::new(turned.degree, turned.knots, turned.ctrl).unwrap();
+        let (t0, t1) = edge.range;
+        for i in 0..=64 {
+            let p = spline.eval(t0 + (t1 - t0) * i as f64 / 64.0);
+            assert!((p.z - 10.0).abs() < crate::tol::LINEAR);
+            let off = p - centre;
+            let rise = off.dot(axis);
+            let reach = (off - axis * rise).norm();
+            assert!(((reach - 8.0).hypot(rise) - 2.0).abs() < crate::tol::LINEAR);
+        }
+    }
+    assert_eq!((whole, part), (1, 1));
+    assert_pcurves_follow(&b);
+    round_trip(&b);
+}
+
+#[test]
+fn a_rational_circle_is_turned_to_start_where_its_edge_does() {
+    // The unit circle as a rational quadratic in four quarter arcs, each a unit of parameter: by
+    // symmetry it is at 45° half a unit in, and on an axis at each whole one.
+    let w = std::f64::consts::FRAC_1_SQRT_2;
+    let square = [
+        (1.0, 0.0),
+        (1.0, 1.0),
+        (0.0, 1.0),
+        (-1.0, 1.0),
+        (-1.0, 0.0),
+        (-1.0, -1.0),
+        (0.0, -1.0),
+        (1.0, -1.0),
+        (1.0, 0.0),
+    ];
+    let ctrl: Vec<Vec3> = square.iter().map(|&(x, y)| Vec3::new(x, y, 0.0)).collect();
+    let weights = vec![1.0, w, 1.0, w, 1.0, w, 1.0, w, 1.0];
+    let knots = vec![0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 4.0];
+    let circle = crate::geom::NurbsCurve::new(2, knots, ctrl, Some(weights)).unwrap();
+    let curve = Curve::Nurbs(Box::new(circle));
+    assert!(super::write::turn_from(&curve, (0.5, 3.0)).is_none());
+    let turned = super::write::turn_from(&curve, (0.5, 4.5)).unwrap();
+    assert_eq!(turned.knots[0], 0.5);
+    assert_eq!(turned.knots[turned.knots.len() - 1], 4.5);
+    let back =
+        crate::geom::NurbsCurve::new(turned.degree, turned.knots, turned.ctrl, turned.weights)
+            .unwrap();
+    let at = [
+        (0.5, (w, w)),
+        (1.0, (0.0, 1.0)),
+        (2.0, (-1.0, 0.0)),
+        (3.0, (0.0, -1.0)),
+        (4.0, (1.0, 0.0)),
+        (4.5, (w, w)),
+    ];
+    for (t, (x, y)) in at {
+        assert!(back.eval(t).dist(Vec3::new(x, y, 0.0)) < 1e-14, "at {t}");
+    }
+    for i in 0..=64 {
+        let p = back.eval(0.5 + 4.0 * i as f64 / 64.0);
+        assert!((p.x.hypot(p.y) - 1.0).abs() < 1e-14 && p.z == 0.0);
+    }
+}

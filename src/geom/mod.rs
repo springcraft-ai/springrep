@@ -17,6 +17,7 @@ pub(crate) use intersection::{
     distance_to, refine_across, refine_on_contour, refine_onto_both, refine_onto_both_near,
 };
 pub(crate) use nurbs::Bezier;
+pub(crate) use nurbs::piece as spline_piece;
 pub use nurbs::{IsoLine, NurbsCurve, NurbsSurface, Patch};
 pub(crate) use steady::{Steady, Swept};
 pub(crate) use surface::Meridian;

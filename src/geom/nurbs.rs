@@ -563,6 +563,30 @@ fn insert_knot(knots: &mut Vec<f64>, p: usize, pts: &mut Vec<[f64; 4]>, t: f64) 
     knots.insert(k + 1, t);
 }
 
+/// The stretch of a curve of homogeneous control points from `t0` to `t1`, both inside its domain,
+/// as a curve of its own that starts and ends on its first and last control points.
+pub(crate) fn piece(
+    p: usize,
+    knots: &[f64],
+    pts: &[[f64; 4]],
+    (t0, t1): (f64, f64),
+) -> (Vec<f64>, Vec<[f64; 4]>) {
+    let (mut knots, mut pts) = (knots.to_vec(), pts.to_vec());
+    for t in [t1, t0] {
+        let have = knots.iter().filter(|&&k| k == t).count();
+        for _ in have..p {
+            insert_knot(&mut knots, p, &mut pts, t);
+        }
+    }
+    let k = knots.iter().rposition(|&x| x == t0).expect("inserted");
+    let j = knots.iter().position(|&x| x == t1).expect("inserted");
+    let mut out = Vec::with_capacity(j - k + 2 * p + 1);
+    out.push(t0);
+    out.extend_from_slice(&knots[k + 1 - p..j + p]);
+    out.push(t1);
+    (out, pts[k - p..j].to_vec())
+}
+
 /// A rational (or, without weights, polynomial) B-spline curve.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NurbsCurve {
@@ -3323,5 +3347,44 @@ pub(crate) mod tests {
                 }
             }
         }
+    }
+
+    /// A cubic's control point for three knots in a row `a`, `b`, `c` is its polar form there:
+    /// `(a + b + c) / 3` for `t`, `(ab + bc + ca) / 3` for `t²` and `abc` for `t³`.
+    #[test]
+    fn a_piece_of_a_cubic_has_the_polar_form_of_its_own_knots() {
+        let polar = |k: &[f64]| -> Vec<[f64; 4]> {
+            k[1..k.len() - 1]
+                .windows(3)
+                .map(|w| {
+                    let (a, b, c) = (w[0], w[1], w[2]);
+                    [
+                        (a + b + c) / 3.0,
+                        (a * b + b * c + c * a) / 3.0,
+                        a * b * c,
+                        1.0,
+                    ]
+                })
+                .collect()
+        };
+        let knots = [0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 3.0, 3.0, 3.0];
+        let (got_knots, got) = piece(3, &knots, &polar(&knots), (0.5, 2.25));
+        let want_knots = [0.5, 0.5, 0.5, 0.5, 1.0, 2.0, 2.25, 2.25, 2.25, 2.25];
+        assert_eq!(got_knots, want_knots);
+        let same = |got: &[[f64; 4]], want: &[[f64; 4]]| {
+            assert_eq!(got.len(), want.len());
+            for (g, w) in got.iter().zip(want) {
+                assert!(
+                    (0..4).all(|i| (g[i] - w[i]).abs() < 1e-14),
+                    "{g:?} vs {w:?}"
+                );
+            }
+        };
+        same(&got, &polar(&want_knots));
+        same(&got[..1], &[[0.5, 0.25, 0.125, 1.0]]);
+        // From one knot to another, with nothing to put in but the ends' own multiplicity.
+        let (got_knots, got) = piece(3, &knots, &polar(&knots), (1.0, 2.0));
+        assert_eq!(got_knots, [1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]);
+        same(&got, &polar(&got_knots));
     }
 }
