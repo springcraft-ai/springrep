@@ -360,6 +360,40 @@ impl Surface {
         }
     }
 
+    /// `p`'s parameters on the other generator of a cone, or the other tube circle of a torus, in
+    /// the meridian plane through `p`: the one half a turn round, which crosses the apex, or the
+    /// axis, onto `p`'s side. Any other surface's [`Surface::project`].
+    fn project_across_axis(&self, p: Point3) -> Vec2 {
+        match self {
+            Surface::Cone(s) => {
+                let l = s.frame.to_local(p);
+                let (sa, ca) = s.half_angle.sin_cos();
+                Vec2::new(
+                    (angle_of(l) + PI).rem_euclid(TAU),
+                    (-l.x.hypot(l.y) - s.radius) * sa + l.z * ca,
+                )
+            }
+            Surface::Torus(s) => {
+                let l = s.frame.to_local(p);
+                Vec2::new(
+                    (angle_of(l) + PI).rem_euclid(TAU),
+                    l.z.atan2(-l.x.hypot(l.y) - s.major).rem_euclid(TAU),
+                )
+            }
+            _ => self.project(p),
+        }
+    }
+
+    /// Whether the point at `uv` of a torus stands on the ray at its own angle `u`, on the part of
+    /// its tube circles short of the axis. A spindle torus's tube circles reach past the axis onto
+    /// the far sheet. True for any other surface.
+    fn on_near_sheet(&self, uv: Vec2) -> bool {
+        match self {
+            Surface::Torus(s) => s.major + s.minor * uv.y.cos() >= 0.0,
+            _ => true,
+        }
+    }
+
     /// The parameters of the surface point nearest `p`. A periodic parameter comes back in its
     /// first period.
     pub fn project(&self, p: Point3) -> Vec2 {
@@ -376,32 +410,21 @@ impl Surface {
             // own angle and the one half a turn round, which crosses the apex onto `p`'s side; so
             // it holds two of a torus's tube circles, and a spindle torus's far one reaches past
             // the axis to `p`'s side. The nearest point is on the nearer of the two.
-            Surface::Cone(s) => {
-                let l = s.frame.to_local(p);
-                let rho = l.x.hypot(l.y);
-                let (sa, ca) = s.half_angle.sin_cos();
-                let u = angle_of(l);
-                let near = Vec2::new(u, (rho - s.radius) * sa + l.z * ca);
-                let far = Vec2::new((u + PI).rem_euclid(TAU), (-rho - s.radius) * sa + l.z * ca);
-                self.nearer(p, near, far)
-            }
+            Surface::Cone(_) => self.nearer(
+                p,
+                self.project_in_half_plane(p),
+                self.project_across_axis(p),
+            ),
             Surface::Sphere(s) => {
                 let l = s.frame.to_local(p);
                 Vec2::new(angle_of(l), l.z.atan2(l.x.hypot(l.y)))
             }
             Surface::Torus(s) => {
-                let l = s.frame.to_local(p);
-                let rho = l.x.hypot(l.y);
-                let u = angle_of(l);
-                let near = Vec2::new(u, l.z.atan2(rho - s.major).rem_euclid(TAU));
+                let near = self.project_in_half_plane(p);
                 if s.minor <= s.major {
                     return near;
                 }
-                let far = Vec2::new(
-                    (u + PI).rem_euclid(TAU),
-                    l.z.atan2(-rho - s.major).rem_euclid(TAU),
-                );
-                self.nearer(p, near, far)
+                self.nearer(p, near, self.project_across_axis(p))
             }
             Surface::Extrusion(s) if s.curve.spline().is_some() => {
                 let (a, b) = s.curve.domain();
@@ -517,10 +540,32 @@ impl Surface {
                 }
             }
             Surface::Nurbs(s) => s.project_near(p, hint),
-            // A point stepped off a face, as a pcurve followed past its edge is, can lie nearer
-            // the other nappe or the other tube circle, a part of the surface the face does not
-            // reach; continued from the hint, it keeps its own half plane's foot.
-            Surface::Cone(_) | Surface::Torus(_) => self.project_in_half_plane(p),
+            // The nearest foot is not taken: a point stepped off a face, as a pcurve followed past
+            // its edge is, can lie nearer the other nappe or the other tube circle, a part of the
+            // surface the face does not reach, and must not come back there. The foot in `p`'s own
+            // half plane is taken, which turns with `p` across a spindle torus's axis.
+            Surface::Cone(_) => self.project_in_half_plane(p),
+            // But a point of a face that lies on a spindle torus's tube circles past its axis, as
+            // a lemon-shaped face does, stands half a turn from its own `u`, on the other tube
+            // circle of its meridian plane: its own half plane's foot is off the surface and on
+            // the near sheet. Where the hint is on the far sheet and the foot across the axis is
+            // the point itself, the point comes back at itself.
+            Surface::Torus(_) => {
+                let near = self.project_in_half_plane(p);
+                if self.eval(near.x, near.y).dist(p) <= tol::LINEAR {
+                    return near;
+                }
+                let sheet = self.on_near_sheet(hint);
+                let far = self.project_across_axis(p);
+                if self.on_near_sheet(near) != sheet
+                    && self.on_near_sheet(far) == sheet
+                    && self.eval(far.x, far.y).dist(p) <= tol::LINEAR
+                {
+                    far
+                } else {
+                    near
+                }
+            }
             _ => self.project(p),
         }
     }
@@ -1094,5 +1139,31 @@ mod tests {
         let uv = cone.project(p);
         assert!((cone.eval(uv.x, uv.y).dist(p) - meridian_gap(&cone, 3.0, -10.0)).abs() < 1e-12);
         assert!((uv.x - std::f64::consts::PI).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_point_of_a_face_past_a_spindle_torus_axis_continues_at_itself() {
+        // A face can lie wholly on the part of a spindle torus's tube circles past its axis, as a
+        // lemon-shaped face does. A point of such a face stands half a turn from its own `u`, on
+        // the other tube circle of its meridian plane, so its own half plane's foot is off the
+        // surface. Continued from a hint on that sheet, it must come back at itself. Each `uv`
+        // here is past the axis: major + minor·cos v < 0.
+        let spindle = Surface::Torus(Torus {
+            frame: frame(),
+            major: 2.0,
+            minor: 5.0,
+        });
+        for uv in [
+            Vec2::new(0.7, 2.5),
+            Vec2::new(5.2, 3.6),
+            Vec2::new(3.0, 2.0),
+        ] {
+            assert!(!spindle.on_near_sheet(uv), "{uv:?}");
+            let p = spindle.eval(uv.x, uv.y);
+            let got = spindle.project_near(p, Vec2::new(uv.x + 1e-3, uv.y - 1e-3));
+            let off = spindle.eval(got.x, got.y).dist(p);
+            assert!(off <= 1e-9, "{uv:?}: {got:?} is {off} off");
+            assert!((got - uv).norm() <= 1e-9, "{uv:?}: {got:?}");
+        }
     }
 }
