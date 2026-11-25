@@ -15,7 +15,7 @@ use std::collections::{BTreeSet, HashMap};
 use super::{Ball, Picked, SIDES, run::Beyond};
 use crate::{
     boolean::{
-        csi::{curve_curve, curve_distance, signed_distance},
+        csi::{curve_curve, curve_curve_near, curve_distance, signed_distance},
         same_domain, unify,
     },
     check,
@@ -537,6 +537,7 @@ fn sewn_parts(
         .collect();
     let mut fmap: Vec<Option<FaceId>> = Vec::with_capacity(body.face_count());
     let mut sides: Vec<Option<usize>> = Vec::new();
+    let mut seamed: Vec<(FaceId, Vec<Crossing>)> = Vec::new();
     for f in body.face_ids() {
         let face = body.face(f);
         let mut touched = false;
@@ -579,12 +580,11 @@ fn sewn_parts(
                 out.continue_loop(lp);
             }
         }
-        if touched && let Some(at) = crossed(&out, nf, &|x| !kept.contains(&x)) {
-            return Err(format!(
-                "a blend whose edge on a face crosses another edge of that face at ({:.3}, {:.3}, \
-                 {:.3})",
-                at.x, at.y, at.z
-            ));
+        if touched {
+            let hits = crossings(&out, nf, &|x| !kept.contains(&x));
+            if !hits.is_empty() {
+                seamed.push((nf, hits));
+            }
         }
         sides.push((!touched).then_some(0));
     }
@@ -644,6 +644,16 @@ fn sewn_parts(
         blend_faces.push((at[0], f));
     }
 
+    if !seamed.is_empty() {
+        out = cut_at_seams(&out, &seamed, &kept).map_err(|at| {
+            format!(
+                "a blend whose edge on a face crosses another edge of that face at ({:.3}, {:.3}, \
+                 {:.3})",
+                at.x, at.y, at.z
+            )
+        })?;
+    }
+
     for s in body.solid_ids() {
         let mut shells = Vec::new();
         for &sh in &body.solid(s).shells {
@@ -677,12 +687,16 @@ fn sewn_parts(
     Ok(out)
 }
 
+/// Two edges of a face that meet away from a vertex they share, the first one the blend made or
+/// cut back, and a point where they meet.
+type Crossing = (EdgeId, EdgeId, Point3);
+
 /// Where an edge of face `f` that is `fresh`, one the blend made or cut back, meets another edge
-/// of the face away from a vertex the two share. A contact curve that reaches over an edge of
-/// its face (a ball's seam beside the post) would leave the face's boundary crossing itself,
-/// which the faces' integrals do not show. At a pole a face may touch itself: a contact through
-/// the pole meets the seam's end there and crosses nothing.
-fn crossed(out: &Brep, f: FaceId, fresh: &dyn Fn(EdgeId) -> bool) -> Option<Point3> {
+/// of the face away from a vertex the two share, once for each pair of edges. A contact curve
+/// that reaches over an edge of its face (a ball's seam beside the post) would leave the face's
+/// boundary crossing itself, which the faces' integrals do not show. At a pole a face may touch
+/// itself: a contact through the pole meets the seam's end there and crosses nothing.
+fn crossings(out: &Brep, f: FaceId, fresh: &dyn Fn(EdgeId) -> bool) -> Vec<Crossing> {
     let mut edges: Vec<EdgeId> = Vec::new();
     let mut poles: Vec<Point3> = Vec::new();
     for &lp in &out.face(f).loops {
@@ -714,6 +728,7 @@ fn crossed(out: &Brep, f: FaceId, fresh: &dyn Fn(EdgeId) -> bool) -> Option<Poin
     let apart = |i: usize, j: usize| {
         (0..3).any(|k| boxes[i].min[k] > boxes[j].max[k] || boxes[j].min[k] > boxes[i].max[k])
     };
+    let mut out_hits = Vec::new();
     for (i, &a) in edges.iter().enumerate() {
         for (j, &b) in edges.iter().enumerate().skip(i + 1) {
             if (!is_fresh[i] && !is_fresh[j]) || apart(i, j) {
@@ -724,14 +739,353 @@ fn crossed(out: &Brep, f: FaceId, fresh: &dyn Fn(EdgeId) -> bool) -> Option<Poin
                 continue;
             };
             let at_pole = |p: Point3| poles.iter().any(|q| q.dist(p) <= tol::LINEAR);
-            let hits = curve_curve(ca, ea.range, cb, eb.range);
             let shared = |p: Point3| at_shared_vertex(out, a, b, p);
-            if let Some(p) = hits.into_iter().find(|&p| !shared(p) && !at_pole(p)) {
-                return Some(p);
+            let hits = curve_curve(ca, ea.range, cb, eb.range);
+            let pair = if is_fresh[i] { (a, b) } else { (b, a) };
+            for p in hits.into_iter().filter(|&p| !shared(p) && !at_pole(p)) {
+                out_hits.push((pair.0, pair.1, p));
             }
         }
     }
-    None
+    out_hits
+}
+
+/// Whether edge `e` is a seam of face `f`: run by two of its coedges, one each way.
+fn is_seam(out: &Brep, f: FaceId, e: EdgeId) -> bool {
+    let uses: Vec<bool> = out
+        .edge_uses(e)
+        .iter()
+        .filter(|&&c| out.coedge_face(c) == f)
+        .map(|&c| out.coedge(c).reversed)
+        .collect();
+    matches!(uses.as_slice(), [a, b] if a != b)
+}
+
+/// `out` with each blend edge that crosses a seam of its face (a contact reaching over a ball's
+/// seam beside the pole) parted at the crossing, and the seam with it: the stretch of seam on the
+/// blend's side of the crossing, which the blend covers, is gone, with a pole it runs to, and the
+/// face's loops are traced again through the crossings, keeping the face on their left. Face ids
+/// are kept. `Err` with a crossing the face cannot be sewn through: of two edges neither of
+/// which is a seam of it, at the end of either, or leaving a seam's stretch under the blend
+/// running to a vertex other edges meet.
+fn cut_at_seams(
+    out: &Brep,
+    seamed: &[(FaceId, Vec<Crossing>)],
+    kept: &BTreeSet<EdgeId>,
+) -> Result<Brep, Point3> {
+    // Each cut edge's parameters at its crossings, each with the crossing's point and, for a
+    // seam, whether the stretch after it along the seam is the face's.
+    let mut cuts: HashMap<EdgeId, Vec<(f64, usize, bool)>> = HashMap::new();
+    let mut points: Vec<Point3> = Vec::new();
+    let mut retrace: BTreeSet<FaceId> = BTreeSet::new();
+    for (f, hits) in seamed {
+        let face = out.face(*f);
+        for &(a, b, p) in hits {
+            if !is_seam(out, *f, b) || is_seam(out, *f, a) {
+                return Err(p);
+            }
+            let (ea, eb) = (out.edge(a), out.edge(b));
+            let (Some(ca), Some(cb)) = (&ea.curve, &eb.curve) else {
+                return Err(p);
+            };
+            let near = cb.project(p, eb.range.0, eb.range.1);
+            let (x, tb, _) =
+                curve_curve_near(ca, ea.range, cb, eb.range, p, near, None).ok_or(p)?;
+            let ta = ca.project(x, ea.range.0, ea.range.1);
+            let ends = [ea.start, ea.end, eb.start, eb.end];
+            if ends
+                .iter()
+                .any(|&v| out.vertex(v).point.dist(x) <= tol::LINEAR)
+            {
+                return Err(p);
+            }
+            if points.iter().any(|q| q.dist(x) <= tol::LINEAR) {
+                continue;
+            }
+            let [c] = out
+                .edge_uses(a)
+                .iter()
+                .copied()
+                .filter(|&c| out.coedge_face(c) == *f)
+                .collect::<Vec<_>>()[..]
+            else {
+                return Err(p);
+            };
+            // The face lies left of the blend's edge, seen from outside.
+            let along = ca.d1(ta).1 * if out.coedge(c).reversed { -1.0 } else { 1.0 };
+            let uv = face.surface.project(x);
+            let n = face.surface.normal(uv.x, uv.y) * if face.reversed { -1.0 } else { 1.0 };
+            let ours = cb.d1(tb).1.dot(n.cross(along)) > 0.0;
+            let k = points.len();
+            points.push(x);
+            cuts.entry(a).or_default().push((ta, k, true));
+            cuts.entry(b).or_default().push((tb, k, ours));
+        }
+        retrace.insert(*f);
+    }
+
+    // Each cut edge's stretches, kept or not, between its ends and crossings.
+    let mut dropped: BTreeSet<EdgeId> = BTreeSet::new();
+    let mut stretches: HashMap<EdgeId, Vec<Stretch>> = HashMap::new();
+    for (&e, at) in &mut cuts {
+        at.sort_by(|x, y| x.0.total_cmp(&y.0));
+        let edge = out.edge(e);
+        let seam = !at.iter().all(|x| x.2);
+        let mut list = Vec::with_capacity(at.len() + 1);
+        for k in 0..=at.len() {
+            let from = if k == 0 { None } else { Some(at[k - 1]) };
+            let to = at.get(k).copied();
+            let keep = match (from, to) {
+                _ if !seam => true,
+                (Some(f), Some(t)) if f.2 == t.2 => return Err(points[f.1]),
+                (Some(f), _) => f.2,
+                (None, Some(t)) => !t.2,
+                (None, None) => unreachable!("a cut edge has a crossing"),
+            };
+            list.push(Stretch {
+                range: (
+                    from.map_or(edge.range.0, |f| f.0),
+                    to.map_or(edge.range.1, |t| t.0),
+                ),
+                ends: [from.map(|f| f.1), to.map(|t| t.1)],
+                keep,
+            });
+        }
+        // A stretch under the blend that runs on to an end of the seam takes that end with it,
+        // where nothing but the seam and a pole there meets it.
+        for (s, v) in [(&list[0], edge.start), (&list[at.len()], edge.end)] {
+            if s.keep {
+                continue;
+            }
+            for x in out.edge_ids() {
+                let xe = out.edge(x);
+                if x == e || (xe.start != v && xe.end != v) {
+                    continue;
+                }
+                if xe.curve.is_some() {
+                    let first = s.ends.iter().flatten().next().expect("a crossing ends it");
+                    return Err(points[*first]);
+                }
+                dropped.insert(x);
+            }
+        }
+        stretches.insert(e, list);
+    }
+
+    let mut nb = Brep::new();
+    let mut vmap: HashMap<VertexId, VertexId> = HashMap::new();
+    let mut xmap: Vec<Option<VertexId>> = vec![None; points.len()];
+    let mut vertex = |nb: &mut Brep, v: Option<VertexId>, x: Option<usize>| match (v, x) {
+        (_, Some(k)) => *xmap[k].get_or_insert_with(|| nb.add_vertex(points[k])),
+        (Some(v), None) => *vmap
+            .entry(v)
+            .or_insert_with(|| nb.add_vertex(out.vertex(v).point)),
+        (None, None) => unreachable!("a stretch ends at a vertex or a crossing"),
+    };
+    // Each edge's stretches in `nb`, in its own direction: the new edge (none where it is gone)
+    // and its range; and which new edges the blend made or cut.
+    type Pieces = Vec<(Option<EdgeId>, (f64, f64))>;
+    let mut emap: Vec<Pieces> = Vec::new();
+    let mut fresh: BTreeSet<EdgeId> = BTreeSet::new();
+    for e in out.edge_ids() {
+        let edge = out.edge(e);
+        let list = match stretches.get(&e) {
+            Some(list) => list.clone(),
+            None => vec![Stretch {
+                range: edge.range,
+                ends: [None, None],
+                keep: !dropped.contains(&e),
+            }],
+        };
+        let mut pieces = Vec::with_capacity(list.len());
+        for s in list {
+            if !s.keep {
+                pieces.push((None, s.range));
+                continue;
+            }
+            let from = vertex(
+                &mut nb,
+                s.ends[0].is_none().then_some(edge.start),
+                s.ends[0],
+            );
+            let to = vertex(&mut nb, s.ends[1].is_none().then_some(edge.end), s.ends[1]);
+            let x = match &edge.curve {
+                Some(c) => nb.add_edge(c.clone(), s.range, from, to),
+                None => nb.add_degenerate_edge(from, s.range),
+            };
+            if !kept.contains(&e) || stretches.contains_key(&e) {
+                fresh.insert(x);
+            }
+            pieces.push((Some(x), s.range));
+        }
+        emap.push(pieces);
+    }
+
+    for f in out.face_ids() {
+        let face = out.face(f);
+        let nf = nb.add_face(face.surface.clone(), face.reversed, face.names.clone());
+        let mut loops: Vec<Vec<CoedgeSpec>> = Vec::with_capacity(face.loops.len());
+        for &lp in &face.loops {
+            let mut specs = Vec::new();
+            for &c in &out.lp(lp).coedges {
+                let co = out.coedge(c);
+                let pieces = &emap[co.edge.index()];
+                if let [(Some(x), _)] = pieces[..] {
+                    specs.push(CoedgeSpec {
+                        edge: x,
+                        reversed: co.reversed,
+                        pcurve: co.pcurve.clone(),
+                    });
+                    continue;
+                }
+                let mut order: Vec<&(Option<EdgeId>, (f64, f64))> = pieces.iter().collect();
+                if co.reversed {
+                    order.reverse();
+                }
+                let start = |r: (f64, f64)| if co.reversed { r.1 } else { r.0 };
+                let ts: Vec<f64> = order.iter().map(|p| start(p.1)).collect();
+                let seeds = match co.pcurve {
+                    PCurve::Projected { .. } => out.coedge_uvs(c, &ts),
+                    _ => Vec::new(),
+                };
+                for (k, &&(x, _)) in order.iter().enumerate() {
+                    let Some(x) = x else { continue };
+                    let pcurve = match co.pcurve {
+                        PCurve::Projected { .. } => PCurve::Projected { seed: seeds[k] },
+                        ref other => other.clone(),
+                    };
+                    specs.push(CoedgeSpec {
+                        edge: x,
+                        reversed: co.reversed,
+                        pcurve,
+                    });
+                }
+            }
+            loops.push(specs);
+        }
+        if !retrace.contains(&f) {
+            for specs in loops {
+                nb.add_loop(nf, specs);
+            }
+            continue;
+        }
+        let at = points[0];
+        for specs in traced(&nb, &face.surface, face.reversed, loops).ok_or(at)? {
+            let lp = nb.add_loop(nf, specs);
+            nb.continue_loop(lp);
+        }
+        let again = crossings(&nb, nf, &|x| fresh.contains(&x));
+        if let Some(&(_, _, p)) = again.first() {
+            return Err(p);
+        }
+    }
+    Ok(nb)
+}
+
+/// A stretch of an edge between its ends and the crossings on it: its range, the crossings it
+/// runs between (`None` at an end of the edge), and whether the face keeps it.
+#[derive(Clone, Copy)]
+struct Stretch {
+    range: (f64, f64),
+    ends: [Option<usize>; 2],
+    keep: bool,
+}
+
+/// The coedges of a face's `loops`, each edge parted where it crossed a seam, chained into loops
+/// again: where several coedges leave the vertex a coedge comes to, the one met first turning
+/// clockwise from the way back along it, seen from outside, keeps the face on the chain's left.
+/// The loop holding what is left of the outer loop comes first; `None` where none or two do, or a
+/// chain stops.
+fn traced(
+    nb: &Brep,
+    surface: &Surface,
+    reversed: bool,
+    loops: Vec<Vec<CoedgeSpec>>,
+) -> Option<Vec<Vec<CoedgeSpec>>> {
+    let pool: Vec<(usize, CoedgeSpec)> = loops
+        .into_iter()
+        .enumerate()
+        .flat_map(|(k, specs)| specs.into_iter().map(move |s| (k, s)))
+        .collect();
+    // The direction a coedge runs in at its start, or at its end.
+    let heading = |s: &CoedgeSpec, at_end: bool| -> Option<Vec3> {
+        let e = nb.edge(s.edge);
+        let c = e.curve.as_ref()?;
+        let t = if at_end != s.reversed {
+            e.range.1
+        } else {
+            e.range.0
+        };
+        Some(c.d1(t).1 * if s.reversed { -1.0 } else { 1.0 })
+    };
+    let mut used = vec![false; pool.len()];
+    let mut cycles: Vec<(bool, Vec<CoedgeSpec>)> = Vec::new();
+    for first in 0..pool.len() {
+        if used[first] {
+            continue;
+        }
+        used[first] = true;
+        let mut chain = vec![first];
+        loop {
+            let last = &pool[*chain.last().expect("started with one")].1;
+            let (_, end) = spec_ends(nb, last);
+            let mut next: Vec<usize> = (0..pool.len())
+                .filter(|&j| (!used[j] || j == first) && spec_ends(nb, &pool[j].1).0 == end)
+                .collect();
+            // A seam's other coedge leaves its pole where the first comes in, and runs straight
+            // back: the last way on, as at a slit's end.
+            if next.len() > 1 {
+                next.retain(|&j| pool[j].1.edge != last.edge);
+            }
+            let pick = match next[..] {
+                [] => return None,
+                [one] => one,
+                _ => {
+                    let p = nb.vertex(end).point;
+                    let uv = surface.project(p);
+                    let n = surface.normal(uv.x, uv.y) * if reversed { -1.0 } else { 1.0 };
+                    let flat = |d: Vec3| (d - n * d.dot(n)).unit_or_zero();
+                    let back = flat(-heading(last, true)?);
+                    let clockwise = |d: Vec3| {
+                        let turn = (-n.dot(back.cross(d))).atan2(back.dot(d));
+                        if turn <= 0.0 {
+                            turn + std::f64::consts::TAU
+                        } else {
+                            turn
+                        }
+                    };
+                    let mut best: Option<(usize, f64)> = None;
+                    for &j in &next {
+                        let k = clockwise(flat(heading(&pool[j].1, false)?));
+                        if best.is_none_or(|b| k < b.1) {
+                            best = Some((j, k));
+                        }
+                    }
+                    best?.0
+                }
+            };
+            if pick == first {
+                break;
+            }
+            used[pick] = true;
+            chain.push(pick);
+        }
+        let outer = chain.iter().any(|&j| pool[j].0 == 0);
+        cycles.push((
+            outer,
+            chain.into_iter().map(|j| pool[j].1.clone()).collect(),
+        ));
+    }
+    let outer: Vec<usize> = (0..cycles.len()).filter(|&k| cycles[k].0).collect();
+    let [o] = outer[..] else {
+        return None;
+    };
+    let first = cycles.remove(o);
+    Some(
+        std::iter::once(first.1)
+            .chain(cycles.into_iter().map(|c| c.1))
+            .collect(),
+    )
 }
 
 /// Whether `p`, where edges `a` and `b` meet, is at a vertex the two share. Two edges that leave
@@ -1913,5 +2267,38 @@ mod tests {
         );
         assert_eq!(out.face_count(), 26);
         assert_eq!(named(&out, "f.corner"), 8);
+    }
+
+    #[test]
+    fn foot_rounds_whose_contact_crosses_the_seam_of_their_ball_are_sewn() {
+        // A ball of radius 41.23 with a post 8 by 30 on it. At (−5, 3) the wall `u_max` stands
+        // at x = −1, 1 mm short of the pole, and a round of 2 at its foot touches the ball past
+        // the pole, across the seam that runs on from it: the seam from there to the pole goes
+        // under the round, with the pole. At (5, 16) the wall `v_min` stands 1 mm beside the
+        // seam, and its round's ends cross the seam twice, taking the stretch between. Sewn,
+        // each is the tools' result; the hand-worked measures are in the post-on-ball tests.
+        let ball = || crate::primitive::sphere(&up(), 41.23, "ball").unwrap();
+        for (centre, wall) in [
+            (Vec2::new(-5.0, 3.0), "post.u_max"),
+            (Vec2::new(5.0, 16.0), "post.v_min"),
+        ] {
+            let foot = Profile::rect(centre, 8.0, 30.0);
+            let body = crate::boolean::union(&ball(), &prism(&foot, 60.0, "post")).unwrap();
+            let make = || fillet(&body, &[(wall, "ball.skin")], 2.0, "foot");
+            let sewn = with(Method::Sewn, &make).unwrap();
+            let tools = with(Method::Tools, &make).unwrap();
+            assert!(check::check(&sewn).is_empty(), "{:?}", check::check(&sewn));
+            let (sa, sv) = measure::area_and_volume(&sewn);
+            let (ta, tv) = measure::area_and_volume(&tools);
+            assert!(
+                (sv - tv).abs() <= 1e-9 * tv,
+                "{wall}: volume {sv} vs the tools' {tv}"
+            );
+            assert!(
+                (sa - ta).abs() <= 1e-9 * ta,
+                "{wall}: area {sa} vs the tools' {ta}"
+            );
+            assert_eq!(sewn.name_counts(), tools.name_counts());
+        }
     }
 }

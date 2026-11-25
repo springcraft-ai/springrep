@@ -2101,23 +2101,27 @@ fn foot_blends_that_reach_over_the_pole_of_a_ball_take_it_and_its_seam_with_them
 }
 
 #[test]
-fn a_foot_blend_that_reaches_over_a_seam_its_edge_does_not_meet_is_refused_by_name() {
+fn a_foot_blend_that_reaches_over_a_seam_its_edge_does_not_meet_takes_that_stretch_of_it() {
     // The post 8 by 30 at (5, 16) stands 1 mm beside the ball's seam, which runs along its wall
     // `v_min` and meets none of its edges. A round of 2 at that wall's foot touches the ball at
     // y = −0.95, past the seam: its end on the plane of `u_min` crosses the seam at (1, 0), and
-    // the round of `u_max` beside it crosses it again. Sewn as they are, the ball's face would
-    // have the seam running through the hole the rounds leave in it.
+    // its end on the plane of `u_max`, or the round of `u_max` beside it, crosses it again. The
+    // seam between lies under the blend, and the hole the blends leave in the ball's face runs
+    // on along the seam's two sides in its parameters. The walls `u_min` and `v_min`, each 1 mm
+    // past the centre, are mirror images in the plane x = y, and their blends mitre there.
     let (c, s) = (Vec2::new(5.0, 16.0), Vec2::new(8.0, 30.0));
-    for walls in [&[0usize, 1][..], &[0, 1, 2, 3]] {
-        let pairs: Vec<(&str, &str)> = walls.iter().map(|&w| (WALLS[w].0, "ball.skin")).collect();
-        let Err(Error::Unsupported(why)) = fillet(&post_on_ball(c, s), &pairs, 2.0, "foot") else {
-            panic!("rounds over a seam");
-        };
-        assert!(
-            why.contains("crosses another edge of that face at ("),
-            "{why}"
-        );
-        assert!(why.contains(", 0.000, "), "{why}");
+    let at = |w: usize, k: usize| under(c, s, w)[k];
+    let all = [
+        [Stop::Mitre(-1.0), at(0, 1)],
+        [at(1, 0), at(1, 1)],
+        [at(2, 0), at(2, 1)],
+        [at(3, 0), Stop::Mitre(1.0)],
+    ];
+    let two = [[free(c, s, 0)[0], at(0, 1)], [at(1, 0), free(c, s, 1)[1]]];
+    for size in [Size::Round(2.0), FILLET, Size::Bevel(2.0)] {
+        assert_foot((c, s), size, &[0], &[free(c, s, 0)], &[]);
+        assert_foot((c, s), size, &[0, 1], &two, &[[0, 1]]);
+        assert_foot((c, s), size, &[0, 1, 2, 3], &all, &[[0, 1], [1, 2], [2, 3]]);
     }
 }
 
@@ -2155,26 +2159,21 @@ fn rim_rounds_whose_crease_leaves_no_room_between_its_ends_are_built_or_refused(
 }
 
 #[test]
-fn a_foot_blend_over_the_pole_from_the_side_the_seam_leaves_it_is_built_or_refused_truly() {
+fn a_foot_blend_over_the_pole_from_the_side_the_seam_leaves_it_takes_that_end_of_the_seam() {
     // The post 8 by 30 at (−5, 3) has its wall `u_max` at x = −1, facing the pole 1 mm away,
     // and the ball's seam runs on from the pole away from the post. A blend of 2 at that wall's
     // foot reaches over the pole, which is a point of the ball like any other and bounds
-    // nothing: the blend fits. Alone it is built, on a round of 2 and of 5.92 and a chamfer.
+    // nothing: the blend fits. Its contact crosses the seam where no edge of the post meets it,
+    // and the seam from there to the pole lies under the blend. Alone it is built, on a round
+    // of 2 and of 5.92 and a chamfer, and with its neighbours'.
     let (c, s) = (Vec2::new(-5.0, 3.0), Vec2::new(8.0, 30.0));
     assert!(wall_place(c, s, 1).0 == -1.0);
+    let all = [0, 1, 2, 3].map(|w| under(c, s, w));
+    let round = [[0, 1], [1, 2], [2, 3], [3, 0]];
     for size in [Size::Round(2.0), FILLET, Size::Bevel(2.0)] {
         assert_foot((c, s), size, &[1], &[free(c, s, 1)], &[]);
+        assert_foot((c, s), size, &[0, 1, 2, 3], &all, &round);
     }
-    // With its neighbours' it crosses the seam where no edge of the post meets it, which is
-    // what it is refused for.
-    let pairs: Vec<(&str, &str)> = WALLS.iter().map(|w| (w.0, "ball.skin")).collect();
-    let Err(Error::Unsupported(why)) = fillet(&post_on_ball(c, s), &pairs, 2.0, "foot") else {
-        panic!("rounds over a seam");
-    };
-    assert!(
-        why.contains("crosses another edge of that face at ("),
-        "{why}"
-    );
 }
 
 /// The volume and area of the ball with a hole of the post's outline cut down to its middle
@@ -2254,6 +2253,13 @@ fn rim_rounds_of_a_hole_whose_contact_passes_through_the_pole_of_its_ball_are_bu
         assert!(check::check(&some).is_empty());
         assert!(measure::volume(&some) > volume && measure::volume(&some) < measure::volume(&body));
     }
+}
+
+#[test]
+fn rim_rounds_of_a_hole_whose_contact_crosses_the_seam_of_its_ball_take_its_end_to_the_pole() {
+    // A hole 8 by 30 at (−5, 3), its wall `u_max` at x = −1: the round of 2 there reaches over
+    // the pole and crosses the seam beyond it, and the seam from there to the pole goes with it.
+    assert_rims(Vec2::new(-5.0, 3.0), Vec2::new(8.0, 30.0), 2.0);
 }
 
 #[test]
