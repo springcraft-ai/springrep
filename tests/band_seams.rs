@@ -19,6 +19,15 @@
 //!   - `near`: phi = 3e-8, that edge 6e-8 from the line, within the linear tolerance of 1e-7, so
 //!     that a seam on the line would lie along it all the same.
 //!   - `off`: phi = pi / 2.
+//! - `spline-notch-*`: the notched rod with its side a B-spline surface that is the cylinder
+//!   exactly: degree 1 along the axis, and round it the rational quadratic circle of nine control
+//!   points, weights 1 and sqrt(2) / 2 on knots 0, 1/4, 1/2, 3/4, 1 (Piegl and Tiller, The NURBS
+//!   Book, 2nd ed., section 7.5), whose quarters of the parameter are the circle's quadrants. A
+//!   spline band's seam runs in the middle of the widest gap between the circles' vertices, both at
+//!   parameter 0, so at the angle pi.
+//!   - `on`: phi = 0, an edge of the hole on that line, the other on the vertices' line.
+//!   - `across`: phi = −pi / 2, that line through the middle of the hole.
+//!   - `off`: phi = pi / 2, the hole on the far side, across the vertices' line.
 
 use std::f64::consts::PI;
 
@@ -78,4 +87,25 @@ fn a_seam_runs_clear_of_a_loop_edge_on_its_line() {
     reads_and_meshes(include_bytes!("fixtures/slot-on-seam.step"), "on", area);
     reads_and_meshes(include_bytes!("fixtures/slot-near-seam.step"), "near", area);
     reads_and_meshes(include_bytes!("fixtures/slot-off-seam.step"), "off", area);
+}
+
+#[test]
+fn a_spline_band_seam_runs_clear_of_a_hole_on_its_line() {
+    // The surface is the cylinder, so the closed forms are the notched rod's.
+    let area = 48.0 * PI + 8.0;
+    reads_and_meshes(
+        include_bytes!("fixtures/spline-notch-on-seam.step"),
+        "spline on",
+        area,
+    );
+    reads_and_meshes(
+        include_bytes!("fixtures/spline-notch-across-seam.step"),
+        "spline across",
+        area,
+    );
+    reads_and_meshes(
+        include_bytes!("fixtures/spline-notch-off-seam.step"),
+        "spline off",
+        area,
+    );
 }
