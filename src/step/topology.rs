@@ -336,6 +336,57 @@ fn join_contacts(mut raw: Raw) -> Raw {
     raw
 }
 
+/// The angles a run of edges covers about an axis, from `lo` to `hi` in turn, and `pad`, the
+/// most angle that a length of [`tol::LINEAR`] round the axis subtends at any point of it: a line
+/// within `pad` of the run passes within the linear tolerance of it, as near as two points are
+/// taken to lie on one line.
+struct Arc {
+    lo: f64,
+    hi: f64,
+    pad: f64,
+}
+
+impl Arc {
+    /// Whether the line at angle `a` passes beside the run, farther from it than the linear
+    /// tolerance, neither through it nor along it.
+    fn clear_of(&self, a: f64) -> bool {
+        let from = (a - self.lo).rem_euclid(std::f64::consts::TAU);
+        from > self.hi - self.lo + self.pad && from < std::f64::consts::TAU - self.pad
+    }
+}
+
+/// The middle of the widest gap round an axis between the angles `points` and the arcs `arcs`:
+/// the line there is farthest round from all of them. `None` where they leave no gap.
+fn widest_gap(points: &[f64], arcs: &[Arc]) -> Option<f64> {
+    const TAU: f64 = std::f64::consts::TAU;
+    let mut spans: Vec<(f64, f64)> = points
+        .iter()
+        .map(|&a| a.rem_euclid(TAU))
+        .map(|a| (a, a))
+        .collect();
+    spans.extend(arcs.iter().map(|h| {
+        let lo = (h.lo - h.pad).rem_euclid(TAU);
+        (lo, lo + h.hi - h.lo + 2.0 * h.pad)
+    }));
+    spans.sort_by(|x, y| x.0.total_cmp(&y.0));
+    // Twice round, from the farthest any span reaches past a turn, so that every gap, the one
+    // across angle 0 too, is one between neighbours.
+    let laps = spans
+        .iter()
+        .copied()
+        .chain(spans.iter().map(|&(lo, hi)| (lo + TAU, hi + TAU)));
+    let mut end = spans.iter().map(|s| s.1).fold(f64::NEG_INFINITY, f64::max) - TAU;
+    let mut best: Option<(f64, f64)> = None;
+    for (lo, hi) in laps {
+        let gap = lo - end;
+        if gap > tol::ANGULAR && best.is_none_or(|b| gap > b.0) {
+            best = Some((gap, end + 0.5 * gap));
+        }
+        end = end.max(hi);
+    }
+    best.map(|b| b.1)
+}
+
 /// The vertex a use starts at.
 /// A point's angle about `frame`'s axis.
 fn about(frame: &Frame) -> impl Fn(Point3) -> f64 + '_ {
@@ -690,12 +741,82 @@ impl<'g, 'a> Reader<'g, 'a> {
         Some(total)
     }
 
+    /// The angles about an axis that `uses`, in order, cover, `angle` giving a point's and `pad`
+    /// the angle the linear tolerance subtends there: from samples along each edge, as
+    /// [`Reader::swept_by`] takes them. `None` where an edge's span cannot be found.
+    fn arc(
+        &self,
+        angle: &dyn Fn(Point3) -> f64,
+        pad: &dyn Fn(Point3) -> f64,
+        uses: &[Use],
+    ) -> Option<Arc> {
+        let start = self.raw.points[use_start(&self.raw, uses.first()?)];
+        let first = angle(start);
+        let (mut at, mut lo, mut hi, mut most) = (first, first, first, pad(start));
+        for u in uses {
+            let e = &self.raw.edges[u.edge];
+            let (ps, pe) = (self.raw.points[e.start], self.raw.points[e.end]);
+            let (t0, t1) = edge_range(&e.curve, ps, pe, e.start == e.end)?;
+            let n = 64;
+            for i in 0..=n {
+                let f = if u.reversed { n - i } else { i } as f64 / n as f64;
+                let p = e.curve.eval(t0 + (t1 - t0) * f);
+                let d = angle(p) - at;
+                at += (d + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+                    - std::f64::consts::PI;
+                (lo, hi, most) = (lo.min(at), hi.max(at), most.max(pad(p)));
+            }
+        }
+        // Near the axis the tolerance subtends any angle: a line round it passes everything
+        // there.
+        let pad = most.min(std::f64::consts::PI);
+        Some(Arc { lo, hi, pad })
+    }
+
+    /// What a seam of a face that closes round an axis must keep clear of, as the angles about
+    /// the axis each covers, `angle` giving a point's: every bound but the two `rims` the seam
+    /// joins, holes through the face, and every edge of those two that lies along one line of
+    /// the surface, as a slot's side does, since a seam along it would be that edge a second
+    /// time, to within the linear tolerance, `pad` giving the angle it subtends at a point.
+    /// `None` where an edge's span cannot be found, or a hole goes round the axis.
+    fn obstacles(
+        &self,
+        angle: &dyn Fn(Point3) -> f64,
+        pad: &dyn Fn(Point3) -> f64,
+        bounds: &[(bool, Vec<Use>)],
+        rims: [usize; 2],
+    ) -> Option<Vec<Arc>> {
+        let mut out = Vec::new();
+        for (k, (_, uses)) in bounds.iter().enumerate() {
+            if !rims.contains(&k) {
+                let hole = self.arc(angle, pad, uses)?;
+                if hole.hi - hole.lo >= std::f64::consts::TAU {
+                    return None;
+                }
+                out.push(hole);
+                continue;
+            }
+            for u in uses {
+                let edge = self.arc(angle, pad, std::slice::from_ref(u))?;
+                if edge.hi - edge.lo <= edge.pad {
+                    out.push(edge);
+                }
+            }
+        }
+        Some(out)
+    }
+
     /// A face of revolution (cylinder, cone, sphere, torus) with two loops that each go once round
     /// its axis, the ways opposite, and no seam: those two become one loop, the first, a seam
     /// along the surface to a vertex of the second at the same angle, the second, and the seam
     /// back. Its pcurves then close in the parameter plane, as the kernel's faces do. Other loops,
-    /// holes through the band, stay. `reversed` is the face's orientation against its surface's.
-    /// `None` when the face is not such a band, or no vertex of the second lies on the seam's line.
+    /// holes through the band, stay, and the seam runs clear of them: where the line through the
+    /// two loops' vertices meets a hole, or runs along an edge of a hole or of the two loops, the
+    /// seam would cross the hole or lie on that edge a second time, and the face's boundary would
+    /// overlap itself. It then runs where it is farthest round from every hole and every vertex
+    /// of the two loops, each loop's edge split there. `reversed` is the face's orientation
+    /// against its surface's. `None` when the face is not such a band, or no line round it is
+    /// clear of [`Reader::obstacles`].
     fn seamed_band(
         &mut self,
         id: u64,
@@ -737,14 +858,54 @@ impl<'g, 'a> Reader<'g, 'a> {
             let (ux, uy) = (lp.x / rp, lp.y / rp);
             (lq.x - ux * rq).hypot(lq.y - uy * rq) <= tol::LINEAR
         };
+        let angle = about(&frame);
+        // The angle a length of the linear tolerance round the axis subtends at a point, as
+        // `on_line` measures how far a point lies off a line.
+        let pad = |p: Point3| {
+            let l = frame.to_local(p);
+            tol::LINEAR / l.x.hypot(l.y)
+        };
+        let obstacles = self.obstacles(&angle, &pad, bounds, [ka, kb])?;
+        let clear = |p: Point3| obstacles.iter().all(|h| h.clear_of(angle(p)));
+        let at = |u: &Use| self.raw.points[use_start(&self.raw, u)];
         let aligned = (0..a.len())
             .flat_map(|i| (0..b.len()).map(move |j| (i, j)))
-            .find(|&(i, j)| {
-                let at = |u: &Use| self.raw.points[use_start(&self.raw, u)];
-                on_line(at(&a[i]), at(&b[j]))
-            });
+            .find(|&(i, j)| on_line(at(&a[i]), at(&b[j])) && clear(at(&a[i])));
         let (a, b, ia, ib) = match aligned {
             Some((i, j)) => (a.clone(), b.clone(), i, j),
+            None if !clear(at(&a[0])) => {
+                // The line through the first loop's vertex meets an obstacle: the seam runs in
+                // the widest gap between the obstacles and the two loops' vertices, each loop
+                // split there where it has no vertex on that line.
+                let vertices: Vec<f64> = [ka, kb]
+                    .iter()
+                    .flat_map(|&k| bounds[k].1.iter())
+                    .map(|u| angle(self.raw.points[use_start(&self.raw, u)]))
+                    .collect();
+                let mid = widest_gap(&vertices, &obstacles)?;
+                let mut ends = [0usize; 2];
+                for (slot, k) in [ka, kb].into_iter().enumerate() {
+                    let on_mid = |u: &Use| {
+                        let p = self.raw.points[use_start(&self.raw, u)];
+                        let d = angle(p) - mid;
+                        let d = (d + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+                            - std::f64::consts::PI;
+                        d.abs() <= pad(p)
+                    };
+                    ends[slot] = match bounds[k].1.iter().find(|u| on_mid(u)) {
+                        Some(u) => use_start(&self.raw, u),
+                        None => {
+                            let uses = bounds[k].1.clone();
+                            let (e, t) = self.crossing(&angle, &uses, mid)?;
+                            self.split_edge(e, t, bounds)
+                        }
+                    };
+                }
+                let (a, b) = (bounds[ka].1.clone(), bounds[kb].1.clone());
+                let ia = a.iter().position(|u| use_start(&self.raw, u) == ends[0])?;
+                let ib = b.iter().position(|u| use_start(&self.raw, u) == ends[1])?;
+                (a, b, ia, ib)
+            }
             None => {
                 // No vertex of the second loop at the first's angle: split the second's edge
                 // there, in every face that uses it.
@@ -855,24 +1016,24 @@ impl<'g, 'a> Reader<'g, 'a> {
         if wa * wb >= 0.0 {
             return None;
         }
-        // The seam runs where it is farthest round from every vertex of the two loops, the middle
-        // of the widest gap between their angles, so that splitting a loop for it there leaves no
-        // sliver beside a vertex a file placed a little off the line.
-        let mut angles: Vec<f64> = [ka, kb]
+        // The seam runs where it is farthest round from every vertex of the two loops and every
+        // hole, the middle of the widest gap between their angles, so that splitting a loop for
+        // it there leaves no sliver beside a vertex a file placed a little off the line, and the
+        // seam neither crosses a hole nor lies along its edge.
+        let angles: Vec<f64> = [ka, kb]
             .iter()
             .flat_map(|&k| bounds[k].1.iter())
-            .map(|u| angle(self.raw.points[use_start(&self.raw, u)]).rem_euclid(TAU))
+            .map(|u| angle(self.raw.points[use_start(&self.raw, u)]))
             .collect();
-        angles.sort_by(f64::total_cmp);
-        let at = (0..angles.len())
-            .map(|i| {
-                let (lo, hi) = (angles[i], angles[(i + 1) % angles.len()]);
-                let gap = (hi - lo).rem_euclid(TAU);
-                let gap = if gap == 0.0 { TAU } else { gap };
-                (gap, lo + 0.5 * gap)
-            })
-            .max_by(|x, y| x.0.total_cmp(&y.0))?
-            .1;
+        // The angle a length of the linear tolerance along the closed parameter subtends at a
+        // point.
+        let pad = |p: Point3| {
+            let uv = surface.project(p);
+            let (_, du, dv) = surface.d1(uv.x, uv.y);
+            tol::LINEAR / ((if in_v { dv } else { du }).norm() * period / TAU)
+        };
+        let obstacles = self.obstacles(&angle, &pad, bounds, [ka, kb])?;
+        let at = widest_gap(&angles, &obstacles)?;
         let seam = Curve::Nurbs(Box::new(n.iso_curve(!in_v, at / TAU * period)));
         let on_seam = |raw: &Raw, u: &Use| {
             let q = raw.points[use_start(raw, u)];
