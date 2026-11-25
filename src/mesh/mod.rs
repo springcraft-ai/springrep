@@ -338,8 +338,11 @@ fn tessellate_on(threads: usize, b: &Brep, opt: &MeshOptions) -> Result<Mesh> {
 
 /// Splits boundary segments that cross another of the same face's segments in its parameter
 /// plane. Two edges that leave nearly one point at a small angle can have chords that cross where
-/// the curves do not; halving the curved one's chords near there separates them. Segments that
-/// still cross after the rounds are left for the face to refuse.
+/// the curves do not; halving the curved one's chords near there separates them, a few samples
+/// for each such place. Segments that still cross after the rounds are left for the face to
+/// refuse, and so are those of edges whose images overlap, which halving never parts: it would
+/// double their samples every round. The rounds stop once they have added as many samples as
+/// the edges had, so the work is bounded whatever the boundary.
 fn uncross(
     threads: usize,
     b: &Brep,
@@ -348,7 +351,13 @@ fn uncross(
     positions: &mut Vec<Point3>,
 ) {
     let faces: Vec<FaceId> = b.face_ids().collect();
+    let count = |samples: &[Vec<(f64, u32)>]| samples.iter().map(Vec::len).sum::<usize>();
+    let budget = 2 * count(samples);
     for _ in 0..32 {
+        let before = count(samples);
+        if before >= budget {
+            return;
+        }
         let found = par_map(threads, faces.len(), |i| {
             crossing_segments(b, faces[i], samples)
         });
@@ -381,6 +390,11 @@ fn uncross(
                 }
             }
             samples[e] = new;
+        }
+        // Every crossing left is between chords too short to halve: the next round would find
+        // the same.
+        if count(samples) == before {
+            return;
         }
     }
 }
