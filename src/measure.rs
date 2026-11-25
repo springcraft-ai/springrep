@@ -18,14 +18,14 @@ pub use section::{SectionEdge, section, section_area, section_curves};
 pub use slice::{SliceCurve, slice, slices};
 
 use std::{
-    f64::consts::TAU,
+    f64::consts::{FRAC_PI_2, TAU},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
 use crate::{
     check::coedge_params,
     geom::{IsoLine, NurbsSurface, Patch, Surface},
-    math::{Aabb, Point3, Vec2, Vec3},
+    math::{Aabb, Frame, Point3, Vec2, Vec3},
     numeric::{KRONROD_7, KRONROD_15, gauss, solve2},
     threads,
     topo::{
@@ -34,9 +34,10 @@ use crate::{
     },
 };
 
-/// Whether a face's inner integral runs along v, and the lowest value its loops reach along that
-/// parameter, where every inner integral starts; `None` for a face without loops.
-fn inner_start(b: &Brep, f: FaceId) -> Option<(bool, f64)> {
+/// Whether a face's inner integral runs along v, the lowest value its loops reach along that
+/// parameter, where every inner integral starts, and the span they reach along the other; `None`
+/// for a face without loops.
+fn inner_start(b: &Brep, f: FaceId) -> Option<(bool, f64, (f64, f64))> {
     let face = b.face(f);
     let inner_v = match &face.surface {
         Surface::Extrusion(_) | Surface::Ruled(_) => true,
@@ -48,6 +49,7 @@ fn inner_start(b: &Brep, f: FaceId) -> Option<(bool, f64)> {
     // a function of the outer parameter alone, which integrates to nothing round a closed loop.
     // The lowest the loops reach keeps the inner integrals short.
     let (mut lo, mut has) = (f64::INFINITY, false);
+    let (mut out_lo, mut out_hi) = (f64::INFINITY, f64::NEG_INFINITY);
     let tables = pcurve_tables(b, f);
     for (&lp, tables) in face.loops.iter().zip(tables) {
         for (&co, table) in b.lp(lp).coedges.iter().zip(tables) {
@@ -57,12 +59,14 @@ fn inner_start(b: &Brep, f: FaceId) -> Option<(bool, f64)> {
                 table.clone()
             };
             for uv in uvs {
-                lo = lo.min(if inner_v { uv.y } else { uv.x });
+                let (inner, outer) = if inner_v { (uv.y, uv.x) } else { (uv.x, uv.y) };
+                lo = lo.min(inner);
+                (out_lo, out_hi) = (out_lo.min(outer), out_hi.max(outer));
                 has = true;
             }
         }
     }
-    has.then_some((inner_v, lo))
+    has.then_some((inner_v, lo, (out_lo, out_hi)))
 }
 
 /// `∫ F` along the inner parameter from `lo` to `to` at the other parameter `at`, by a Gauss rule
@@ -89,13 +93,15 @@ fn inner_rule<const K: usize>(
         cuts.extend(bp.into_iter().rev());
     }
     cuts.push(to);
-    // Only an angle needs pieces no longer than a turn. A plane's parameters, an extrusion's or a
-    // ruled surface's v and a spline's are lengths or arbitrary, and the integrand is one
-    // polynomial piece between cuts however long that is: a part metres across is not thousands
-    // of turns.
+    // Only an angle needs pieces no longer than a turn. A plane's parameters, the v of an
+    // extrusion, a ruled surface, a cylinder or a cone and a spline's are lengths or arbitrary,
+    // and the integrand is one polynomial piece between cuts however long that is: a part metres
+    // across is not thousands of turns.
     let turns = match s {
         Surface::Plane(_) | Surface::Nurbs(_) => false,
-        Surface::Extrusion(_) | Surface::Ruled(_) => !inner_v,
+        Surface::Extrusion(_) | Surface::Ruled(_) | Surface::Cylinder(_) | Surface::Cone(_) => {
+            !inner_v
+        }
         _ => true,
     };
     let mut sum = [0.0; K];
@@ -134,6 +140,7 @@ fn face_sum<const K: usize>(
     f: FaceId,
     inner_v: bool,
     inner: &dyn Fn(f64, f64) -> [f64; K],
+    polar: Option<&Polar<'_, K>>,
     tol: [f64; K],
     rel: f64,
 ) -> [f64; K] {
@@ -141,7 +148,7 @@ fn face_sum<const K: usize>(
     let tables = pcurve_tables(b, f);
     for (&lp, tables) in b.face(f).loops.iter().zip(tables) {
         for (&co, table) in b.lp(lp).coedges.iter().zip(tables) {
-            let v = coedge_integral(b, co, table, inner, inner_v, tol, rel);
+            let v = coedge_integral(b, co, table, inner, inner_v, polar, tol, rel);
             for i in 0..K {
                 total[i] += v[i];
             }
@@ -167,7 +174,7 @@ fn face_integrals_anew(b: &Brep, f: FaceId, c: Point3, scale: f64, rel: f64) -> 
     let face = b.face(f);
     let s = &face.surface;
     let sigma = if face.reversed { -1.0 } else { 1.0 };
-    let Some((inner_v, lo)) = inner_start(b, f) else {
+    let Some((inner_v, lo, v_span)) = inner_start(b, f) else {
         return (0.0, 0.0);
     };
     // Along the inner parameter a plane's and an extrusion's integrands are at most linear.
@@ -231,9 +238,24 @@ fn face_integrals_anew(b: &Brep, f: FaceId, c: Point3, scale: f64, rel: f64) -> 
         };
         inner_rule(s, line.as_ref(), inner_v, order, (lo, at, to), &density)
     };
+    const POLED: &str = "only a cone, sphere or torus has poles";
+    let across = |pole: f64, u: f64, v: f64| {
+        let (f, j) = meridian_from(s, pole, v).expect(POLED);
+        let (su, cu) = u.sin_cos();
+        axial(f, c, [1.0, cu, su, cu * cu, su * cu, su * su], j)
+    };
+    let corner = |pole: f64, u: f64, v: f64| {
+        let (f, j) = meridian_from(s, pole, v).expect(POLED);
+        axial(f, c, round_terms(lo, u), j)
+    };
+    let polar = Polar {
+        poles: near_poles(s, v_span),
+        across: &across,
+        corner: &corner,
+    };
     let rel = rel.max(noise_floor(c, scale));
     let tol = [rel * scale * scale, rel * scale * scale * scale];
-    let [a, v] = face_sum(b, f, inner_v, &inner, tol, rel);
+    let [a, v] = face_sum(b, f, inner_v, &inner, Some(&polar), tol, rel);
     (sigma * a, v)
 }
 
@@ -285,6 +307,161 @@ fn round_axis(s: &Surface, v: f64, (lo, to): (f64, f64), c: Point3) -> Option<[f
     ])
 }
 
+/// A face's integrals past the poles of its surface, the points where `v` reaches the axis and
+/// `u` is undefined. An edge passing a pole a small distance `d` away turns through half a turn of
+/// `u` along a stretch of length about `d`, and the inner integral along `u` turns with it: a
+/// feature in the boundary integrand far narrower than any rule spaces its points. Along `v` from
+/// the pole instead, `H(u, v) = ∫ F dv` vanishes at the pole like `ρ²`, and `H du` is a smooth
+/// form there (the radial primitive of Poincaré's lemma). A piece of a coedge near a pole takes
+/// `∫ G dv = [Φ] − ∫ H du`, `Φ(u, v) = ∬ F` over `[lo, u] × [pole, v]`, since `dΦ = G dv + H du`.
+struct Polar<'a, const K: usize> {
+    /// The poles near enough the face to take, as values of `v`, ascending; with two, each piece
+    /// takes the one on its side of their middle.
+    poles: Vec<f64>,
+    /// `H`: the integral along `v` from the pole, the first argument, at `u` to `v`.
+    across: &'a dyn Fn(f64, f64, f64) -> [f64; K],
+    /// `Φ`: `H` integrated along `u` from the face's inner start.
+    corner: &'a dyn Fn(f64, f64, f64) -> [f64; K],
+}
+
+/// The poles of a face's surface no farther from the span of `v` the face's loops reach than that
+/// span is long. Farther off, `u` turns along the boundary no faster than across the face, and the
+/// inner integral along `u` serves.
+fn near_poles(s: &Surface, (lo, hi): (f64, f64)) -> Vec<f64> {
+    let mut poles = match s {
+        Surface::Sphere(_) => vec![-FRAC_PI_2, FRAC_PI_2],
+        Surface::Cone(k) if k.half_angle.sin() != 0.0 => vec![-k.radius / k.half_angle.sin()],
+        Surface::Torus(k) if k.major.abs() <= k.minor => {
+            let p = (-k.major / k.minor).acos();
+            let mid = 0.5 * (lo + hi);
+            [-p, p]
+                .map(|p| p + TAU * ((mid - p) / TAU).round())
+                .to_vec()
+        }
+        _ => Vec::new(),
+    };
+    poles.retain(|&p| (lo - p).max(p - hi) <= hi - lo);
+    poles.sort_by(f64::total_cmp);
+    poles.dedup_by(|a, b| (*a - *b).abs() <= 1e-12);
+    poles
+}
+
+/// The integrals along `v` from `from` to `v` of what the area and volume integrands of a cone,
+/// sphere or torus weigh their terms in `u` by, as [`axial`] takes them, with the frame they are
+/// in; `None` for any other surface. With `ρ(v)` and `ζ(v)` as in [`round_axis`]: `|ρ|·√(ρ′² +
+/// ζ′²)`, then `ρρ′`, `ρρ′ζ`, `ρζ′`, `ρζζ′`, `ρ²ρ′` and `ρ²ζ′`. Between a pole and any `v` short of
+/// the next, `ρ` keeps its sign.
+fn meridian_from(s: &Surface, from: f64, v: f64) -> Option<(&Frame, [f64; 7])> {
+    // A sphere is a torus about a centre circle of no radius.
+    let round = |big: f64, r: f64, v: f64| {
+        let (sv, cv) = v.sin_cos();
+        let rho = big + r * cv;
+        let half = 0.5 * (v + sv * cv);
+        [
+            r * (big * v + r * sv),
+            0.5 * rho * rho,
+            -big * r * r * (v - half) - r.powi(3) * sv.powi(3) / 3.0,
+            big * r * sv + r * r * half,
+            0.5 * big * r * r * sv * sv - r.powi(3) * cv.powi(3) / 3.0,
+            rho.powi(3) / 3.0,
+            big * big * r * sv + 2.0 * big * r * r * half + r.powi(3) * (sv - sv.powi(3) / 3.0),
+        ]
+    };
+    let (frame, rho, at, start) = match s {
+        Surface::Sphere(k) => {
+            let r = k.radius;
+            (&k.frame, r * v.cos(), round(0.0, r, v), round(0.0, r, from))
+        }
+        Surface::Torus(k) => {
+            let (big, r) = (k.major, k.minor);
+            (
+                &k.frame,
+                big + r * v.cos(),
+                round(big, r, v),
+                round(big, r, from),
+            )
+        }
+        Surface::Cone(k) => {
+            let (sa, ca) = k.half_angle.sin_cos();
+            let cone = |v: f64| {
+                let rho = k.radius + v * sa;
+                let lean = k.radius * v * v / 2.0 + sa * v.powi(3) / 3.0;
+                [
+                    rho * rho / (2.0 * sa),
+                    0.5 * rho * rho,
+                    sa * ca * lean,
+                    ca * rho * rho / (2.0 * sa),
+                    ca * ca * lean,
+                    rho.powi(3) / 3.0,
+                    ca * rho.powi(3) / (3.0 * sa),
+                ]
+            };
+            (&k.frame, k.radius + v * sa, cone(v), cone(from))
+        }
+        _ => return None,
+    };
+    let mut j: [f64; 7] = std::array::from_fn(|i| at[i] - start[i]);
+    j[0] *= rho.signum();
+    Some((frame, j))
+}
+
+/// `[∫ |n|, ⅓∫ (p − c)·n]` over a region of a cone's, sphere's or torus's parameter plane whose
+/// integrand is a sum of products of a function of `u` and one of `v`: `t` holds what the region
+/// makes of 1, `cos u`, `sin u`, `cos² u`, `sin u cos u` and `sin² u`, `j` what it makes of the
+/// functions of `v` [`meridian_from`] lists. Expanding `n` as in [`round_axis`], `(p − c)·n` is
+/// `ρζ′·q·g + ρ²ζ′·e·g + ρζζ′·z·g − ρρ′·q·w − ρ²ρ′·e·w − ρρ′ζ·z·w`, with `q = o − c` and
+/// `g = a cos u + b sin u`.
+fn axial(f: &Frame, c: Point3, t: [f64; 6], j: [f64; 7]) -> [f64; 2] {
+    let (a, b, w) = (f.y.cross(f.z), f.z.cross(f.x), f.x.cross(f.y));
+    let q = f.origin - c;
+    let vol = t[0] * (-q.dot(w) * j[1] - f.z.dot(w) * j[2])
+        + t[1] * (q.dot(a) * j[3] + f.z.dot(a) * j[4] - f.x.dot(w) * j[5])
+        + t[2] * (q.dot(b) * j[3] + f.z.dot(b) * j[4] - f.y.dot(w) * j[5])
+        + j[6] * (f.x.dot(a) * t[3] + (f.x.dot(b) + f.y.dot(a)) * t[4] + f.y.dot(b) * t[5]);
+    [t[0] * j[0], vol / 3.0]
+}
+
+/// The integrals from `lo` to `to` of 1, `cos u`, `sin u`, `cos² u`, `sin u cos u` and `sin² u`.
+fn round_terms(lo: f64, to: f64) -> [f64; 6] {
+    let h = to - lo;
+    let m = 0.5 * (lo + to);
+    let (sm, cm) = m.sin_cos();
+    let (s2m, c2m) = (2.0 * m).sin_cos();
+    let (sh2, sh) = ((0.5 * h).sin(), h.sin());
+    [
+        h,
+        2.0 * cm * sh2,
+        2.0 * sm * sh2,
+        0.5 * h + 0.5 * c2m * sh,
+        0.5 * s2m * sh,
+        0.5 * h - 0.5 * c2m * sh,
+    ]
+}
+
+/// `∫ g` from `lo` to `to` by a Gauss rule of `order` on pieces no longer than a turn, `g` a
+/// trigonometric polynomial of low degree.
+fn turn_rule<const K: usize>(
+    lo: f64,
+    to: f64,
+    order: usize,
+    g: &dyn Fn(f64) -> [f64; K],
+) -> [f64; K] {
+    let n = ((to - lo).abs() / TAU).ceil().max(1.0) as usize;
+    let mut sum = [0.0; K];
+    for k in 0..n {
+        let x0 = lo + (to - lo) * k as f64 / n as f64;
+        let x1 = lo + (to - lo) * (k + 1) as f64 / n as f64;
+        let (m, h) = ((x0 + x1) * 0.5, (x1 - x0) * 0.5);
+        for &(x, wt) in gauss(order) {
+            let d = g(m + h * x);
+            for i in 0..K {
+                sum[i] += wt * h * d[i];
+            }
+        }
+    }
+    sum
+}
+
 /// The face's contributions to the volume, first and second moments of its solid about `c`:
 /// `⅓∬ x·n`, `¼∬ xᵢ (x·n)` and `⅕∬ xᵢxⱼ (x·n) dA` with `x = p − c`, by the divergence theorem,
 /// in the order 1, x, y, z, xx, yy, zz, xy, yz, zx.
@@ -329,7 +506,7 @@ fn face_exact(b: &Brep, f: FaceId, c: Point3, scale: f64) -> (f64, f64) {
 
 fn face_moments_anew(b: &Brep, f: FaceId, c: Point3, scale: f64) -> [f64; 11] {
     let s = &b.face(f).surface;
-    let Some((inner_v, lo)) = inner_start(b, f) else {
+    let Some((inner_v, lo, v_span)) = inner_start(b, f) else {
         return [0.0; 11];
     };
     // Along a plane's u the integrands are polynomials of degree at most three.
@@ -366,7 +543,18 @@ fn face_moments_anew(b: &Brep, f: FaceId, c: Point3, scale: f64) -> [f64; 11] {
     let rel = EXACT.max(noise_floor(c, scale));
     let s2 = scale * scale;
     let tol = [s3, s4, s4, s4, s5, s5, s5, s5, s5, s5, s2].map(|x| rel * x);
-    face_sum(b, f, inner_v, &inner, tol, rel)
+    // From a pole a piece keeps to its own side of the poles' middle, so the integrands along
+    // `v`, polynomials of degree five in `v` on a cone and trigonometric ones of degree five on a
+    // sphere or torus, span at most about half a turn.
+    let along_v = if matches!(s, Surface::Cone(_)) { 8 } else { 16 };
+    let across = |pole, u, v| inner_rule(s, None, true, along_v, (pole, u, v), &density);
+    let corner = |pole, u, v| turn_rule(lo, u, 24, &|x| across(pole, x, v));
+    let polar = Polar {
+        poles: near_poles(s, v_span),
+        across: &across,
+        corner: &corner,
+    };
+    face_sum(b, f, inner_v, &inner, Some(&polar), tol, rel)
 }
 
 /// How many even steps along a coedge its table of parameters takes.
@@ -416,13 +604,15 @@ fn uv_rate(su: Vec3, sv: Vec3, dp: Vec3) -> Vec2 {
 }
 
 /// `∮ G dv` (or `−∮ H du`) along one coedge, in its direction, each value to its own tolerance.
-/// `table` is its entry of [`pcurve_tables`].
+/// `table` is its entry of [`pcurve_tables`]; `polar` takes it past its surface's poles.
+#[allow(clippy::too_many_arguments)]
 fn coedge_integral<const K: usize>(
     b: &Brep,
     co: CoedgeId,
     table: &[Vec2],
     inner: &dyn Fn(f64, f64) -> [f64; K],
     inner_v: bool,
+    polar: Option<&Polar<'_, K>>,
     tol: [f64; K],
     rel: f64,
 ) -> [f64; K] {
@@ -536,13 +726,88 @@ fn coedge_integral<const K: usize>(
             cuts.push(s1);
             integrate_pieces(&g, &cuts, tol, rel)
         }
-        None => integrate_pieces(&f, &cuts, tol, rel),
+        // A straight or spline pcurve turns `u` no faster past a pole than along its own pieces;
+        // a projected one turns it by about the step over its distance from the pole at each
+        // step of its table. Turning less than a quarter radian a step, it passes the pole at
+        // four steps or more, and the turn spreads over an eighth of the edge, which the rules
+        // resolve.
+        None => match polar.filter(|p| {
+            !inner_v
+                && !p.poles.is_empty()
+                && matches!(coedge.pcurve, PCurve::Projected { .. })
+                && table.windows(2).any(|w| (w[1].x - w[0].x).abs() > 0.25)
+        }) {
+            Some(polar) => past_poles(polar, &uv_and_rate, table, (a, z), cuts, tol, rel),
+            None => integrate_pieces(&f, &cuts, tol, rel),
+        },
     };
     if coedge.reversed {
         sum.map(|x| -x)
     } else {
         sum
     }
+}
+
+/// `∫ G dv` along a coedge from the first of `cuts` to the last, in its edge's direction, by
+/// [`Polar`]: each run of pieces takes the pole on its side, and `Φ` is taken where a run ends.
+/// `uv_and_rate` gives the parameters and their rate at an edge parameter, and `table` the
+/// coedge's entries from `a` to `z`.
+fn past_poles<const K: usize>(
+    polar: &Polar<'_, K>,
+    uv_and_rate: &dyn Fn(f64) -> (Vec2, Vec2),
+    table: &[Vec2],
+    (a, z): (f64, f64),
+    mut cuts: Vec<f64>,
+    tol: [f64; K],
+    rel: f64,
+) -> [f64; K] {
+    let (t0, t1) = (cuts[0], cuts[cuts.len() - 1]);
+    let mid = polar.poles.iter().sum::<f64>() / polar.poles.len() as f64;
+    let north = |t: f64| uv_and_rate(t).0.y > mid;
+    if polar.poles.len() == 2 {
+        // A step of the table that crosses the poles' middle is a piece of its own, so the pieces
+        // either side keep away from the far pole.
+        let at = |k: usize| a + (z - a) * k as f64 / TABLE as f64;
+        let sides: Vec<bool> = (0..=TABLE)
+            .map(|k| table.get(k).map_or_else(|| north(at(k)), |uv| uv.y > mid))
+            .collect();
+        for k in 0..TABLE {
+            if sides[k] != sides[k + 1] {
+                cuts.extend([at(k), at(k + 1)]);
+            }
+        }
+        cuts.retain(|&t| t >= t0 && t <= t1);
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup();
+    }
+    let pole_of = |w: &[f64]| match polar.poles[..] {
+        [south, _] if !north(0.5 * (w[0] + w[1])) => south,
+        _ => polar.poles[polar.poles.len() - 1],
+    };
+    let mut sum = [0.0; K];
+    let mut start = 0;
+    while start + 1 < cuts.len() {
+        let pole = pole_of(&cuts[start..start + 2]);
+        let mut end = start + 1;
+        while end + 1 < cuts.len() && pole_of(&cuts[end..end + 2]) == pole {
+            end += 1;
+        }
+        let h = |t: f64| {
+            let (uv, rate) = uv_and_rate(t);
+            (polar.across)(pole, uv.x, uv.y).map(|x| -x * rate.x)
+        };
+        let run = integrate_pieces(&h, &cuts[start..=end], tol, rel);
+        let (p, q) = (uv_and_rate(cuts[start]).0, uv_and_rate(cuts[end]).0);
+        let (from, to) = (
+            (polar.corner)(pole, p.x, p.y),
+            (polar.corner)(pole, q.x, q.y),
+        );
+        for i in 0..K {
+            sum[i] += run[i] + to[i] - from[i];
+        }
+        start = end;
+    }
+    sum
 }
 
 /// Whether a projected coedge's table runs along one parameter line of its surface: `v` the same
@@ -741,7 +1006,8 @@ pub(crate) fn loop_area(b: &Brep, lp: LoopId) -> f64 {
         .iter()
         .map(|&co| {
             let table = pcurve_table(b, co);
-            coedge_integral(b, co, &table, &|_, to| [to - corner.x], false, tol, EXACT)[0]
+            let inner = |_, to| [to - corner.x];
+            coedge_integral(b, co, &table, &inner, false, None, tol, EXACT)[0]
         })
         .sum()
 }
@@ -2169,6 +2435,66 @@ mod tests {
         let zone = round_axis(&surfaces[1], v, (0.0, TAU), frame.origin).unwrap();
         assert!((zone[0] - TAU * 81.0 * v.cos()).abs() <= 1e-12);
         assert!((zone[1] - TAU * 243.0 * v.cos()).abs() <= 1e-12);
+    }
+
+    #[test]
+    fn the_integrals_from_a_pole_in_closed_form_are_the_rule_s() {
+        use crate::geom::{Cone, Sphere, Torus};
+        let frame = Frame::new(
+            Vec3::new(3.0, -2.0, 5.0),
+            Vec3::new(1.0, 2.0, 2.0),
+            Vec3::new(2.0, 1.0, -2.0),
+        )
+        .unwrap();
+        let c = Vec3::new(-7.0, 4.0, 1.5);
+        let surfaces = [
+            Surface::Cone(Cone {
+                frame,
+                radius: 4.0,
+                half_angle: 0.3,
+            }),
+            Surface::Sphere(Sphere { frame, radius: 9.0 }),
+            Surface::Torus(Torus {
+                frame,
+                major: 3.0,
+                minor: 5.0,
+            }),
+            Surface::Torus(Torus {
+                frame,
+                major: 4.0,
+                minor: 4.0,
+            }),
+        ];
+        let density = |p: Point3, n: Vec3| [n.norm(), (p - c).dot(n) / 3.0];
+        for s in &surfaces {
+            let poles = near_poles(s, (-20.0, 20.0));
+            assert!(!poles.is_empty(), "{}", s.kind());
+            for &pole in &poles {
+                // Short of the next pole, on the side of the surface's own meridian.
+                let towards = if pole > 0.0 { -1.0 } else { 1.0 };
+                for (lo, u, step) in [(-1.0, 2.5, 0.01), (0.3, -4.0, 0.7), (0.0, TAU, 1.4)] {
+                    let v = pole + towards * step;
+                    let (f, j) = meridian_from(s, pole, v).unwrap();
+                    let (su, cu) = u.sin_cos();
+                    let across = axial(f, c, [1.0, cu, su, cu * cu, su * cu, su * su], j);
+                    let corner = axial(f, c, round_terms(lo, u), j);
+                    let rule = |u| inner_rule(s, None, true, 24, (pole, u, v), &density);
+                    let swept = turn_rule(lo, u, 24, &rule);
+                    for (closed, rule) in [(across, rule(u)), (corner, swept)] {
+                        for k in 0..2 {
+                            let scale = rule[k].abs().max(1.0);
+                            assert!(
+                                (closed[k] - rule[k]).abs() <= 1e-12 * scale,
+                                "{} from {pole} to {v}: {} vs the rule's {}",
+                                s.kind(),
+                                closed[k],
+                                rule[k]
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
