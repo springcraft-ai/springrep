@@ -2244,6 +2244,31 @@ round the geometry, since a moment that symmetry makes zero has no size of its o
 bounding box is tight: edge extremes in closed form or by root finding, plus interior stationary
 points of surfaces whose critical sets need not meet a boundary.
 
+A plane section (`measure::section`) is the cap the boolean of the solid and a half space leaves,
+so it needs a solid and costs a boolean. A slice (`measure::slice`, `measure::slices` for parallel
+planes) cuts face by face instead, so it takes a sheet as well: each edge is met with the plane in
+closed form where one exists (`csi::curve_surface`), each face's surface with the plane by the
+booleans' surface intersection (`ssi::intersect`), each curve split at the face's boundary meetings
+and a piece kept where its middle lies inside the face (`boolean::domain`). Where the cut has to be
+traced, it starts from the face's boundary meetings and from where the plane crosses the
+iso-parametric lines through each critical point of the height along the normal, and the seams. A
+closed loop of the cut that touches no edge bounds a disk of the parameter plane, over which the
+height has an interior extremum, a critical point (Morse theory), whose iso-parametric lines run out
+of the disk across the loop; a loop that winds round a periodic parameter crosses its seam. The
+critical points are in closed form on the sphere, the torus and a surface of revolution; a ruled
+surface has none that a loop could surround, its height being affine along each ruling. On a spline
+surface they are the common zeros of two Bernstein polynomials, isolated by de Casteljau
+subdivision of each Bézier patch with the convex hull of the control values as the bound, and a
+piece whose Jacobian's interval determinant keeps one sign solved by Newton's method; a spline
+line's meetings with the plane are isolated the same way. Pieces run with the cut on their left seen
+from the normal's side, so a solid's outer outline turns counter-clockwise about the normal, and
+they join at the plane's meetings with edges, within each edge's and vertex's own tolerance and at
+least ten times `LINEAR`. Where more than two pieces meet, as at a vertex where faces pinch, each
+arriving piece continues on the first leaving clockwise from it round the point in the plane, so
+each wedge of the cut keeps its own corner. A face lying in the plane gives its loops; an edge lying
+in it, of no such face, is a piece of the slice; a curve the plane only touches cuts nothing. The
+faces' domains, boxes and critical points are worked out once for every plane of `slices`.
+
 [`distance`](../src/distance.rs) finds the closest points of two selections of faces, edges,
 vertices and solids. Both sides' meshes give the distance to within their deflections, each between
 a ten-thousandth and a thousandth of its part's size, so a part micrometres across has triangles
@@ -2384,7 +2409,7 @@ triangle of the mesh also uses is split at its middle, so no mesh edge is used m
 | `pick`        | Faces and edges found by the names faces carry, and convex edges          |
 | `step/`       | STEP AP214 import and export, product structure, healing                  |
 | `mesh/`       | Watertight tessellation (constrained Delaunay), the mesh report, display  |
-| `measure`     | Area, volume, mass properties, boxes, extents, plane sections, samples    |
+| `measure`     | Area, volume, mass properties, boxes, extents, plane sections, slices     |
 | `distance`    | Closest distance between selections, and from a point to one              |
 | `overlap`     | Whether placed solids share material, and how much                        |
 | `draw`        | Hidden-line drawings                                                      |

@@ -9,11 +9,13 @@
 
 mod sample;
 mod section;
+mod slice;
 
 pub use sample::{
     edge_length, extent, face_extent, face_samples, face_uv_bounds, solid_area, solid_bbox,
 };
 pub use section::{SectionEdge, section, section_area, section_curves};
+pub use slice::{SliceCurve, slice, slices};
 
 use std::f64::consts::TAU;
 

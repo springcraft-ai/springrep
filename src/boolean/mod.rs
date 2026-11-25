@@ -815,7 +815,7 @@ pub(crate) fn coedge_trim_with(
 /// except that a piece not running along one trim is inside where the exact side puts its middle.
 /// Shorter than twice the tolerance, a piece leaving the boundary, or cutting across a corner, has
 /// its middle within the tolerance of the boundary, though only one lying along a trim is on it.
-fn locate_piece(dom: &Domain, pts: [Point3; 3]) -> Where {
+pub(crate) fn locate_piece(dom: &Domain, pts: [Point3; 3]) -> Where {
     match dom.locate(pts[1]) {
         Where::Boundary if !dom.along_one_trim(&pts) => dom
             .exact_side(pts[1])
