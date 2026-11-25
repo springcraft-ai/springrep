@@ -14,7 +14,7 @@ use super::part21::Param;
 use crate::{
     Error, Result, check,
     geom::{Circle, Cone, Curve, Line, Surface},
-    math::{Frame, Point3, Vec2},
+    math::{Frame, Point3, Transform, Vec2},
     tol,
     topo::{Brep, CoedgeSpec, EdgeId, FaceId, PCurve, ShellId, SolidId, VertexId, project_on},
 };
@@ -979,24 +979,44 @@ impl<'g, 'a> Reader<'g, 'a> {
         Some(())
     }
 
-    /// A spline face closed round one of its parameters with two loops that each go once round
-    /// it, the ways opposite, and no seam: [`Reader::seamed_band`] with that parameter for the
-    /// angle, and the surface's own iso curve for the seam. `None` when the face is not such a
-    /// band.
-    fn seamed_spline_band(
+    /// A face closed round one of its surface's parameters, and not round the other, with two
+    /// loops that each go once round it, the ways opposite, and no seam: [`Reader::seamed_band`]
+    /// with that parameter for the angle, and the surface's own line of the other parameter for the
+    /// seam: a spline's iso curve, a revolution's profile turned to that angle, an extrusion's
+    /// line along its direction. `None` when the face is not such a band.
+    ///
+    /// A loop lifts to a closed path in the parameter plane exactly when it winds round the period
+    /// zero times (Hatcher, *Algebraic Topology*, §1.3, Propositions 1.30 and 1.31). Each rim winds
+    /// once, and the two the ways opposite, joined by the seam used once each way, wind zero times.
+    fn seamed_parameter_band(
         &mut self,
         id: u64,
         surface: &Surface,
         bounds: &mut Vec<(bool, Vec<Use>)>,
     ) -> Option<()> {
-        let Surface::Nurbs(n) = surface else {
-            return None;
-        };
         let (in_v, period) = match (surface.u_period(), surface.v_period()) {
             (None, Some(p)) => (true, p),
             (Some(p), None) => (false, p),
             _ => return None,
         };
+        // The line of the other parameter where the closed one is `at`, as a curve whose own
+        // parameter is the surface's along it.
+        let line_at = |at: f64| -> Option<Curve> {
+            match (surface, in_v) {
+                (Surface::Nurbs(n), _) => Some(Curve::Nurbs(Box::new(n.iso_curve(!in_v, at)))),
+                (Surface::Revolution(r), false) => Some(
+                    r.curve
+                        .transformed(&Transform::rotation(r.origin, r.axis, at)),
+                ),
+                (Surface::Extrusion(x), false) => Some(Curve::Line(Line {
+                    origin: x.curve.eval(at),
+                    dir: x.dir.unit()?,
+                })),
+                _ => None,
+            }
+        };
+        // Only these surfaces have such a line; ask before any loop is looked at.
+        line_at(0.0)?;
         const TAU: f64 = std::f64::consts::TAU;
         let angle = |p: Point3| {
             let uv = surface.project(p);
@@ -1034,7 +1054,7 @@ impl<'g, 'a> Reader<'g, 'a> {
         };
         let obstacles = self.obstacles(&angle, &pad, bounds, [ka, kb])?;
         let at = widest_gap(&angles, &obstacles)?;
-        let seam = Curve::Nurbs(Box::new(n.iso_curve(!in_v, at / TAU * period)));
+        let seam = line_at(at / TAU * period)?;
         let on_seam = |raw: &Raw, u: &Use| {
             let q = raw.points[use_start(raw, u)];
             seam.eval(param_of(&seam, q)).dist(q) <= tol::LINEAR
@@ -1250,7 +1270,9 @@ impl<'g, 'a> Reader<'g, 'a> {
         if self
             .seamed_band(id, &surface, reversed, &mut bounds)
             .is_none()
-            && self.seamed_spline_band(id, &surface, &mut bounds).is_none()
+            && self
+                .seamed_parameter_band(id, &surface, &mut bounds)
+                .is_none()
             && apexes.is_empty()
         {
             self.capped(id, &mut surface, reversed, &mut bounds)?;

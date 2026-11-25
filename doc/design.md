@@ -2149,7 +2149,13 @@ solid never pinches.
   is no edge, and each loop goes on without it; one that is all of a loop is kept. A bound that runs
   along an edge and back is a slit and is kept, as a point bound is: each marks where something
   touched the face. A loop tries a seam's second use a period away before taking it as running back
-  over the first. A shell is the way the volume it encloses says, outer positive and void negative:
+  over the first. A face closed round one parameter whose two rims each go once round it, the ways
+  opposite, and which has no seam gets one, so that its loop winds round the period zero times and
+  closes in the parameter plane: on a cylinder, cone, sphere or torus a line through a vertex of
+  each rim; on any other surface closed in one parameter, a spline, a revolution or an extrusion of
+  a closed curve, the surface's own line of the other parameter (an iso curve, the profile turned,
+  a line along the direction), where it is farthest round from the rims' vertices and clear of the
+  face's holes. A shell is the way the volume it encloses says, outer positive and void negative:
   some files write a void's faces facing into it and turn its shell too, which read as written is a
   void inside out.
 - **Pcurves and poles.** Each loop is followed through its face's parameter plane by projection,

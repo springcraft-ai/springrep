@@ -5,7 +5,7 @@ use crate::{
     boolean, check,
     geom::{Circle, Cone, Curve, Line, Ruled, Surface},
     math::{Frame, Vec2, Vec3},
-    measure,
+    measure, mesh,
     profile::{NamedSegment, PointsInterp, Profile, ProfileLoop, Segment},
     sweep::{extrude, revolve},
     topo::Brep,
@@ -3707,4 +3707,102 @@ fn an_edge_of_no_length_between_coincident_vertices_is_dropped() {
         assert!((measure::area(b) - 600.0).abs() <= 1e-9 * 600.0);
     }
     round_trip(&read(text, "cube").unwrap().brep);
+}
+
+#[test]
+fn a_band_on_a_surface_of_revolution_gets_a_seam() {
+    // Tubes between z = 0 and 10 about the z axis whose outer wall is a band bounded by its two
+    // rims and no seam; fixtures/band-fixtures.py writes them and works their volumes.
+    //
+    // The outer wall the revolution of the cubic Bezier r = 10, 13, 13, 10 at z = 10 t round a
+    // cylinder of radius 6: π (∫ r² dz − 6² · 10) = 967π. The rims are written as an outer and an
+    // inner bound, as two outer bounds, and with their vertices a quarter turn apart. A window a
+    // twelfth of a turn wide through the wall between z = 3 and 7 takes (π / 12) ∫₃⁷ (r² − 36) dz:
+    // two off the seam's line leave 66967579π / 75000, one across it, from 160° to 190°, leaves
+    // 139492579π / 150000. The two through a tube of radii 6 and 10, its outer wall a cylinder,
+    // leave 1792π / 3.
+    //
+    // The outer wall the extrusion of the ellipse of semi-axes 10 and 8 round a cylinder of radius
+    // 5: π (80 − 25) · 10 = 550π; with a window from 135° to 225°, across the seam's line,
+    // 575π − 320 atan(5/4). The extrusion of a rational circle of radius 10 whose parameter runs
+    // over [2, 3]: π (100 − 25) · 10 = 750π; with a window from 170° to 200°, 725π.
+    let cases: [(&str, &[u8], f64); 10] = [
+        (
+            "band",
+            include_bytes!("fixtures/revolution-band.step"),
+            967.0 * PI,
+        ),
+        (
+            "two outer",
+            include_bytes!("fixtures/revolution-band-two-outer.step"),
+            967.0 * PI,
+        ),
+        (
+            "apart",
+            include_bytes!("fixtures/revolution-band-apart.step"),
+            967.0 * PI,
+        ),
+        (
+            "windows",
+            include_bytes!("fixtures/revolution-band-windows.step"),
+            66967579.0 * PI / 75000.0,
+        ),
+        (
+            "window on the seam",
+            include_bytes!("fixtures/revolution-band-window-on-seam.step"),
+            139492579.0 * PI / 150000.0,
+        ),
+        (
+            "cylinder",
+            include_bytes!("fixtures/cylinder-band-windows.step"),
+            1792.0 * PI / 3.0,
+        ),
+        (
+            "extrusion",
+            include_bytes!("fixtures/extrusion-band.step"),
+            550.0 * PI,
+        ),
+        (
+            "extrusion window",
+            include_bytes!("fixtures/extrusion-band-window.step"),
+            575.0 * PI - 320.0 * 1.25f64.atan(),
+        ),
+        (
+            "nurbs extrusion",
+            include_bytes!("fixtures/extrusion-nurbs-band.step"),
+            750.0 * PI,
+        ),
+        (
+            "nurbs extrusion window",
+            include_bytes!("fixtures/extrusion-nurbs-band-window.step"),
+            725.0 * PI,
+        ),
+    ];
+    for (name, text, volume) in cases {
+        let imp = read(text, "tube").unwrap();
+        assert!(imp.rejected.is_empty(), "{name}: {:?}", imp.rejected);
+        let b = &imp.brep;
+        assert!(check::check(b).is_empty(), "{name}: {:?}", check::check(b));
+        let v = measure::volume(b);
+        assert!(
+            (v - volume).abs() <= 1e-9 * volume,
+            "{name}: volume {v}, not {volume}"
+        );
+        round_trip(b);
+        // A seam across a window would make the band's boundary overlap itself, which the mesher
+        // refuses. Every mesh point lies within the deflection of the boundary, so the mesh's
+        // volume is within the area times the deflection of the solid's.
+        let linear = 0.01;
+        let m = mesh::tessellate(b, &mesh::MeshOptions::within(linear))
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let rep = mesh::report(b, &m, b.solid_ids().next().unwrap());
+        assert!(rep.watertight(), "{name}: {rep:?}");
+        assert_eq!(rep.degenerate_triangles, 0, "{name}");
+        let area = measure::area(b);
+        assert!(
+            (rep.volume - volume).abs() <= area * linear,
+            "{name}: mesh volume {}",
+            rep.volume
+        );
+    }
 }
