@@ -257,17 +257,35 @@ pub(crate) fn project_past(s: &Surface, p: Point3, hint: Vec2) -> Vec2 {
 /// [`project_past`] of `curve(t1)`, continued from `hint` at `curve(t0)`. A periodic parameter
 /// continues to the image nearest the last one, which is the curve's own only while each step turns
 /// it by well under half a period; beside a pole a short step can turn it by nearly half, either
-/// way, so such a step is halved until each part turns it by under a quarter.
-pub(crate) fn follow(s: &Surface, curve: &Curve, (t0, t1): (f64, f64), hint: Vec2) -> Vec2 {
+/// way, so such a step is halved until each part turns it by under a quarter. A curve through the
+/// pole itself turns `u` by half a period at once, in a step that cannot be halved, and either
+/// way round is as near: it turns the way of the sign `side` gives at the parameters before it,
+/// which only the face's loops can tell.
+pub(crate) fn follow(
+    s: &Surface,
+    curve: &Curve,
+    (t0, t1): (f64, f64),
+    hint: Vec2,
+    side: &dyn Fn(Vec2) -> f64,
+) -> Vec2 {
     let uv = project_past(s, curve.eval(t1), hint);
     let jumps = |per: Option<f64>, d: f64| per.is_some_and(|p| d.abs() > 0.25 * p);
     let turned = jumps(s.u_period(), uv.x - hint.x) || jumps(s.v_period(), uv.y - hint.y);
     let mid = 0.5 * (t0 + t1);
     if !turned || mid == t0 || mid == t1 {
+        if let Some(half) = s.u_period().map(|p| 0.5 * p)
+            && turned
+            && ((uv.x - hint.x).abs() - half).abs() <= 1e-6 * half
+        {
+            let way = side(hint);
+            if way != 0.0 {
+                return Vec2::new(hint.x + half * way, uv.y);
+            }
+        }
         return uv;
     }
-    let h = follow(s, curve, (t0, mid), hint);
-    follow(s, curve, (mid, t1), h)
+    let h = follow(s, curve, (t0, mid), hint, side);
+    follow(s, curve, (mid, t1), h, side)
 }
 
 /// At a pole of `s` where `u` (or, with `in_v`, `v`) is free, the value of it at which the
@@ -531,6 +549,87 @@ mod tests {
                     assert!(off.abs() <= 1e-10, "move {k}, pole {pole}: {found} for {u}");
                 }
             }
+        }
+    }
+
+    // A hemisphere bounded by one great circle through both poles of its sphere, with no vertex
+    // or pole edge at either: its one coedge on the sphere turns half a turn of `u` at each pole
+    // inside itself. It must run along the poles' lines over the longitudes the face takes, the
+    // outline of a rectangle round them, or the loop encloses the other half and runs the wrong
+    // way. A hemisphere of radius r holds 2πr³/3 under 3πr², its curved half and its flat disc;
+    // one of radius 1 is cut out of one of radius 3 as a void, whose faces are turned inwards.
+    #[test]
+    fn a_hemisphere_bounded_by_a_circle_through_both_poles_runs_its_loop_round_its_half() {
+        use crate::{
+            check,
+            geom::{Circle, Plane, Sphere},
+            measure,
+            topo::{Brep, CoedgeSpec, ShellId},
+        };
+        use std::f64::consts::{PI, TAU};
+        // The half of the ball at `centre` on the side of the plane x = centre.x that `side`
+        // points away from, its faces turned inwards for a void.
+        let half = |b: &mut Brep, centre: Vec3, r: f64, side: f64, void: bool| -> ShellId {
+            let start = centre + Vec3::new(0.0, -r * side, 0.0);
+            let v = b.add_vertex(start);
+            let circle = Circle {
+                frame: Frame::new(centre, -Vec3::X * side, -Vec3::Y * side).unwrap(),
+                radius: r,
+            };
+            let e = b.add_edge(Curve::Circle(circle), (0.0, TAU), v, v);
+            let ball = Surface::Sphere(Sphere {
+                frame: Frame::new(centre, Vec3::Z, Vec3::X).unwrap(),
+                radius: r,
+            });
+            let disc = Surface::Plane(Plane {
+                frame: Frame::new(centre, Vec3::X * side, Vec3::Y).unwrap(),
+            });
+            let skin = b.add_face(ball.clone(), void, []);
+            let flat = b.add_face(disc.clone(), void, []);
+            let on = |s: &Surface, reversed| CoedgeSpec {
+                edge: e,
+                reversed,
+                pcurve: PCurve::Projected {
+                    seed: s.project(start),
+                },
+            };
+            b.add_loop(skin, vec![on(&ball, void)]);
+            b.add_loop(flat, vec![on(&disc, !void)]);
+            b.add_shell(vec![skin, flat])
+        };
+        let held = |r: f64| 2.0 / 3.0 * PI * r.powi(3);
+        let bounded = |r: f64| 3.0 * PI * r * r;
+        let assert_measures = |b: &Brep, volume: f64, area: f64, what: &str| {
+            assert!(check::check(b).is_empty(), "{what}: {:?}", check::check(b));
+            let (v, a) = (measure::volume(b), measure::area(b));
+            assert!(
+                (v - volume).abs() <= 1e-9 * volume,
+                "{what}: volume {v} vs {volume}"
+            );
+            assert!(
+                (a - area).abs() <= 1e-9 * area,
+                "{what}: area {a} vs {area}"
+            );
+        };
+        for side in [1.0, -1.0] {
+            let mut b = Brep::new();
+            let outer = half(&mut b, Vec3::ZERO, 3.0, side, false);
+            b.add_solid(vec![outer]);
+            b.pair_radial();
+            assert_measures(&b, held(3.0), bounded(3.0), &format!("side {side}"));
+
+            let mut b = Brep::new();
+            let outer = half(&mut b, Vec3::ZERO, 3.0, side, false);
+            let inner = half(&mut b, Vec3::new(-side, 0.0, 0.0), 1.0, side, true);
+            b.add_solid(vec![outer, inner]);
+            b.pair_radial();
+            let what = format!("side {side} with a void");
+            assert_measures(
+                &b,
+                held(3.0) - held(1.0),
+                bounded(3.0) + bounded(1.0),
+                &what,
+            );
         }
     }
 }

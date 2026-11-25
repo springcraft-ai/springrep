@@ -754,7 +754,9 @@ impl Brep {
             PCurve::Affine { origin, dir } => ts.iter().map(|&t| *origin + *dir * t).collect(),
             PCurve::Spline { uv } => ts.iter().map(|&t| pcurve::spline_uv(uv, t)).collect(),
             PCurve::Projected { seed } => {
-                let surface = &self.face(self.coedge_face(c)).surface;
+                let f = self.coedge_face(c);
+                let surface = &self.face(f).surface;
+                let past_pole = |at: Vec2| self.past_pole(f, at);
                 let mut hint = *seed;
                 let mut out = Vec::with_capacity(ts.len());
                 for (i, &t) in ts.iter().enumerate() {
@@ -762,7 +764,7 @@ impl Brep {
                     let inside = t > edge.range.0 && t < edge.range.1;
                     let uv = match (&edge.curve, beside) {
                         (Some(curve), Some(&b)) if inside && i > 0 => {
-                            pcurve::follow(surface, curve, (b, t), hint)
+                            pcurve::follow(surface, curve, (b, t), hint, &past_pole)
                         }
                         (Some(curve), Some(&b)) => {
                             let uv = pcurve::project_on(surface, curve, t, b, hint);
@@ -777,6 +779,32 @@ impl Brep {
                 }
                 out
             }
+        }
+    }
+
+    /// Which way `u` turns, by half a period, where a coedge of face `f` passes through the pole of
+    /// its sphere that the parameters `at` lie beside; 0 on other surfaces. The face's loops,
+    /// running with it on their left, cover the pole's line in the parameter plane once over the
+    /// longitudes the face takes there. Where no loop has an edge at the pole, the coedge alone
+    /// runs across those, as the face's outline does along the top of its rectangle; where one
+    /// runs the pole's whole line, the coedge runs back across the longitudes the face lacks.
+    fn past_pole(&self, f: FaceId, at: Vec2) -> f64 {
+        let face = self.face(f);
+        let Surface::Sphere(s) = &face.surface else {
+            return 0.0;
+        };
+        let up = at.y > 0.0;
+        let pole = s.frame.origin + s.frame.z * if up { s.radius } else { -s.radius };
+        let lined = face.loops.iter().any(|&lp| {
+            self.lp(lp).coedges.iter().any(|&c| {
+                let e = self.edge(self.coedge(c).edge);
+                e.curve.is_none() && self.vertex(e.start).point.dist(pole) <= tol::LINEAR
+            })
+        });
+        if (up != face.reversed) != lined {
+            -1.0
+        } else {
+            1.0
         }
     }
 

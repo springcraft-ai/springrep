@@ -189,8 +189,9 @@ impl Trim {
                 let Some(c) = &self.curve else {
                     return Vec2::ZERO;
                 };
-                let (_, dp) = c.d1(self.t0);
-                uv_rate(s, self.uv0, dp * sign)
+                let (_, su, sv) = s.d1(self.uv0.x, self.uv0.y);
+                pole_rate(s, (su, sv), c, self.t0, sign)
+                    .unwrap_or_else(|| rate_of(su, sv, c.d1(self.t0).1 * sign))
             }
         }
     }
@@ -230,6 +231,11 @@ impl Trim {
 /// The parameter-plane rate of a surface curve moving at `dp` through `uv`.
 pub(crate) fn uv_rate(s: &Surface, uv: Vec2, dp: Vec3) -> Vec2 {
     let (_, su, sv) = s.d1(uv.x, uv.y);
+    rate_of(su, sv, dp)
+}
+
+/// [`uv_rate`] where the surface's derivatives there are `su` and `sv`.
+fn rate_of(su: Vec3, sv: Vec3, dp: Vec3) -> Vec2 {
     solve2(
         su.dot(su),
         su.dot(sv),
@@ -240,6 +246,42 @@ pub(crate) fn uv_rate(s: &Surface, uv: Vec2, dp: Vec3) -> Vec2 {
     )
     .map(|(a, b)| Vec2::new(a, b))
     .unwrap_or(Vec2::ZERO)
+}
+
+/// The parameter-plane rate of `curve` leaving a pole of `s` at `t`, along its parameter or
+/// against it as `sign` says, where `u` is the angle about the surface's axis and its rate is not
+/// the first-order map's to solve: `u` is the angle of the curve's step `h·t + k·t²/2` across the
+/// axis, `h` and `k` those parts of its first and second derivatives, which turns at
+/// `z·(h × k) / 2|h|²`. `None` away from such a pole (`su` and `sv` are the surface's derivatives
+/// there), or for a curve leaving along the axis.
+fn pole_rate(
+    s: &Surface,
+    (su, sv): (Vec3, Vec3),
+    curve: &Curve,
+    t: f64,
+    sign: f64,
+) -> Option<Vec2> {
+    let z = match s {
+        Surface::Sphere(x) => x.frame.z,
+        Surface::Cone(x) => x.frame.z,
+        Surface::Torus(x) => x.frame.z,
+        _ => return None,
+    };
+    if su.norm() > tol::LINEAR || sv.norm() <= tol::LINEAR {
+        return None;
+    }
+    let (_, dp, ddp) = curve.d2(t);
+    let dp = dp * sign;
+    let across = |w: Vec3| w - z * w.dot(z);
+    let (h, k) = (across(dp), across(ddp));
+    let hh = h.dot(h);
+    if hh <= 1e-12 * dp.dot(dp) {
+        return None;
+    }
+    Some(Vec2::new(
+        z.dot(h.cross(k)) / (2.0 * hh),
+        sv.dot(dp) / sv.dot(sv),
+    ))
 }
 
 fn segment_distance(p: Vec2, a: Vec2, b: Vec2) -> f64 {
