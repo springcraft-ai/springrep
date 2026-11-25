@@ -243,11 +243,12 @@ pub(crate) fn project_on(s: &Surface, curve: &Curve, t: f64, toward: f64, hint: 
 
 /// `p` projected onto `s` near `hint`, a point of an edge between its ends. Where it lands on a
 /// pole along which `v` is free (an imported edge that misses its face by its tolerance can run
-/// past one), `v` stays at the hint's, as the analytic surfaces keep a free `u`.
+/// past one), `v` stays at the hint's, as the analytic surfaces keep a free `u`. A line along which
+/// the surface only stands still is no pole: its `v` names a point of its own.
 pub(crate) fn project_past(s: &Surface, p: Point3, hint: Vec2) -> Vec2 {
     let uv = s.project_near(p, hint);
     let (_, _, sv) = s.d1(uv.x, uv.y);
-    if sv.norm() <= tol::LINEAR {
+    if sv.norm() <= tol::LINEAR && s.line_is_point(uv, true) {
         Vec2::new(uv.x, hint.y)
     } else {
         uv
@@ -304,7 +305,12 @@ fn pole_param(
     in_v: bool,
 ) -> Option<f64> {
     let d = away.unit_or_zero();
-    if (if in_v { sv } else { su }).norm() > tol::LINEAR || d.norm() == 0.0 {
+    // The derivative is the filter; a line of the free parameter that is a curve, along which the
+    // surface only stands still, is no pole.
+    if (if in_v { sv } else { su }).norm() > tol::LINEAR
+        || d.norm() == 0.0
+        || !s.line_is_point(uv, in_v)
+    {
         return None;
     }
     let (x, period, near) = if in_v {

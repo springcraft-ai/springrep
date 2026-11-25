@@ -104,15 +104,21 @@ pub(super) fn edge_range(c: &Curve, ps: Point3, pe: Point3, closed: bool) -> Opt
         None if closed => return None,
         None => {}
     }
+    // A parameter whose point lies within `LINEAR` of an end of the curve is that end. The test is
+    // on the points themselves, not on the parameter distance over the speed: where the curve
+    // stands still at its end, as where its last two control points coincide, the speed there is
+    // zero and the point moves only with the square of the parameter (Piegl & Tiller, §3.3), so a
+    // first-order estimate of the parameter tolerance is unbounded and would take any parameter
+    // for the other end.
     let snap = |t: f64| {
         if c.period().is_some() || !d0.is_finite() {
             return t;
         }
-        let near = tol::param(c.d1(t).1.norm());
-        if (t - d0).abs() <= near {
-            d0
-        } else if (t - d1).abs() <= near {
-            d1
+        let at = c.eval(t);
+        let end = if t - d0 <= d1 - t { d0 } else { d1 };
+        let mid = c.eval(0.5 * (t + end));
+        if c.eval(end).dist(at) <= tol::LINEAR && c.eval(end).dist(mid) <= tol::LINEAR {
+            end
         } else {
             t
         }
@@ -1655,11 +1661,16 @@ fn coincides_with_twin(uses: &[Use], acc: &[Track], k: usize, uvs: &[Vec2]) -> b
     })
 }
 
-/// Whether the surface is singular at `uv`: `(u free, v free)` where moving in that parameter
-/// does not move the point.
+/// Whether `uv` is on a pole of the surface: `(u free, v free)` where the whole line of that
+/// parameter through `uv` is one point. The derivative is the filter, [`Surface::line_is_point`]
+/// the test: along a line where the surface only stands still the derivative vanishes too, and
+/// the line is a curve that the loop runs along as along any other.
 fn pole_free(s: &Surface, uv: Vec2) -> (bool, bool) {
     let (_, su, sv) = s.d1(uv.x, uv.y);
-    (su.norm() <= tol::LINEAR, sv.norm() <= tol::LINEAR)
+    (
+        su.norm() <= tol::LINEAR && s.line_is_point(uv, false),
+        sv.norm() <= tol::LINEAR && s.line_is_point(uv, true),
+    )
 }
 
 /// The poles of `s` through which an edge of a face on it may pass between its vertices: a

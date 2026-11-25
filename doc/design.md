@@ -94,8 +94,15 @@ surface too. A parameter at an end of its range, with the nearer point beyond it
 the search goes on along that boundary alone: a step solved in both parameters and cut back to the
 range stalls short of the boundary's nearest point. At a pole, where a whole row of the surface is
 one point and one parameter moves nothing, the line out of the pole that heads for the point most
-directly is found first, and the search starts down it. A search that stops where no fraction of its
-step comes nearer has found a point and not a foot, and is not taken for one. Projection from a hint
+directly is found first, and the search starts down it. A row is one point where its control
+points, blended with their weights, all lie within `LINEAR` of one (the convex hull holds the row);
+a parameter that moves nothing along a row that is a curve, as where two end control points
+coincide, is a line along which the surface stands still, not a pole. Beside such a boundary line
+the squared distance grows only with the fourth power of the step across it and Newton stops short,
+so the line is also tried, the search clamped to it, and the nearer foot kept; that foot is a foot
+where the squared distance does not bend down into the patch across the line, the first-order
+condition saying nothing there. A search that stops where no fraction of its step comes nearer
+has found a point and not a foot, and is not taken for one. Projection from a hint
 keeps the foot Newton finds when it lies within a twentieth of the seed spacing of the surface: the
 global search already assumes no two sheets come that close. A foot farther off than that, a search
 that stopped short of a foot, and a hint on a pole all go to the global search, and the nearer of
@@ -2162,15 +2169,19 @@ solid never pinches.
   each point continuing from the last. Where a loop leaves a pole any angle is possible: the one its
   next point implies is tried in each nearby period, a seam's second use must run a period from its
   first, and the loop must close and enclose area the way the face's orientation requires. A gap at
-  a pole becomes a degenerate edge. An edge that passes through a pole of a sphere between its
-  vertices (a meridian over the pole) is split there before its loops are followed: the loop leaves
-  the pole at another value of the free parameter than it arrived with, and only at a vertex can it
-  jump along the pole's line. The free parameter where a use reaches or leaves a pole is the
-  one every reader of its pcurve finds (`topo::project_on`): where `u` is free, the `u` of a point
-  just along the edge, or, where the edge leaves along the surface's axis as every curve through a
-  horn torus's pole does, of a point the way the edge bends; where `v` is free (a B-spline blend's
-  pole along `u = const`), the `v` whose `u`-line leaves the pole along the edge, from the surface's
-  own derivative, since projecting a point beside the pole of a thin patch lands at any `v`.
+  a pole becomes a degenerate edge. A pole is a line of the parameter plane that is one point, known
+  in closed form for each surface, and not only a point where a derivative vanishes. An edge that
+  passes through a pole of a sphere between its vertices (a meridian over the pole) is split there
+  before its loops are followed: the loop leaves the pole at another value of the free parameter
+  than it arrived with, and only at a vertex can it jump along the pole's line. An edge's parameter
+  at a vertex is an end of its curve where the two points lie within `LINEAR`, judged on the points:
+  a curve that stands still at its end moves only with the square of the parameter there. The free
+  parameter where a use reaches or leaves a pole is the one every reader of its pcurve finds
+  (`topo::project_on`): where `u` is free, the `u` of a point just along the edge, or, where the
+  edge leaves along the surface's axis as every curve through a horn torus's pole does, of a point
+  the way the edge bends; where `v` is free (a B-spline blend's pole along `u = const`), the `v`
+  whose `u`-line leaves the pole along the edge, from the surface's own derivative, since
+  projecting a point beside the pole of a thin patch lands at any `v`.
 - **A cone face lies on its cone's own nappe.** A file's cone is the whole double cone, and a face
   may lie past its apex from where the placement sits. The reader gives such a cone the placement
   about the axis turned over, from the point as far past the apex as the old origin is before it:

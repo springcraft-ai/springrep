@@ -3920,3 +3920,90 @@ fn a_sphere_face_whose_edge_passes_through_a_pole_is_split_there() {
         round_trip(&b);
     }
 }
+
+#[test]
+fn a_spline_face_that_stands_still_along_an_end_line_is_no_pole() {
+    // A prism of height 4 over the region bounded by the segment O A, O = (0, 0) and A = (10, 0), a
+    // cubic Bezier from A to B = (5, 10), and the segment B O. Its side on the Bezier is a spline,
+    // cubic in u along the Bezier and linear in v up the prism. Where two end control points of the
+    // cubic coincide, the side's u derivative vanishes along the whole end line u = 1 (or u = 0),
+    // though that line is the segment up from B (or A), not a point. The side is also written
+    // with its u, its v, and both running the other way. The volume is 4 times the region's area,
+    // ∮x dy over its polynomial boundary, exact: 230 with the end still, 248 with the start
+    // still, 251 for four distinct control points. Where the last three control points coincide
+    // the cubic is the segment A B, run as B + s³(A − B) back from B, so the side's second
+    // derivative across its end line vanishes too: the triangle O A B, 200, also written cubic in
+    // v. The four planar faces are the region top and
+    // bottom, 10 × 4 on y = 0, and |OB| × 4 = 20√5 through O and B.
+    let cases: [(&str, &[u8], f64); 8] = [
+        ("end", include_bytes!("fixtures/still-line-end.step"), 230.0),
+        (
+            "end, u reversed",
+            include_bytes!("fixtures/still-line-end-u.step"),
+            230.0,
+        ),
+        (
+            "end, v reversed",
+            include_bytes!("fixtures/still-line-end-v.step"),
+            230.0,
+        ),
+        (
+            "end, both reversed",
+            include_bytes!("fixtures/still-line-end-uv.step"),
+            230.0,
+        ),
+        (
+            "start",
+            include_bytes!("fixtures/still-line-start.step"),
+            248.0,
+        ),
+        (
+            "regular",
+            include_bytes!("fixtures/still-line-regular.step"),
+            251.0,
+        ),
+        (
+            "three",
+            include_bytes!("fixtures/still-line-three.step"),
+            200.0,
+        ),
+        (
+            "three, cubic in v",
+            include_bytes!("fixtures/still-line-three-t.step"),
+            200.0,
+        ),
+    ];
+    for (name, text, volume) in cases {
+        // The file agrees with itself exactly: a strict read, which moves nothing, keeps it, and
+        // the plain read heals nothing.
+        let strict = read_with(text, "prism", &ReadOptions::default().strict(true)).unwrap();
+        assert!(strict.rejected.is_empty(), "{name}: {:?}", strict.rejected);
+        let imp = read(text, "prism").unwrap();
+        assert!(imp.rejected.is_empty(), "{name}: {:?}", imp.rejected);
+        assert!(imp.healed.is_empty(), "{name}: {:?}", imp.healed);
+        let b = &imp.brep;
+        assert!(check::check(b).is_empty(), "{name}: {:?}", check::check(b));
+        assert_eq!(b.face_count(), 5, "{name}");
+        let v = measure::volume(b);
+        assert!(
+            (v - volume).abs() <= 1e-12 * volume,
+            "{name}: volume {v}, not {volume}"
+        );
+        let mut planar: Vec<f64> = b
+            .face_ids()
+            .filter(|&f| matches!(b.face(f).surface, Surface::Plane(_)))
+            .map(|f| measure::face_area(b, f))
+            .collect();
+        planar.sort_by(f64::total_cmp);
+        let mut expected = [volume / 4.0, volume / 4.0, 40.0, 20.0 * 5f64.sqrt()];
+        expected.sort_by(f64::total_cmp);
+        assert_eq!(planar.len(), 4, "{name}");
+        for (a, e) in planar.iter().zip(expected) {
+            assert!(
+                (a - e).abs() <= 1e-12 * e,
+                "{name}: planar areas {planar:?}, not {expected:?}"
+            );
+        }
+        round_trip(b);
+    }
+}

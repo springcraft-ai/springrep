@@ -9,3 +9,9 @@ extrusion-nurbs-band-window.step were written for springrep's tests from the ISO
 definitions by band-fixtures.py, beside them, from closed-form points and control points; no CAD
 system exported them, and running the script writes them again. They are contributed under the
 same terms as above.
+
+still-line-end.step, still-line-end-u.step, still-line-end-v.step, still-line-end-uv.step,
+still-line-start.step, still-line-regular.step, still-line-three.step and still-line-three-t.step
+were written for springrep's tests from the ISO 10303-42 entity definitions, by a short script from
+closed-form points and control points; no CAD system exported them. They are contributed under the
+same terms as above.

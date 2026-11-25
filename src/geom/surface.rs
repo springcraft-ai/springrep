@@ -221,12 +221,23 @@ impl Surface {
                     return n;
                 }
                 // At a pole where `su` vanishes it grows as `suv·(v − v_pole)`, so the normal is
-                // the limit of `suv × sv` taken from inside the domain (and alike for `sv`).
+                // the limit of `suv × sv` taken from inside the domain (and alike for `sv`). Along
+                // a boundary line where the surface only stands still, `su` vanishes all along
+                // the line, `suv` with it, and grows as `suu·(u − u_end)` off it: the normal is
+                // the limit of `suu × sv` from inside (and alike for `sv`).
                 if let Surface::Nurbs(n) = self {
                     let ((u0, u1), (v0, v1)) = n.domain();
-                    let [_, su, sv, _, suv, _] = n.d2(u, v);
+                    let [_, su, sv, suu, suv, svv] = n.d2(u, v);
+                    let uv = Vec2::new(u, v);
+                    let at_end = |x: f64, lo: f64, hi: f64| x <= lo || x >= hi;
                     let (limit, top) = if su.norm() <= sv.norm() {
-                        (suv.cross(sv), v - v0 > v1 - v)
+                        if at_end(u, u0, u1) && !self.line_is_point(uv, false) {
+                            (suu.cross(sv), u - u0 > u1 - u)
+                        } else {
+                            (suv.cross(sv), v - v0 > v1 - v)
+                        }
+                    } else if at_end(v, v0, v1) && !self.line_is_point(uv, true) {
+                        (su.cross(svv), v - v0 > v1 - v)
                     } else {
                         (su.cross(suv), u - u0 > u1 - u)
                     };
@@ -243,6 +254,39 @@ impl Surface {
                 Vec3::ZERO
             }
         }
+    }
+
+    /// Whether the line of `u` through `uv` (of `v`, `along_v`) is one point within `LINEAR`, as at
+    /// a pole. A vanishing derivative alone is not one: it only makes the parameterisation singular
+    /// at that point (do Carmo, *Differential Geometry of Curves and Surfaces*, §2-2), and a spline
+    /// whose end control points coincide has a zero end derivative (Piegl & Tiller, *The NURBS
+    /// Book*, §3.3) along a whole end line that is a curve all the same.
+    ///
+    /// Each surface answers in closed form. A line of `u` on a cone, a sphere, a torus or a
+    /// revolution is a circle about the axis, a point where its radius is; a ruling of a ruled
+    /// surface is the segment between its two curves, a point where they meet; a spline's line is
+    /// a point where its control points are ([`NurbsSurface::line_is_point`]). No other line of
+    /// these surfaces, and no line of a plane, a cylinder or an extrusion, is a point.
+    pub(crate) fn line_is_point(&self, uv: Vec2, along_v: bool) -> bool {
+        let (u, v) = (uv.x, uv.y);
+        let radius = match (self, along_v) {
+            (Surface::Nurbs(n), _) => {
+                return n.line_is_point(along_v, if along_v { u } else { v });
+            }
+            (Surface::Cone(s), false) => (s.radius + v * s.half_angle.sin()).abs(),
+            (Surface::Sphere(s), false) => s.radius * v.cos().abs(),
+            (Surface::Torus(s), false) => (s.major + s.minor * v.cos()).abs(),
+            (Surface::Revolution(s), false) => {
+                let w = s.curve.eval(v) - s.origin;
+                (w - s.axis * w.dot(s.axis)).norm()
+            }
+            (Surface::Ruled(_), true) => {
+                let (q0, q1) = (self.eval(u, 0.0), self.eval(u, 1.0));
+                q0.dist(q1)
+            }
+            _ => return false,
+        };
+        radius <= tol::LINEAR
     }
 
     pub fn u_period(&self) -> Option<f64> {

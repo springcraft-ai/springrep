@@ -1337,6 +1337,52 @@ impl NurbsSurface {
             .expect("a row of a valid net is a valid curve")
     }
 
+    /// Whether the surface's line along one parameter with the other held at `at` (as
+    /// [`NurbsSurface::iso_curve`] names it) is one point, within `LINEAR`: whether every control
+    /// point of that line, each a row of the net blended with its weights by the held parameter's
+    /// basis there, lies within `LINEAR` of the first. A boundary line of a clamped net is its
+    /// boundary row of control points, taken with their weights.
+    ///
+    /// The line's rational basis functions are nonnegative and sum to one, so each of its points
+    /// lies in the convex hull of its control points, all within `LINEAR` of the first (Piegl &
+    /// Tiller, *The NURBS Book*, §4.2); and they are linearly independent, as the B-splines they
+    /// are formed from are (de Boor, *A Practical Guide to Splines*, ch. IX), so in exact
+    /// arithmetic the line is one point exactly when its control points are. Within the tolerance
+    /// the test is sufficient, not necessary: a line can stay within `LINEAR` of a point while its
+    /// control points spread farther (the row 0, δ, −δ, 0 with δ = 3e-7 stays within 8.7e-8), and
+    /// is then taken for a curve, the safe way. A vanishing derivative alone does not make a line
+    /// a point: two coincident end control points give a zero end derivative (Piegl & Tiller,
+    /// §3.3) along a line that is still a curve.
+    pub(crate) fn line_is_point(&self, along_v: bool, at: f64) -> bool {
+        let (held, free, period) = if along_v {
+            (&self.bu, &self.bv, self.u_period)
+        } else {
+            (&self.bv, &self.bu, self.v_period)
+        };
+        let at = held.wrap(at, period);
+        let (p, i) = (held.degree, held.span(at));
+        let funs = &held.ders::<M>(i, at, 0)[0];
+        let index = |h: usize, f: usize| {
+            if along_v {
+                h * self.bv.n + f
+            } else {
+                f * self.bv.n + h
+            }
+        };
+        let point = |f: usize| {
+            let (mut sum, mut w) = (Vec3::ZERO, 0.0);
+            for (k, n) in funs.iter().enumerate().take(p + 1) {
+                let idx = index(i - p + k, f);
+                let wk = self.weights.as_ref().map_or(1.0, |ws| ws[idx]) * n;
+                sum += self.ctrl[idx] * wk;
+                w += wk;
+            }
+            sum / w
+        };
+        let first = point(0);
+        (1..free.n).all(|f| point(f).dist(first) <= tol::LINEAR)
+    }
+
     /// The surface along one parameter with the other held at `at`: [`IsoLine::d1`] gives what
     /// [`NurbsSurface::d1`] does there, the held parameter's basis worked out once.
     #[allow(clippy::needless_range_loop)]
@@ -2150,7 +2196,147 @@ impl NurbsSurface {
     /// a foot of `p`: a point from which no way along the surface inside the domain comes nearer.
     /// A search that stops short, where no fraction of its step comes nearer, has found a point
     /// and not a foot.
-    fn search(&self, p: Point3, mut uv: Vec2, start: Option<[Vec3; 6]>) -> (Vec2, f64, bool) {
+    ///
+    /// Beside a boundary line along which the surface stands still the squared distance grows only
+    /// with the fourth power of the step across it, so Newton nears a foot there by a constant
+    /// fraction each step and stops short of it; that line is also tried as the foot, by point
+    /// inversion clamped to the domain (Piegl & Tiller, *The NURBS Book*, §6.1), and the nearer of
+    /// the two kept.
+    fn search(&self, p: Point3, uv: Vec2, start: Option<[Vec3; 6]>) -> (Vec2, f64, bool) {
+        let (uv, d, settled) = self.descend(p, uv, start);
+        match self.still_line_foot(p, uv) {
+            // The line's point is taken only as the point it is: a foot where it is one, else
+            // a point nearer than where the search stopped, and projection looks further.
+            Some((on, there, foot)) if there <= d => (on, there, foot),
+            _ => (uv, d, settled),
+        }
+    }
+
+    /// The foot of `p` on a boundary line of the domain beside `uv` along which the surface stands
+    /// still, and its distance: a parameter that is not periodic, nearer an end of its range than
+    /// a thousandth of it, where its derivative vanishes and the line is not one point (a pole,
+    /// which [`NurbsSurface::off_pole`] handles), held at that end while Newton finds the nearest
+    /// point along the line in the other parameter, inside its range. `None` where no such line
+    /// lies beside `uv`.
+    ///
+    /// Also whether that point is a foot of `p` on the patch, a strict local least of the squared
+    /// distance over the domain. Newton settled along the line, so the residual is square to the
+    /// line. Across it the first derivative of the squared distance, `S_u · (S − p)`, vanishes with
+    /// the surface's own, so a first-order condition says nothing there. As `S_uv` vanishes along
+    /// the line too, the Hessian there is diagonal, and the point is kept as a foot only where the
+    /// second-order sufficient condition holds both ways: `S_uu · (S − p) > 0` across, for the
+    /// line of `u` held, and `|S_v|² + S_vv · (S − p) > 0` along (Nocedal & Wright, *Numerical
+    /// Optimization*, 2nd ed., Theorem 12.6, the inward direction the critical cone's, and
+    /// Theorem 2.4 along the line). A line that curves along its length can put `p` where the
+    /// line's point is nearest across it but farthest along it.
+    /// Where that product is zero, as where three end control points coincide and `S_uu`
+    /// vanishes too, the second order decides nothing, and the point is no foot: projection goes
+    /// on to the global search. A point `p` the line passes through is its own foot.
+    ///
+    /// The line is tried only where `uv` lies within a thousandth of a parameter's range of a
+    /// non-periodic end, and its derivative across vanishes there relative to the one along it
+    /// (`1e-9`, as [`pole_of`] tests).
+    fn still_line_foot(&self, p: Point3, uv: Vec2) -> Option<(Vec2, f64, bool)> {
+        let ((u0, u1), (v0, v1)) = self.domain();
+        let periods = [self.u_period, self.v_period];
+        let ranges = [(u0, u1), (v0, v1)];
+        let mut best: Option<(Vec2, f64, bool)> = None;
+        for held in 0..2 {
+            let (lo, hi) = ranges[held];
+            let x = [uv.x, uv.y][held];
+            if periods[held].is_some() || hi <= lo {
+                continue;
+            }
+            let end = if x - lo <= hi - x { lo } else { hi };
+            if (x - end).abs() > 1e-3 * (hi - lo) {
+                continue;
+            }
+            let at = |w: f64| {
+                if held == 0 {
+                    Vec2::new(end, w)
+                } else {
+                    Vec2::new(w, end)
+                }
+            };
+            let (w0, w1) = ranges[1 - held];
+            let mut w = [uv.y, uv.x][held].clamp(w0, w1);
+            let start = self.d2(at(w).x, at(w).y);
+            let (across, along) = if held == 0 {
+                (start[1], start[2])
+            } else {
+                (start[2], start[1])
+            };
+            if across.norm() > 1e-9 * along.norm() || self.line_is_point(held == 1, end) {
+                continue;
+            }
+            // Newton along the line, the full step where the second derivative of the squared
+            // distance is positive, Gauss–Newton elsewhere, no further than gets nearer.
+            let mut q = start;
+            let mut along_settled = false;
+            for _ in 0..40 {
+                let (line, bend) = if held == 0 {
+                    (q[2], q[5])
+                } else {
+                    (q[1], q[3])
+                };
+                let r = q[0] - p;
+                let (g, gauss) = (line.dot(r), line.dot(line));
+                let h = gauss + bend.dot(r);
+                let by = if h > 0.0 { h } else { gauss };
+                if by <= 0.0 {
+                    break;
+                }
+                let mut step = -g / by;
+                // A step that moves the point by rounding alone, or one held at an end of the
+                // line's range with the nearer point beyond it: a foot along the line.
+                let held_out = (w <= w0 && step < 0.0) || (w >= w1 && step > 0.0);
+                if held_out || (line * step).norm() <= 1e-6 * tol::LINEAR {
+                    along_settled = true;
+                    break;
+                }
+                let mut next = (w + step).clamp(w0, w1);
+                let mut there = self.d2(at(next).x, at(next).y);
+                while there[0].dist(p) > r.norm() * (1.0 + 1e-12) && step.abs() > 1e-15 * (w1 - w0)
+                {
+                    step *= 0.5;
+                    next = (w + step).clamp(w0, w1);
+                    there = self.d2(at(next).x, at(next).y);
+                }
+                if there[0].dist(p) > r.norm() {
+                    break;
+                }
+                let moved = (next - w).abs();
+                w = next;
+                q = there;
+                if moved <= 1e-15 * (1.0 + w.abs()) {
+                    along_settled = true;
+                    break;
+                }
+            }
+            let d = q[0].dist(p);
+            let r = q[0] - p;
+            // On the still line `S_u` vanishes, and `S_uv` with it, so the Hessian of half the
+            // squared distance is diagonal: `S_uu · r` across the line, `|S_v|² + S_vv · r` along
+            // it. Both positive is the second-order sufficient condition for a strict local
+            // least; along the line an end of its range held with the nearer point beyond it
+            // stands for the second.
+            let (across2, (line, bend)) = if held == 0 {
+                (q[3].dot(r), (q[2], q[5]))
+            } else {
+                (q[5].dot(r), (q[1], q[3]))
+            };
+            let along2 = line.dot(line) + bend.dot(r) > 0.0 || w <= w0 || w >= w1;
+            // A point on the line itself, but for rounding, is its own foot whatever the bend.
+            let foot = along_settled && (d <= 1e-3 * tol::LINEAR || (across2 > 0.0 && along2));
+            if best.is_none_or(|b| d < b.1) {
+                best = Some((self.wrapped(at(w)), d, foot));
+            }
+        }
+        best
+    }
+
+    /// [`NurbsSurface::search`]'s Newton steps, without the still boundary lines.
+    fn descend(&self, p: Point3, mut uv: Vec2, start: Option<[Vec3; 6]>) -> (Vec2, f64, bool) {
         let ((u0, u1), (v0, v1)) = self.domain();
         let clamp = |uv: Vec2| {
             Vec2::new(
@@ -2174,7 +2360,7 @@ impl NurbsSurface {
         uv = inside;
         // At a pole one parameter moves nothing, and no step solved there says which of the lines
         // out of it leads to the foot: the line is chosen first, and the search starts down it.
-        if let Some(free) = pole_of(&at) {
+        if let Some(free) = self.pole_at(uv, &at) {
             match self.off_pole(p, uv, free) {
                 Some(off) => {
                     uv = off;
@@ -2182,6 +2368,9 @@ impl NurbsSurface {
                 }
                 None => return (self.wrapped(uv), at[0].dist(p), true),
             }
+        } else if let Some(off) = self.off_still_line(p, uv, &at) {
+            uv = off;
+            at = self.d2(uv.x, uv.y);
         }
         let mut settled = false;
         for _ in 0..60 {
@@ -2212,7 +2401,7 @@ impl NurbsSurface {
                     .flatten()
                     .or_else(|| solve2(a, b, b, d, -g0, -g1))
                     .or_else(|| {
-                        (pole_of(&at).is_none())
+                        (self.pole_at(uv, &at).is_none())
                             .then(|| eigen_step(ha, hb, hd, g0, g1))
                             .flatten()
                     }),
@@ -2228,7 +2417,7 @@ impl NurbsSurface {
             if (su * du + sv * dv).norm() <= 1e-6 * tol::LINEAR {
                 let size = 1.0 + (u1 - u0) + (v1 - v0);
                 uv = clamp(Vec2::new(uv.x + du, uv.y + dv));
-                if du.abs() + dv.abs() <= 1e-12 * size || pole_of(&at).is_some() {
+                if du.abs() + dv.abs() <= 1e-12 * size || self.pole_at(uv, &at).is_some() {
                     return (self.wrapped(uv), self.eval(uv.x, uv.y).dist(p), true);
                 }
                 at = self.d2(uv.x, uv.y);
@@ -2260,6 +2449,50 @@ impl NurbsSurface {
             }
         }
         (self.wrapped(uv), at[0].dist(p), settled)
+    }
+
+    /// Where a search from `uv` on a boundary line along which the surface stands still starts,
+    /// where the squared distance to `p` bends down into the domain across the line: a point a way
+    /// in from it, the nearest to `p` of a few at halving distances. On such a line the squared
+    /// distance has no slope across it, as the surface's derivative there vanishes, so no Newton
+    /// step leaves the line however much nearer the foot inside is. Where the squared distance
+    /// does not bend up across the line (`S_uu · (S − p) ≤ 0`, as where three end control points
+    /// coincide and `S_uu` vanishes too), the line is no foot by the second-order condition, and
+    /// the search starts inside, at the nearest of 12 points at halving distances in from it, if
+    /// one is nearer. `None` where `uv` is on no such line, or the distance bends up across it.
+    fn off_still_line(&self, p: Point3, uv: Vec2, at: &[Vec3; 6]) -> Option<Vec2> {
+        let held = pole_of(at)?;
+        let ((u0, u1), (v0, v1)) = self.domain();
+        let (period, (lo, hi), bend) = if held == 0 {
+            (self.u_period, (u0, u1), at[3])
+        } else {
+            (self.v_period, (v0, v1), at[5])
+        };
+        let x = [uv.x, uv.y][held];
+        let inward = if x <= lo {
+            1.0
+        } else if x >= hi {
+            -1.0
+        } else {
+            return None;
+        };
+        if period.is_some() || bend.dot(at[0] - p) > 0.0 {
+            return None;
+        }
+        let here = at[0].dist(p);
+        (1..=12)
+            .map(|k| {
+                let x = x + inward * (hi - lo) * 0.5f64.powi(k);
+                let w = if held == 0 {
+                    Vec2::new(x, uv.y)
+                } else {
+                    Vec2::new(uv.x, x)
+                };
+                (self.eval(w.x, w.y).dist(p), w)
+            })
+            .filter(|&(d, _)| d < here)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, w)| w)
     }
 
     /// Where a search from the pole at `uv` starts: a point a way down the line out of the pole
@@ -2364,6 +2597,19 @@ impl NurbsSurface {
         Some(at(t, w))
     }
 
+    /// [`pole_of`] at `uv`, where the line of the parameter that moves nothing there is one point:
+    /// the derivative is the filter, [`NurbsSurface::line_is_point`] the test. A line along which
+    /// the surface only stands still is a curve, and no line out of it need be chosen.
+    fn pole_at(&self, uv: Vec2, at: &[Vec3; 6]) -> Option<usize> {
+        let free = pole_of(at)?;
+        let point = if free == 0 {
+            self.line_is_point(false, uv.y)
+        } else {
+            self.line_is_point(true, uv.x)
+        };
+        point.then_some(free)
+    }
+
     fn wrapped(&self, uv: Vec2) -> Vec2 {
         Vec2::new(
             self.bu.wrap(uv.x, self.u_period),
@@ -2407,8 +2653,7 @@ impl NurbsSurface {
         // A hint on a pole says nothing of the free parameter: Newton from it finds the point
         // nearest along that one line out of the pole, which can be a boundary's, not the patch's.
         let at = self.d2(hint.x, hint.y);
-        let [_, su, sv, ..] = at;
-        if su.norm().min(sv.norm()) <= 1e-9 * su.norm().max(sv.norm()) {
+        if self.pole_at(hint, &at).is_some() {
             return self.project(p);
         }
         let (local, d, settled) = self.search(p, hint, Some(at));
@@ -2455,8 +2700,9 @@ fn eigen_step(a: f64, b: f64, d: f64, g0: f64, g1: f64) -> Option<(f64, f64)> {
     Some((step.x, step.y))
 }
 
-/// The parameter that moves nothing at a point with these derivatives, 0 for u and 1 for v: a
-/// pole, where a whole row of the surface is one point.
+/// The parameter that moves nothing at a point with these derivatives, 0 for u and 1 for v: at a
+/// pole, where a whole line of the surface is one point, or along a line where the surface stands
+/// still. [`NurbsSurface::pole_at`] tells the two apart.
 fn pole_of(at: &[Vec3; 6]) -> Option<usize> {
     let (a, d) = (at[1].norm(), at[2].norm());
     if a <= 1e-9 * d {
@@ -3390,5 +3636,151 @@ pub(crate) mod tests {
         let (got_knots, got) = piece(3, &knots, &polar(&knots), (1.0, 2.0));
         assert_eq!(got_knots, [1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]);
         same(&got, &polar(&got_knots));
+    }
+
+    #[test]
+    fn a_line_is_one_point_where_its_control_points_are() {
+        // A cubic in u by linear in v over the unit square, the Bezier side of a prism of height
+        // 4. Its last two control points along u coincide, so its u derivative vanishes along the
+        // whole line u = 1: that line runs from (5, 10, 0) to (5, 10, 4), and is no point. Its
+        // top row is drawn into one point, (0, 0, 4), taken with weights that differ along it:
+        // the line v = 1 is a point. A row spread over twice the tolerance is not.
+        let net = |top: &dyn Fn(usize) -> Vec3| {
+            let foot = [(10.0, 0.0), (10.0, 5.0), (5.0, 10.0), (5.0, 10.0)];
+            let mut ctrl = Vec::new();
+            for (i, &(x, y)) in foot.iter().enumerate() {
+                ctrl.push(Vec3::new(x, y, 0.0));
+                ctrl.push(top(i));
+            }
+            let weights = (0..8).map(|k| 1.0 + 0.25 * (k / 2) as f64).collect();
+            NurbsSurface::new(
+                (3, 1),
+                (
+                    vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+                    vec![0.0, 0.0, 1.0, 1.0],
+                ),
+                (4, 2),
+                ctrl,
+                Some(weights),
+            )
+            .unwrap()
+        };
+        let still = net(&|i| {
+            let foot = [(10.0, 0.0), (10.0, 5.0), (5.0, 10.0), (5.0, 10.0)];
+            Vec3::new(foot[i].0, foot[i].1, 4.0)
+        });
+        let [_, su, sv, ..] = still.d2(1.0, 0.5);
+        assert!(su.norm() <= 1e-12 && sv.norm() > 1.0);
+        assert!(!still.line_is_point(true, 1.0));
+        assert!(!still.line_is_point(false, 0.0) && !still.line_is_point(false, 1.0));
+        assert_eq!(
+            still.pole_at(Vec2::new(1.0, 0.5), &still.d2(1.0, 0.5)),
+            None
+        );
+        // The normal along the still line is the limit of the normal from inside the patch.
+        let side = crate::geom::Surface::Nurbs(Box::new(still.clone()));
+        for v in [0.0, 0.5, 1.0] {
+            let (on, inside) = (side.normal(1.0, v), side.normal(1.0 - 1e-6, v));
+            assert!(on.dist(inside) < 1e-5, "{v}: {on:?}, not {inside:?}");
+        }
+        let apex = net(&|_| Vec3::new(0.0, 0.0, 4.0));
+        assert!(apex.line_is_point(false, 1.0) && !apex.line_is_point(false, 0.0));
+        assert_eq!(
+            apex.pole_at(Vec2::new(0.5, 1.0), &apex.d2(0.5, 1.0)),
+            Some(0)
+        );
+        let spread = net(&|i| Vec3::new(2.0 * tol::LINEAR * i as f64 / 3.0, 0.0, 4.0));
+        assert!(!spread.line_is_point(false, 1.0));
+    }
+
+    #[test]
+    fn a_point_beside_a_line_where_three_end_control_points_meet_projects_inside() {
+        // The cubic from A = (10, 0) whose last three control points are B = (5, 10): the segment
+        // A B, run as B + s³(A − B) back from B, by linear up to z = 4. Along its end line u = 1
+        // both `S_u` and `S_uu` vanish, so the squared distance is flat across the line to second
+        // order and the line is no foot of a point off it. A point `a` along the segment from B
+        // and `h` off it, square to the strip, lies `h` from the side, from a hint on the line.
+        let (a0, b0) = (Vec3::new(10.0, 0.0, 0.0), Vec3::new(5.0, 10.0, 0.0));
+        let mut ctrl = Vec::new();
+        for q in [a0, b0, b0, b0] {
+            ctrl.push(q);
+            ctrl.push(q + Vec3::new(0.0, 0.0, 4.0));
+        }
+        let s = NurbsSurface::new(
+            (3, 1),
+            (
+                vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+                vec![0.0, 0.0, 1.0, 1.0],
+            ),
+            (4, 2),
+            ctrl,
+            None,
+        )
+        .unwrap();
+        let along = (a0 - b0).unit().unwrap();
+        let off = Vec3::new(-along.y, along.x, 0.0);
+        for a in [0.25 * s.near_radius(), 0.01, 0.1, 1.0] {
+            for h in [0.0, 1e-3] {
+                let p = b0 + Vec3::new(0.0, 0.0, 2.0) + along * a + off * h;
+                for uv in [s.project_near(p, Vec2::new(1.0, 0.5)), s.project(p)] {
+                    let d = s.eval(uv.x, uv.y).dist(p);
+                    assert!((d - h).abs() <= 1e-9, "a {a}, h {h}: {uv:?} at {d}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_point_where_a_curved_still_line_is_farthest_along_it_projects_off_that_point() {
+        // The cubic A, P1, B, B along u, its last two control points coincide, swept along v by
+        // the quadratic arc 0, a·n + b·z, 2b·z, n = (1, 1, 0)/√2: the still line u = 1 is a
+        // parabola that bends with radius b²/a at its middle. A point `c` from the middle on the
+        // concave side, c > b²/a, and tilted by `eps` along m = (1, −1, 0)/√2 into the patch's
+        // bend, is nearest to the line's middle across the line but farthest from it along the
+        // line: no foot. The nearest point is elsewhere, and projection from a hint at the middle
+        // must find one nearer than the middle and no farther than any point of a fine grid.
+        let n = Vec3::new(1.0, 1.0, 0.0).unit().unwrap();
+        let m = Vec3::new(1.0, -1.0, 0.0).unit().unwrap();
+        let z = Vec3::new(0.0, 0.0, 1.0);
+        let foot = [(10.0, 0.0), (10.0, 5.0), (5.0, 10.0), (5.0, 10.0)];
+        for (a, b, c) in [(1.0, 0.1, 0.0125), (2.0, 0.1, 0.008), (4.0, 0.1, 0.004)] {
+            let arc = [Vec3::ZERO, n * a + z * b, z * (2.0 * b)];
+            let mut ctrl = Vec::new();
+            for &(x, y) in &foot {
+                for d in arc {
+                    ctrl.push(Vec3::new(x, y, 0.0) + d);
+                }
+            }
+            let s = NurbsSurface::new(
+                (3, 2),
+                (
+                    vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+                    vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                ),
+                (4, 3),
+                ctrl,
+                None,
+            )
+            .unwrap();
+            let middle = s.eval(1.0, 0.5);
+            for eps in [1e-4, 1e-3] {
+                let p = middle - n * c - m * eps;
+                let grid = (0..=400)
+                    .flat_map(|i| (0..=400).map(move |j| (i as f64 / 400.0, j as f64 / 400.0)))
+                    .map(|(u, v)| s.eval(u, v).dist(p))
+                    .fold(f64::INFINITY, f64::min);
+                for uv in [s.project_near(p, Vec2::new(1.0, 0.5)), s.project(p)] {
+                    let d = s.eval(uv.x, uv.y).dist(p);
+                    assert!(
+                        d <= grid + 1e-12,
+                        "{a} {b} {c} {eps}: {uv:?} at {d}, grid {grid}"
+                    );
+                    assert!(
+                        d < middle.dist(p) - 1e-6,
+                        "{a} {b} {c} {eps}: stayed at {uv:?}"
+                    );
+                }
+            }
+        }
     }
 }
