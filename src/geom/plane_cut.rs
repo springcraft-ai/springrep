@@ -492,6 +492,17 @@ fn plane_zeros(
     out
 }
 
+/// Where curve `c` meets the plane through `o` with unit normal `n` over `[t0, t1]`, crossing it,
+/// touching it or ending on it within `tau`: [`plane_zeros`] with the range's ends counted.
+pub(crate) fn plane_meets(
+    c: &Curve,
+    range: (f64, f64),
+    plane: (Point3, Vec3),
+    tau: f64,
+) -> Vec<f64> {
+    plane_zeros(c, range, plane, tau, true)
+}
+
 /// A conic's distance from the plane through `o` with unit normal `n` as `a + b cos t + s sin t`:
 /// `(a, b, s)`.
 fn conic_terms(c: &Curve, o: Point3, n: Vec3) -> (f64, f64, f64) {

@@ -1668,6 +1668,343 @@ fn caps_without_a_seam_close_on_the_pole_or_apex_they_cover() {
     }
 }
 
+/// The rib of a dome: the part of the ball of radius 5 at the origin between the planes y = ±2
+/// and above the plane z = −3. Its sphere face has one loop round the pole at +z and no seam:
+/// the arcs of the circle of radius 4 at z = −3, between y = ±2, and the arcs over the top of the
+/// circles of radius √21 in y = ±2, starting at the vertex (√12, −2, −3). The meridian from that
+/// vertex leaves the rib at once (the ball widens to radius 5 above it, where |y| reaches 2.5)
+/// and crosses the arc in y = −2 back into it. With `held`, the face also holds its pole, a
+/// `VERTEX_LOOP` at (0, 0, 5), as a file writes where something touches it there.
+fn dome_rib(held: bool) -> String {
+    let x = 12f64.sqrt();
+    let pole = if held {
+        "#92=CARTESIAN_POINT('',(0.,0.,5.));\n#93=VERTEX_POINT('',#92);\n\
+         #94=VERTEX_LOOP('',#93);\n#95=FACE_BOUND('',#94,.T.);\n\
+         #58=ADVANCED_FACE('',(#57,#95),#51,.T.);"
+    } else {
+        "#58=ADVANCED_FACE('',(#57),#51,.T.);"
+    };
+    step_file(&format!(
+        "#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=DIRECTION('',(0.,0.,1.));
+#3=DIRECTION('',(1.,0.,0.));
+#4=DIRECTION('',(0.,-1.,0.));
+#5=DIRECTION('',(0.,1.,0.));
+#6=DIRECTION('',(0.,0.,-1.));
+#7=DIRECTION('',(-1.,0.,0.));
+#10=CARTESIAN_POINT('',({x:?},-2.,-3.));
+#11=VERTEX_POINT('',#10);
+#12=CARTESIAN_POINT('',({x:?},2.,-3.));
+#13=VERTEX_POINT('',#12);
+#14=CARTESIAN_POINT('',({nx:?},2.,-3.));
+#15=VERTEX_POINT('',#14);
+#16=CARTESIAN_POINT('',({nx:?},-2.,-3.));
+#17=VERTEX_POINT('',#16);
+#20=CARTESIAN_POINT('',(0.,0.,-3.));
+#21=AXIS2_PLACEMENT_3D('',#20,#2,#3);
+#22=CIRCLE('',#21,4.);
+#23=EDGE_CURVE('',#11,#13,#22,.T.);
+#24=EDGE_CURVE('',#15,#17,#22,.T.);
+#30=CARTESIAN_POINT('',(0.,2.,0.));
+#31=AXIS2_PLACEMENT_3D('',#30,#4,#3);
+#32=CIRCLE('',#31,{r:?});
+#33=EDGE_CURVE('',#13,#15,#32,.T.);
+#34=CARTESIAN_POINT('',(0.,-2.,0.));
+#35=AXIS2_PLACEMENT_3D('',#34,#4,#3);
+#36=CIRCLE('',#35,{r:?});
+#37=EDGE_CURVE('',#11,#17,#36,.T.);
+#40=VECTOR('',#7,1.);
+#41=LINE('',#12,#40);
+#42=EDGE_CURVE('',#13,#15,#41,.T.);
+#43=VECTOR('',#3,1.);
+#44=LINE('',#16,#43);
+#45=EDGE_CURVE('',#17,#11,#44,.T.);
+#50=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+#51=SPHERICAL_SURFACE('',#50,5.);
+#52=ORIENTED_EDGE('',*,*,#23,.T.);
+#53=ORIENTED_EDGE('',*,*,#33,.T.);
+#54=ORIENTED_EDGE('',*,*,#24,.T.);
+#55=ORIENTED_EDGE('',*,*,#37,.F.);
+#56=EDGE_LOOP('',(#52,#53,#54,#55));
+#57=FACE_OUTER_BOUND('',#56,.T.);
+{pole}
+#60=AXIS2_PLACEMENT_3D('',#30,#5,#3);
+#61=PLANE('',#60);
+#62=ORIENTED_EDGE('',*,*,#33,.F.);
+#63=ORIENTED_EDGE('',*,*,#42,.T.);
+#64=EDGE_LOOP('',(#62,#63));
+#65=FACE_OUTER_BOUND('',#64,.T.);
+#66=ADVANCED_FACE('',(#65),#61,.T.);
+#70=AXIS2_PLACEMENT_3D('',#34,#4,#3);
+#71=PLANE('',#70);
+#72=ORIENTED_EDGE('',*,*,#37,.T.);
+#73=ORIENTED_EDGE('',*,*,#45,.T.);
+#74=EDGE_LOOP('',(#72,#73));
+#75=FACE_OUTER_BOUND('',#74,.T.);
+#76=ADVANCED_FACE('',(#75),#71,.T.);
+#80=AXIS2_PLACEMENT_3D('',#20,#6,#3);
+#81=PLANE('',#80);
+#82=ORIENTED_EDGE('',*,*,#23,.F.);
+#83=ORIENTED_EDGE('',*,*,#45,.F.);
+#84=ORIENTED_EDGE('',*,*,#24,.F.);
+#85=ORIENTED_EDGE('',*,*,#42,.F.);
+#86=EDGE_LOOP('',(#82,#83,#84,#85));
+#87=FACE_OUTER_BOUND('',#86,.T.);
+#88=ADVANCED_FACE('',(#87),#81,.T.);
+#90=CLOSED_SHELL('',(#58,#66,#76,#88));
+#91=MANIFOLD_SOLID_BREP('',#90);",
+        nx = -x,
+        r = 21f64.sqrt(),
+    ))
+}
+
+/// The dome's rib reads as one solid and meshes watertight, with its pole held by a vertex loop
+/// or not. The read gives its sphere face a seam to the pole from a point of the loop nearest the
+/// pole, the top of an arc in y = ±2, so the seam stays inside the face: from the loop's first
+/// vertex, the meridian crosses the face's boundary, and so it would from any of its vertices.
+///
+/// Its volume, slice by slice across y in [−a, a], a = 2: the slice is the disc of radius
+/// ρ = √(R² − y²), R = 5, above the chord at z = −d, d = 3, of area πρ² − ρ² acos(d/ρ) + d√(ρ² −
+/// d²). With k² = R² − d², s = √(k² − y²) and v = R²y − y³/3, so that ∫ρ² dy = v, the terms
+/// integrate to
+///   ∫ πρ² = πv,
+///   ∫ d√(ρ² − d²) = d (y s/2 + (k²/2) asin(y/k)),
+///   ∫ ρ² acos(d/ρ) = v acos(d/ρ) + d ∫ v y / (ρ² s), by parts, where
+///   v y / ρ² = (y² − 2R²)/3 + (2R⁴/3)/(R² − y²), and ∫ dy/((R² − y²) s) = atan(d y/(R s))/(d R)
+/// (R² − k² = d²), with ∫ y²/s = (k²/2) asin(y/k) − y s/2 and ∫ 1/s = asin(y/k) (Gradshteyn &
+/// Ryzhik, *Table of Integrals*, 2.261, 2.271 and 2.284). The integrand is even, so the volume is
+/// twice the antiderivative at y = a.
+#[test]
+fn a_cap_whose_vertex_meridian_leaves_it_is_seamed_from_its_point_nearest_the_pole() {
+    let (r, d, a) = (5.0f64, 3.0f64, 2.0f64);
+    let k = (r * r - d * d).sqrt();
+    let s = (k * k - a * a).sqrt();
+    let rho = (r * r - a * a).sqrt();
+    let v = r * r * a - a.powi(3) / 3.0;
+    let by_parts = d
+        * ((k * k / 2.0 * (a / k).asin() - a * s / 2.0) / 3.0 - 2.0 * r * r / 3.0 * (a / k).asin()
+            + 2.0 * r.powi(4) / 3.0 * (d * a / (r * s)).atan() / (d * r));
+    let along = PI * v - (v * (d / rho).acos() + by_parts)
+        + d * (a * s / 2.0 + k * k / 2.0 * (a / k).asin());
+    let want = 2.0 * along;
+    for held in [false, true] {
+        let imp = read(dome_rib(held).as_bytes(), "rib").unwrap();
+        assert!(imp.rejected.is_empty(), "{:?}", imp.rejected);
+        assert!(imp.healed.is_empty() && imp.tolerant.is_empty());
+        let b = &imp.brep;
+        assert!(check::check(b).is_empty(), "{:?}", check::check(b));
+        let (area, volume) = measure::area_and_volume(b);
+        assert!((volume - want).abs() <= 1e-9 * want, "{volume} vs {want}");
+        let opt = crate::mesh::MeshOptions::within(0.01);
+        let m = crate::mesh::tessellate(b, &opt).unwrap();
+        let solid = b.solid_ids().next().unwrap();
+        let rep = crate::mesh::report(b, &m, solid);
+        assert!(rep.watertight(), "{rep:?}");
+        assert_eq!(rep.degenerate_triangles, 0);
+        assert!(
+            (rep.volume.abs() - want).abs() <= area * opt.linear,
+            "{}",
+            rep.volume
+        );
+        // The seam runs to the pole from the top of an arc over the top, (0, ±2, √21), the loop's
+        // points nearest the pole.
+        let top = |y: f64| Vec3::new(0.0, y, 21f64.sqrt());
+        let tops = b.vertex_ids().filter(|&x| {
+            [top(2.0), top(-2.0)]
+                .iter()
+                .any(|t| b.vertex(x).point.dist(*t) <= 1e-12)
+        });
+        assert_eq!(tops.count(), 1);
+        round_trip(b);
+    }
+}
+
+/// The part of the ball of radius 5 at the origin above the plane z = −3, with the caps beyond the
+/// planes n·p = d cut away, for each `(θ, φ, d)` of `holes` with n at the angle θ from +z and φ
+/// about it: a sphere face, the disc of radius 4 at z = −3 and the disc of radius √(25 − d²) about
+/// d n for each hole. The sphere face has the circle at z = −3 for its loop round the pole at +z,
+/// one vertex on it at (`vx`, ±√(16 − vx²), −3), and the circles about d n for holes.
+fn holed_cap(vx: f64, holes: &[(f64, f64, f64)]) -> String {
+    let vy = (16.0 - vx * vx).max(0.0).sqrt();
+    let mut data = format!(
+        "#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=DIRECTION('',(0.,0.,1.));
+#3=DIRECTION('',(1.,0.,0.));
+#6=DIRECTION('',(0.,0.,-1.));
+#50=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+#51=SPHERICAL_SURFACE('',#50,5.);
+#20=CARTESIAN_POINT('',(0.,0.,-3.));
+#21=AXIS2_PLACEMENT_3D('',#20,#2,#3);
+#22=CIRCLE('',#21,4.);
+#10=CARTESIAN_POINT('',({vx:?},{vy:?},-3.));
+#11=VERTEX_POINT('',#10);
+#23=EDGE_CURVE('',#11,#11,#22,.T.);
+#40=ORIENTED_EDGE('',*,*,#23,.T.);
+#41=EDGE_LOOP('',(#40));
+#42=FACE_OUTER_BOUND('',#41,.T.);
+#70=AXIS2_PLACEMENT_3D('',#20,#6,#3);
+#71=PLANE('',#70);
+#72=ORIENTED_EDGE('',*,*,#23,.F.);
+#73=EDGE_LOOP('',(#72));
+#74=FACE_OUTER_BOUND('',#73,.T.);
+#75=ADVANCED_FACE('',(#74),#71,.T.);\n"
+    );
+    let (mut bounds, mut faces) = (
+        vec!["#42".to_string()],
+        vec!["#46".to_string(), "#75".into()],
+    );
+    for (k, &(theta, phi, d)) in holes.iter().enumerate() {
+        let i = 100 + 20 * k;
+        let n = Vec3::new(
+            theta.sin() * phi.cos(),
+            theta.sin() * phi.sin(),
+            theta.cos(),
+        );
+        let u = Vec3::new(-phi.sin(), phi.cos(), 0.0);
+        let (c, r) = (n * d, (25.0 - d * d).sqrt());
+        let q = c + u * r;
+        data.push_str(&format!(
+            "#{i}=CARTESIAN_POINT('',({:?},{:?},{:?}));
+#{}=DIRECTION('',({:?},{:?},{:?}));
+#{}=DIRECTION('',({:?},{:?},0.));
+#{}=AXIS2_PLACEMENT_3D('',#{i},#{},#{});
+#{}=CIRCLE('',#{},{r:?});
+#{}=CARTESIAN_POINT('',({:?},{:?},{:?}));
+#{}=VERTEX_POINT('',#{});
+#{}=EDGE_CURVE('',#{},#{},#{},.T.);
+#{}=ORIENTED_EDGE('',*,*,#{},.F.);
+#{}=EDGE_LOOP('',(#{}));
+#{}=FACE_BOUND('',#{},.T.);
+#{}=PLANE('',#{});
+#{}=ORIENTED_EDGE('',*,*,#{},.T.);
+#{}=EDGE_LOOP('',(#{}));
+#{}=FACE_OUTER_BOUND('',#{},.T.);
+#{}=ADVANCED_FACE('',(#{}),#{},.T.);\n",
+            c.x,
+            c.y,
+            c.z,
+            i + 1,
+            n.x,
+            n.y,
+            n.z,
+            i + 2,
+            u.x,
+            u.y,
+            i + 3,
+            i + 1,
+            i + 2,
+            i + 4,
+            i + 3,
+            i + 5,
+            q.x,
+            q.y,
+            q.z,
+            i + 6,
+            i + 5,
+            i + 7,
+            i + 6,
+            i + 6,
+            i + 4,
+            i + 8,
+            i + 7,
+            i + 9,
+            i + 8,
+            i + 10,
+            i + 9,
+            i + 11,
+            i + 3,
+            i + 12,
+            i + 7,
+            i + 13,
+            i + 12,
+            i + 14,
+            i + 13,
+            i + 15,
+            i + 14,
+            i + 11,
+        ));
+        bounds.push(format!("#{}", i + 10));
+        faces.push(format!("#{}", i + 15));
+    }
+    data.push_str(&format!(
+        "#46=ADVANCED_FACE('',({}),#51,.T.);\n#90=CLOSED_SHELL('',({}));\n\
+         #91=MANIFOLD_SOLID_BREP('',#90);",
+        bounds.join(","),
+        faces.join(",")
+    ));
+    step_file(&data)
+}
+
+/// A cap's seam to its pole clears the cap's holes as well as its loop round the pole. The ball
+/// above z = −3 with the cap beyond n·p = 4 cut away, n = (√3/2, 0, 1/2): the hole lies 23.13° to
+/// 96.87° from the pole on the meridian through +x, and the meridian through −x, 60° and more from
+/// n, misses it. From the circle's vertex at (4, 0, −3) the meridian runs through the hole; from
+/// (−4, 0, −3) it does not.
+/// Either way the cut ball reads as one solid and meshes watertight. A cap of the ball of radius
+/// R cut a distance d from its centre holds πh²(3R − h)/3, h = R − d, and its zone of the sphere
+/// is 2πRh (Archimedes): with R = 5, the ball 500π/3, less 52π/3 below z = −3 (h = 2) and 14π/3
+/// beyond n·p = 4 (h = 1), is 434π/3; the sphere face is 2π·5·8 − 2π·5·1 = 70π, and with the
+/// discs of radius 4 and 3 the area is 95π. The vertex at −x starts the seam, as before; from the
+/// one at +x the reader starts it at a new point of the circle, where a meridian meets the circle
+/// before the hole.
+#[test]
+fn a_caps_seam_to_its_pole_clears_its_holes() {
+    let (want, area) = (434.0 * PI / 3.0, 95.0 * PI);
+    let hole = [(PI / 3.0, 0.0, 4.0)];
+    for (sx, vertices) in [(1.0, 4), (-1.0, 3)] {
+        let imp = read(holed_cap(4.0 * sx, &hole).as_bytes(), "cap").unwrap();
+        assert!(imp.rejected.is_empty(), "{sx}: {:?}", imp.rejected);
+        assert!(imp.healed.is_empty() && imp.tolerant.is_empty());
+        let b = &imp.brep;
+        assert!(check::check(b).is_empty(), "{:?}", check::check(b));
+        assert_eq!(b.vertex_ids().count(), vertices, "{sx}");
+        let (got_area, volume) = measure::area_and_volume(b);
+        assert!(
+            (volume - want).abs() <= 1e-9 * want,
+            "{sx}: {volume} vs {want}"
+        );
+        assert!((got_area - area).abs() <= 1e-9 * area, "{sx}: {got_area}");
+        let opt = crate::mesh::MeshOptions::within(0.01);
+        let m = crate::mesh::tessellate(b, &opt).unwrap();
+        let solid = b.solid_ids().next().unwrap();
+        let rep = crate::mesh::report(b, &m, solid);
+        assert!(rep.watertight(), "{rep:?}");
+        assert_eq!(rep.degenerate_triangles, 0);
+        assert!(
+            (rep.volume.abs() - want).abs() <= area * opt.linear,
+            "{}",
+            rep.volume
+        );
+        round_trip(b);
+    }
+}
+
+/// Where holes stand between the pole and the loop round it on every meridian, no seam from the
+/// pole reaches the loop clear of them, and the cap is refused by name. Four holes of angular
+/// radius 20° at 35° from the pole, a quarter turn apart, each shade 2 asin(sin 20°/sin 35°) =
+/// 73.2° of the turn, and four more at 80°, between them, each shade 2 asin(sin 20°/sin 80°) =
+/// 40.6°, which covers the 16.8° gaps the first four leave. All lie nearer the pole than the
+/// loop, 126.87° from it, and no two meet: the nearest centres lie 47.8° apart.
+#[test]
+fn a_cap_whose_holes_shade_its_loop_from_the_pole_all_round_is_refused() {
+    let d = 5.0 * (20f64).to_radians().cos();
+    let holes: Vec<(f64, f64, f64)> = (0..8)
+        .map(|k| {
+            let theta = if k % 2 == 0 { 35f64 } else { 80f64 };
+            (theta.to_radians(), k as f64 * PI / 4.0, d)
+        })
+        .collect();
+    let imp = read(holed_cap(4.0, &holes).as_bytes(), "cap").unwrap();
+    assert_eq!(imp.rejected.len(), 1, "{:?}", imp.rejected);
+    assert!(
+        imp.rejected[0].contains(
+            "no seam from the pole of a face reaches the loop round it clear of its other loops"
+        ),
+        "{:?}",
+        imp.rejected
+    );
+}
+
 /// The text of `b` with its first cylinder written as an offset by `d` of a cylinder `d`
 /// thinner, or of `basis` where given.
 fn with_offset_cylinder(b: &Brep, d: f64, basis: Option<&str>) -> String {

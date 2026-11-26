@@ -21,7 +21,9 @@ pub(crate) use intersection::{
 pub(crate) use nurbs::Bezier;
 pub(crate) use nurbs::piece as spline_piece;
 pub use nurbs::{IsoLine, NurbsCurve, NurbsSurface, Patch};
-pub(crate) use plane_cut::{plane_crossings, revolution_poles, side_leaving, spline_plane_hits};
+pub(crate) use plane_cut::{
+    plane_crossings, plane_meets, revolution_poles, side_leaving, spline_plane_hits,
+};
 pub(crate) use steady::{Steady, Swept};
 pub(crate) use surface::Meridian;
 pub use surface::{Cone, Cylinder, Extrusion, Plane, Revolution, Ruled, Sphere, Surface, Torus};
