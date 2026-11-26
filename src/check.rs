@@ -2,6 +2,7 @@
 //! edge lies on both its faces within tolerance, and each loop closes in its face's parameters.
 
 use std::collections::{HashMap, HashSet};
+use std::f64::consts::TAU;
 use std::fmt;
 
 use crate::{
@@ -17,7 +18,10 @@ use crate::{
     geom::{Curve, NurbsSurface, Surface, distance_to},
     math::{Aabb, Point3, Vec2, Vec3},
     measure, tol,
-    topo::{Brep, CoedgeId, EdgeId, FaceId, FaceMemo, LoopId, ShellId, SolidId, VertexId},
+    topo::{
+        Brep, CoedgeId, EdgeId, FaceId, FaceMemo, LoopId, PCurve, ShellId, SolidId, VertexId,
+        pcurve::spline_uv,
+    },
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -551,6 +555,18 @@ fn checked(
                 issue(format!("face {} loop {li} runs the wrong way", f.index()));
             }
         }
+        if sampled && let Some((e, s, p)) = seam_crossing(b, f) {
+            issue(format!(
+                "face {} crosses its own seam: edge {} meets seam edge {} at ({:.6}, {:.6}, \
+                 {:.6})",
+                f.index(),
+                e.index(),
+                s.index(),
+                p.x,
+                p.y,
+                p.z
+            ));
+        }
         if sampled
             && !has_pole
             && found.get() == before
@@ -681,6 +697,704 @@ fn checked(
         return checked(b, each, crossing, sheet, false, first);
     }
     out
+}
+
+/// The parameters a coedge starts at in its face, read off its pcurve without projecting.
+fn start_uv(b: &Brep, c: CoedgeId) -> Vec2 {
+    let co = b.coedge(c);
+    let (t0, t1) = b.edge(co.edge).range;
+    let t = if co.reversed { t1 } else { t0 };
+    match &co.pcurve {
+        PCurve::Affine { origin, dir } => *origin + *dir * t,
+        PCurve::Spline { uv } => spline_uv(uv, t),
+        PCurve::Projected { seed } => *seed,
+    }
+}
+
+/// The seams of face `f`: edges it runs twice, once each way, with coedges a period apart in
+/// the face's parameters, where its surface closes on itself; each with its face's parameters
+/// at one end.
+fn own_seams(b: &Brep, f: FaceId) -> Vec<(EdgeId, Vec2)> {
+    let face = b.face(f);
+    let periods = [face.surface.u_period(), face.surface.v_period()];
+    if periods.iter().all(Option::is_none) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for &lp in &face.loops {
+        for &c in &b.lp(lp).coedges {
+            let e = b.coedge(c).edge;
+            let edge = b.edge(e);
+            if edge.is_degenerate() || out.iter().any(|&(s, _)| s == e) {
+                continue;
+            }
+            let mut uses = b
+                .edge_uses(e)
+                .iter()
+                .copied()
+                .filter(|&x| b.coedge_face(x) == f);
+            let (Some(x), Some(y), None) = (uses.next(), uses.next(), uses.next()) else {
+                continue;
+            };
+            if b.coedge(x).reversed == b.coedge(y).reversed {
+                continue;
+            }
+            // The two start at the seam's two ends, and differ by a period across it.
+            let (p, q) = (start_uv(b, x), start_uv(b, y));
+            let apart = |d: f64, period: Option<f64>| {
+                period.is_some_and(|w| {
+                    let turns = d / w;
+                    turns.round() != 0.0 && (turns - turns.round()).abs() <= 1e-6
+                })
+            };
+            if apart(p.x - q.x, periods[0]) || apart(p.y - q.y, periods[1]) {
+                out.push((e, p));
+            }
+        }
+    }
+    out
+}
+
+/// The plane through a seam of `s` that cuts the surface across it: a point on it and its unit
+/// normal. A meridian of a surface turned about an axis lies in a plane through the axis, a
+/// parallel in one square to it, and a straight seam of a cylinder, cone or extrusion in the
+/// plane through it and the normal, which is the same all along it. The surface's normal there
+/// lies in the plane or crosses it, so on the surface near the seam the plane meets nothing but
+/// the seam, and an edge of the face crosses the seam exactly where its curve crosses the plane
+/// there. A plane through the axis holds the seam on one side of it only, which comes with it as
+/// a point of the axis and the unit direction out to the seam. `uv` is the surface's parameters
+/// at one end of the seam. `None` for a seam of any other surface, or one off every such plane.
+fn seam_plane(s: &Surface, seam: &Curve, (t0, t1): (f64, f64), uv: Vec2) -> Option<SeamPlane> {
+    let mid = seam.eval(0.5 * (t0 + t1));
+    let normal = s.normal(uv.x, uv.y);
+    let axis = match s {
+        Surface::Sphere(k) => Some((k.frame.origin, k.frame.z)),
+        Surface::Torus(k) => Some((k.frame.origin, k.frame.z)),
+        Surface::Cone(k) => Some((k.frame.origin, k.frame.z)),
+        Surface::Cylinder(k) => Some((k.frame.origin, k.frame.z)),
+        Surface::Revolution(k) => Some((k.origin, k.axis)),
+        Surface::Extrusion(_) => None,
+        _ => return None,
+    };
+    let own = match seam {
+        Curve::Circle(c) => Some((c.frame.origin, c.frame.z)),
+        Curve::Ellipse(c) => Some((c.frame.origin, c.frame.z)),
+        Curve::Line(l) => l.dir.cross(normal).unit().map(|n| (l.origin, n)),
+        _ => None,
+    };
+    let through = axis.and_then(|(o, z)| {
+        let z = z.unit()?;
+        let out = (mid - o) - z * (mid - o).dot(z);
+        z.cross(out).unit().map(|n| (o, n))
+    });
+    let planes = [own, through].into_iter().flatten();
+    let on = |(o, n): (Point3, Vec3)| {
+        [t0, 0.5 * (t0 + t1), t1]
+            .iter()
+            .all(|&t| n.dot(seam.eval(t) - o).abs() <= tol::LINEAR)
+    };
+    let (o, n) = planes
+        .into_iter()
+        .find(|&plane| on(plane) && plane.1.dot(normal).abs() <= 1.0 - 1e-6)?;
+    let side = axis.and_then(|(a, z)| {
+        let z = z.unit()?;
+        let through = n.dot(z).abs() <= 1e-9 && n.dot(a - o).abs() <= tol::LINEAR;
+        let out = (mid - a) - z * (mid - a).dot(z);
+        through.then(|| out.unit().map(|out| (a, out))).flatten()
+    });
+    Some((o, n, side))
+}
+
+/// A seam's plane, as [`seam_plane`] gives it.
+type SeamPlane = (Point3, Vec3, Option<(Point3, Vec3)>);
+
+/// The parameters in the open range `(t0, t1)` where curve `c` crosses the plane through `o`
+/// with unit normal `n`, from beyond `tau` on one side to beyond it on the other: a curve that
+/// only touches the plane, or reaches past it by no more than `tau`, crosses nothing. A line and
+/// a conic are solved in closed form; a spline's signed distances to the plane are a spline
+/// too, which lies within the hull of its control values, and is split until each piece either
+/// stays on one side, proven so, or holds one crossing, which halving then locates. A knot span
+/// whose control points' box misses `near` is passed over: the curve there lies in that box.
+pub(crate) fn plane_crossings(
+    c: &Curve,
+    (t0, t1): (f64, f64),
+    (o, n): (Point3, Vec3),
+    tau: f64,
+    near: &Aabb,
+) -> Vec<f64> {
+    let inside = |t: f64| t > t0 && t < t1;
+    match c {
+        Curve::Line(l) => {
+            let (g0, gd) = (n.dot(l.origin - o), n.dot(l.dir));
+            let (ga, gb) = (g0 + gd * t0, g0 + gd * t1);
+            if ga.min(gb) < -tau && ga.max(gb) > tau {
+                vec![-g0 / gd]
+            } else {
+                Vec::new()
+            }
+        }
+        Curve::Circle(_) | Curve::Ellipse(_) => {
+            // g(t) = a + b cos t + s sin t, which swings a ± r.
+            let (a, bc, bs) = conic_terms(c, o, n);
+            let r = bc.hypot(bs);
+            if a - r >= -tau || a + r <= tau {
+                return Vec::new();
+            }
+            let (phase, half) = (bs.atan2(bc), (-a / r).acos());
+            let mut out = Vec::new();
+            for root in [phase - half, phase + half] {
+                let mut k = ((t0 - root) / TAU).ceil();
+                while root + k * TAU < t1 {
+                    if inside(root + k * TAU) {
+                        out.push(root + k * TAU);
+                    }
+                    k += 1.0;
+                }
+            }
+            out.sort_by(f64::total_cmp);
+            out
+        }
+        _ => {
+            let parts = spline_parts(c).expect("a spline");
+            spline_crossings(parts, (t0, t1), (o, n), tau, near)
+        }
+    }
+}
+
+/// A spline's degree, knots, control points, weights (`None` where all are equal) and period.
+type SplineParts<'a> = (
+    usize,
+    &'a [f64],
+    &'a [Point3],
+    Option<&'a [f64]>,
+    Option<f64>,
+);
+
+/// The parts of a B-spline, an intersection curve's spline or a rational spline; `None` for a
+/// line or a conic.
+fn spline_parts(c: &Curve) -> Option<SplineParts<'_>> {
+    match c {
+        Curve::BSpline(s) => Some((s.degree(), s.knots(), s.control_points(), None, s.period())),
+        Curve::Intersection(x) => {
+            let s = &x.approx;
+            Some((s.degree(), s.knots(), s.control_points(), None, s.period()))
+        }
+        Curve::Nurbs(s) => Some((
+            s.degree(),
+            s.knots(),
+            s.control_points(),
+            s.weights(),
+            s.period(),
+        )),
+        _ => None,
+    }
+}
+
+/// The signed distances `wᵢ·n·(Pᵢ − o)` of a spline's weighted control points from the plane
+/// through `o` with unit normal `n`, and the least weight. With positive weights the spline's
+/// distance has the sign of the spline of these, and is at least as far from zero divided by the
+/// least weight, so a band of `tau` about the plane is one of `tau` times that about these.
+fn spline_values((_, _, ctrl, weights, _): SplineParts<'_>, o: Point3, n: Vec3) -> (Vec<f64>, f64) {
+    let weight = |j: usize| weights.map_or(1.0, |w| w[j]);
+    let g = (0..ctrl.len())
+        .map(|j| weight(j) * n.dot(ctrl[j] - o))
+        .collect();
+    let least = weights.map_or(1.0, |w| w.iter().copied().fold(f64::INFINITY, f64::min));
+    (g, least)
+}
+
+/// The knot spans a spline's parameters `(t0, t1)` run through, in order: each span's index, the
+/// multiple of the period it is shifted by, and the stretch of `(t0, t1)` on it.
+fn spline_spans(
+    (p, knots, ctrl, _, period): SplineParts<'_>,
+    (t0, t1): (f64, f64),
+) -> impl Iterator<Item = (usize, f64, f64, f64)> + '_ {
+    let count = ctrl.len();
+    let lo = knots[p];
+    let copies = match period {
+        Some(per) => (
+            ((t0 - lo) / per).floor() as i64,
+            ((t1 - lo) / per).floor() as i64,
+        ),
+        None => (0, 0),
+    };
+    (copies.0..=copies.1).flat_map(move |copy| {
+        let shift = period.map_or(0.0, |per| copy as f64 * per);
+        let first = knots.partition_point(|&k| k <= t0 - shift).max(1) - 1;
+        (first.max(p)..count)
+            .take_while(move |&i| knots[i] + shift < t1)
+            .filter_map(move |i| {
+                let (a, z) = ((knots[i] + shift).max(t0), (knots[i + 1] + shift).min(t1));
+                (z > a).then_some((i, shift, a, z))
+            })
+    })
+}
+
+/// The Bernstein coefficients over `(a, z)`, within span `i`, of the spline with control values
+/// `g`: its blossom at `a` and `z` (de Boor's algorithm, a different parameter at each level).
+fn span_bernstein(
+    (p, knots, ..): SplineParts<'_>,
+    g: &[f64],
+    i: usize,
+    (a, z): (f64, f64),
+) -> Vec<f64> {
+    let mut d = vec![0.0; p + 1];
+    (0..=p)
+        .map(|ends| {
+            d.copy_from_slice(&g[i - p..=i]);
+            for r in 0..p {
+                let t = if r < ends { z } else { a };
+                for j in (r + 1..=p).rev() {
+                    let k = i - p + j;
+                    let span = knots[k + p - r] - knots[k];
+                    let alpha = if span > 0.0 {
+                        (t - knots[k]) / span
+                    } else {
+                        0.0
+                    };
+                    d[j] = (1.0 - alpha) * d[j - 1] + alpha * d[j];
+                }
+            }
+            d[p]
+        })
+        .collect()
+}
+
+/// The polynomial with Bernstein coefficients `b` at `x` (de Casteljau).
+fn bernstein_at(b: &[f64], x: f64) -> f64 {
+    let mut small = [0.0; 16];
+    let mut large = Vec::new();
+    let row: &mut [f64] = if b.len() <= small.len() {
+        &mut small[..b.len()]
+    } else {
+        large.extend_from_slice(b);
+        &mut large
+    };
+    row.copy_from_slice(b);
+    for k in (1..row.len()).rev() {
+        for j in 0..k {
+            row[j] = row[j] * (1.0 - x) + row[j + 1] * x;
+        }
+    }
+    row[0]
+}
+
+/// The Bernstein coefficients of the polynomial `b` over `[0, s]` and `[s, 1]` (de Casteljau).
+fn bernstein_split(b: &[f64], s: f64) -> (Vec<f64>, Vec<f64>) {
+    let last = b.len() - 1;
+    let mut row = b.to_vec();
+    let (mut left, mut right) = (vec![row[0]], vec![row[last]]);
+    for _ in 0..last {
+        for j in 0..row.len() - 1 {
+            row[j] = row[j] * (1.0 - s) + row[j + 1] * s;
+        }
+        row.pop();
+        left.push(row[0]);
+        right.push(row[row.len() - 1]);
+    }
+    right.reverse();
+    (left, right)
+}
+
+/// The one root in `(0, 1)` of the polynomial `b`, whose ends have opposite signs and whose
+/// coefficients change sign once, by regula falsi with the Illinois halving of the end that
+/// stays (Dowell and Jarratt 1971).
+fn bernstein_root(b: &[f64]) -> f64 {
+    let last = b.len() - 1;
+    let ((mut x0, mut f0), (mut x1, mut f1)) = ((0.0, b[0]), (1.0, b[last]));
+    let mut kept = 0;
+    for _ in 0..100 {
+        let x = (x0 * f1 - x1 * f0) / (f1 - f0);
+        if !(x > x0 && x < x1) || x1 - x0 <= 4.0 * f64::EPSILON {
+            break;
+        }
+        let fx = bernstein_at(b, x);
+        if fx == 0.0 {
+            return x;
+        }
+        if (fx > 0.0) == (f0 > 0.0) {
+            (x0, f0) = (x, fx);
+            f1 = if kept == 1 { 0.5 * f1 } else { f1 };
+            kept = 1;
+        } else {
+            (x1, f1) = (x, fx);
+            f0 = if kept == -1 { 0.5 * f0 } else { f0 };
+            kept = -1;
+        }
+    }
+    0.5 * (x0 + x1)
+}
+
+/// The least and the greatest of `b`.
+fn hull(b: &[f64]) -> (f64, f64) {
+    b.iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, m), &x| {
+            (l.min(x), m.max(x))
+        })
+}
+
+/// How many times the nonzero coefficients of `b` change sign: no more roots lie in the interval
+/// than that (Descartes' rule of signs for the Bernstein basis).
+fn sign_changes(b: &[f64]) -> usize {
+    let mut last = 0.0f64;
+    let mut changes = 0;
+    for &x in b.iter().filter(|&&x| x != 0.0) {
+        if last * x < 0.0 {
+            changes += 1;
+        }
+        last = x;
+    }
+    changes
+}
+
+/// The middle of `b`'s interval, or a little short of it where the polynomial is zero there, so
+/// a root is never left at the end of both halves.
+fn bernstein_middle(b: &[f64]) -> f64 {
+    if bernstein_at(b, 0.5) == 0.0 {
+        0.4375
+    } else {
+        0.5
+    }
+}
+
+/// [`plane_crossings`] of a spline, rational or not, of any degree, knot span by knot span. The
+/// spline lies in its control values' hull and each span in its own `p + 1`, so most of it is
+/// passed over on those alone.
+fn spline_crossings(
+    parts: SplineParts<'_>,
+    range: (f64, f64),
+    (o, n): (Point3, Vec3),
+    tau: f64,
+    near: &Aabb,
+) -> Vec<f64> {
+    let (p, _, ctrl, weights, _) = parts;
+    // Most splines keep to one side: their control values say so before any are kept.
+    let least = weights.map_or(1.0, |w| w.iter().copied().fold(f64::INFINITY, f64::min));
+    let band = tau * least;
+    let (mut low, mut high) = (f64::INFINITY, f64::NEG_INFINITY);
+    for (j, &q) in ctrl.iter().enumerate() {
+        let x = weights.map_or(1.0, |w| w[j]) * n.dot(q - o);
+        (low, high) = (low.min(x), high.max(x));
+    }
+    if low >= -band || high <= band {
+        return Vec::new();
+    }
+    let (g, _) = spline_values(parts, o, n);
+    let one_side = |d: &[f64]| {
+        let (l, m) = hull(d);
+        l >= -band || m <= band
+    };
+    let mut out = Vec::new();
+    for (i, shift, a, z) in spline_spans(parts, range) {
+        if one_side(&g[i - p..=i]) {
+            continue;
+        }
+        let mut span_box = Aabb::EMPTY;
+        for &q in &ctrl[i - p..=i] {
+            span_box.add(q);
+        }
+        if !boxes_meet(&span_box, near) {
+            continue;
+        }
+        let bern = span_bernstein(parts, &g, i, (a - shift, z - shift));
+        let mut roots = Vec::new();
+        bernstein_crossings(&bern, (0.0, 1.0), band, 0, &mut roots);
+        out.extend(roots.into_iter().map(|s| a + (z - a) * s));
+    }
+    out
+}
+
+/// The parameters in `(lo, hi)` where the polynomial with Bernstein coefficients `b` over that
+/// interval changes sign, from beyond `band` on one side to beyond it on the other. The
+/// polynomial lies within its coefficients' hull, so a piece whose coefficients keep within
+/// `band` of one side holds no crossing; one whose coefficients change sign once, its ends on
+/// either side, holds exactly one root, which [`bernstein_root`] finds; any other is split in two
+/// and each half searched.
+fn bernstein_crossings(b: &[f64], (lo, hi): (f64, f64), band: f64, depth: u32, out: &mut Vec<f64>) {
+    let (least, most) = hull(b);
+    if least >= -band || most <= band {
+        return;
+    }
+    let last = b.len() - 1;
+    if b[0] * b[last] < 0.0 && sign_changes(b) == 1 {
+        out.push(lo + (hi - lo) * bernstein_root(b));
+        return;
+    }
+    if depth >= 64 {
+        if b[0] * b[last] < 0.0 {
+            out.push(0.5 * (lo + hi));
+        }
+        return;
+    }
+    let s = bernstein_middle(b);
+    let (left, right) = bernstein_split(b, s);
+    let m = lo + (hi - lo) * s;
+    bernstein_crossings(&left, (lo, m), band, depth + 1, out);
+    bernstein_crossings(&right, (m, hi), band, depth + 1, out);
+}
+
+/// A conic's distance from the plane through `o` with unit normal `n` as `a + b cos t + s sin t`:
+/// `(a, b, s)`.
+fn conic_terms(c: &Curve, o: Point3, n: Vec3) -> (f64, f64, f64) {
+    let (frame, rx, ry) = match c {
+        Curve::Circle(k) => (&k.frame, k.radius, k.radius),
+        Curve::Ellipse(k) => (&k.frame, k.major, k.minor),
+        _ => unreachable!("a conic"),
+    };
+    (
+        n.dot(frame.origin - o),
+        rx * n.dot(frame.x),
+        ry * n.dot(frame.y),
+    )
+}
+
+/// Which side of the plane through `o` with unit normal `n` curve `c` lies on beside one end of
+/// `(t0, t1)`, the far end when `from_end`: the sign of its distance where, going into the range
+/// from that end, it first gets more than `tau` from the plane, or 0 where it never does. Its
+/// tangent decides where it leaves the plane across it, and the first derivative across it that
+/// is not zero where it leaves along it; the first exit past the band reads all of these at
+/// once, and a curve that touches the plane and turns back leaves on the side it came from.
+fn side_leaving(
+    c: &Curve,
+    (t0, t1): (f64, f64),
+    from_end: bool,
+    (o, n): (Point3, Vec3),
+    tau: f64,
+) -> i8 {
+    let sign = |x: f64| {
+        if x > tau {
+            1
+        } else if x < -tau {
+            -1
+        } else {
+            0
+        }
+    };
+    match c {
+        Curve::Line(l) => {
+            let far = if from_end { t0 } else { t1 };
+            sign(n.dot(l.origin + l.dir * far - o))
+        }
+        Curve::Circle(_) | Curve::Ellipse(_) => {
+            // The first parameter from the end, going in, where a + b cos t + s sin t = ±tau.
+            let (a, bc, bs) = conic_terms(c, o, n);
+            let r = bc.hypot(bs);
+            let phase = bs.atan2(bc);
+            let (start, dir) = if from_end { (t1, -1.0) } else { (t0, 1.0) };
+            let mut best: Option<(f64, i8)> = None;
+            for (level, side) in [(tau, 1), (-tau, -1)] {
+                if r == 0.0 || ((level - a) / r).abs() > 1.0 {
+                    continue;
+                }
+                let half = ((level - a) / r).acos();
+                for root in [phase - half, phase + half] {
+                    // How far from the start, going in, the next time it is reached.
+                    let ahead = (dir * (root - start)).rem_euclid(TAU);
+                    // Reaching the level from inside the band, going outward.
+                    let t = start + dir * ahead;
+                    let slope = -bc * t.sin() + bs * t.cos();
+                    let outward = slope * dir * f64::from(side) > 0.0;
+                    if ahead > 0.0
+                        && ahead <= (t1 - t0)
+                        && outward
+                        && best.is_none_or(|b| ahead < b.0)
+                    {
+                        best = Some((ahead, side));
+                    }
+                }
+            }
+            best.map_or(0, |b| b.1)
+        }
+        _ => {
+            let parts = spline_parts(c).expect("a spline");
+            let (g, least) = spline_values(parts, o, n);
+            let band = tau * least;
+            let mut spans: Vec<_> = spline_spans(parts, (t0, t1)).collect();
+            if from_end {
+                spans.reverse();
+            }
+            for (i, shift, a, z) in spans {
+                let mut bern = span_bernstein(parts, &g, i, (a - shift, z - shift));
+                if from_end {
+                    bern.reverse();
+                }
+                if let Some(side) = bernstein_exit(&bern, band, 0) {
+                    return side;
+                }
+            }
+            0
+        }
+    }
+}
+
+/// The sign of the polynomial `b` where, from the start of its interval, it first gets more than
+/// `band` from zero; `None` where it stays within the band throughout. A piece whose coefficients
+/// keep within the band never leaves it; otherwise the first half is searched before the second,
+/// down to a piece no wider than rounding, where its larger end decides.
+fn bernstein_exit(b: &[f64], band: f64, depth: u32) -> Option<i8> {
+    let (least, most) = hull(b);
+    if least >= -band && most <= band {
+        return None;
+    }
+    let last = b.len() - 1;
+    if depth >= 52 {
+        let at = if b[0].abs() > band { b[0] } else { b[last] };
+        return (at.abs() > band).then_some(if at > 0.0 { 1 } else { -1 });
+    }
+    let (left, right) = bernstein_split(b, 0.5);
+    bernstein_exit(&left, band, depth + 1).or_else(|| bernstein_exit(&right, band, depth + 1))
+}
+
+/// Where an edge of face `f` crosses one of its seams away from the seam's ends and the face's
+/// poles, with the two edges. The face's parameters stop at the seam, a period apart on its
+/// two sides, so a boundary that runs on over it leaves its loops covering the surface beyond
+/// twice or not at all, though they close and its integrals add up. Each edge is solved against
+/// the plane the seam lies in ([`seam_plane`]), and each crossing kept that lies on the seam
+/// itself; on a surface with no such plane the edge's curve is intersected with the seam's.
+/// A vertex of the boundary inside the seam is a crossing where the edges either side of it
+/// leave it to either side of the plane ([`side_leaving`]). Crossing the seam's line beyond the
+/// seam edge's ends is no fault: the face's cut may run on along another edge it runs twice, off
+/// that line, as a band cut along a helix does.
+fn seam_crossing(b: &Brep, f: FaceId) -> Option<(EdgeId, EdgeId, Point3)> {
+    let seams = own_seams(b, f);
+    if seams.is_empty() {
+        return None;
+    }
+    let seam_ids: Vec<EdgeId> = seams.iter().map(|&(s, _)| s).collect();
+    let surface = &b.face(f).surface;
+    let mut poles: Vec<Point3> = Vec::new();
+    let mut edges: Vec<EdgeId> = Vec::new();
+    for &lp in &b.face(f).loops {
+        for &c in &b.lp(lp).coedges {
+            let e = b.coedge(c).edge;
+            let edge = b.edge(e);
+            if edge.is_degenerate() {
+                poles.push(b.vertex(edge.start).point);
+            } else if !seam_ids.contains(&e) && !edges.contains(&e) {
+                edges.push(e);
+            }
+        }
+    }
+    // Each edge's box, a spline's from all its control points, which hold it.
+    let mut boxes: Vec<Option<Aabb>> = vec![None; edges.len()];
+    let edge_box = |e: EdgeId| {
+        let edge = b.edge(e);
+        let curve = edge.curve.as_ref().expect("kept above");
+        match curve {
+            Curve::BSpline(_) | Curve::Intersection(_) | Curve::Nurbs(_) => {
+                let points = match curve {
+                    Curve::Nurbs(n) => n.control_points(),
+                    _ => curve.spline().expect("a spline").control_points(),
+                };
+                let mut bb = Aabb::EMPTY;
+                for &q in points {
+                    bb.add(q);
+                }
+                bb
+            }
+            _ => curve.bbox(edge.range.0, edge.range.1),
+        }
+    };
+    for &(s, uv) in &seams {
+        let seam = b.edge(s);
+        let line = seam.curve.as_ref().expect("a seam has a curve");
+        let ends = [seam.start, seam.end];
+        let slack = Vec3::new(1.0, 1.0, 1.0) * (b.edge_tolerance(s) + tol::LINEAR);
+        let tight = line.bbox(seam.range.0, seam.range.1);
+        let near_box = Aabb {
+            min: tight.min - slack,
+            max: tight.max + slack,
+        };
+        let mut plane = None;
+        for (k, &e) in edges.iter().enumerate() {
+            let bb = *boxes[k].get_or_insert_with(|| edge_box(e));
+            if !boxes_meet(&bb, &near_box) {
+                continue;
+            }
+            let plane = *plane.get_or_insert_with(|| seam_plane(surface, line, seam.range, uv));
+            let edge = b.edge(e);
+            let curve = edge.curve.as_ref().expect("kept above");
+            let own = [edge.start, edge.end];
+            let near = b.edge_tolerance(e) + b.edge_tolerance(s) + tol::LINEAR;
+            let at_end = |p: Point3| {
+                ends.iter()
+                    .chain(&own)
+                    .any(|&v| b.vertex(v).point.dist(p) <= b.vertex_tolerance(v))
+                    || poles.iter().any(|q| q.dist(p) <= tol::LINEAR)
+            };
+            let points: Vec<Point3> = match plane {
+                Some((o, n, side)) => {
+                    plane_crossings(curve, edge.range, (o, n), tol::LINEAR, &near_box)
+                        .into_iter()
+                        .map(|t| curve.eval(t))
+                        .filter(|&p| {
+                            let beside = side.is_none_or(|(a, out)| (p - a).dot(out) > tol::LINEAR);
+                            if !beside || !in_box(p, &near_box) {
+                                return false;
+                            }
+                            let t = line.project(p, seam.range.0, seam.range.1);
+                            t > seam.range.0 && t < seam.range.1 && line.eval(t).dist(p) <= near
+                        })
+                        .collect()
+                }
+                None => curve_curve(curve, edge.range, line, seam.range),
+            };
+            if let Some(p) = points.into_iter().find(|&p| !at_end(p)) {
+                return Some((e, s, p));
+            }
+        }
+        // A vertex of the boundary inside the seam, its edges leaving it to either side.
+        for &lp in &b.face(f).loops {
+            let cs = &b.lp(lp).coedges;
+            for (k, &into) in cs.iter().enumerate() {
+                let out = cs[(k + 1) % cs.len()];
+                let v = b.coedge_end(into);
+                let point = b.vertex(v).point;
+                if ends.contains(&v) || !in_box(point, &near_box) {
+                    continue;
+                }
+                let either = [b.coedge(into).edge, b.coedge(out).edge];
+                let plain = |e: &EdgeId| !seam_ids.contains(e) && !b.edge(*e).is_degenerate();
+                let within = b.vertex_tolerance(v);
+                let off = |w: &VertexId| b.vertex(*w).point.dist(point) > b.vertex_tolerance(*w);
+                if !either.iter().all(plain)
+                    || poles.iter().any(|q| q.dist(point) <= within)
+                    || !ends.iter().all(off)
+                {
+                    continue;
+                }
+                let Some((o, n, side)) =
+                    *plane.get_or_insert_with(|| seam_plane(surface, line, seam.range, uv))
+                else {
+                    continue;
+                };
+                let in_plane = n.dot(point - o).abs() <= within
+                    && side.is_none_or(|(a, out)| (point - a).dot(out) > tol::LINEAR);
+                if !in_plane {
+                    continue;
+                }
+                let t = line.project(point, seam.range.0, seam.range.1);
+                let on = t > seam.range.0
+                    && t < seam.range.1
+                    && line.eval(t).dist(point) <= within + b.edge_tolerance(s);
+                if !on {
+                    continue;
+                }
+                // A coedge leaves the vertex from its start, and comes to it at its end: in its
+                // edge's own direction, that is the far end of the range where the two disagree.
+                let leaves = |c: CoedgeId, from_start: bool| {
+                    let co = b.coedge(c);
+                    let edge = b.edge(co.edge);
+                    let curve = edge.curve.as_ref().expect("not degenerate");
+                    side_leaving(curve, edge.range, co.reversed == from_start, (o, n), within)
+                };
+                if leaves(into, false) * leaves(out, true) < 0 {
+                    return Some((either[1], s, point));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Two faces beside each other across an empty wedge round an edge more than two faces use, where
@@ -2372,6 +3086,7 @@ mod tests {
     use super::*;
     use crate::geom::{BSpline, IntersectionCurve, Plane};
     use crate::math::{Frame, Vec3};
+    use std::f64::consts::{FRAC_PI_2, PI};
 
     #[test]
     fn a_loop_with_a_slit_off_its_boundary_still_runs_its_face_s_way() {
@@ -3529,5 +4244,253 @@ mod tests {
             issues.iter().any(|m| m.starts_with("solid 0 has volume -")),
             "{issues:?}"
         );
+    }
+
+    /// A ball of radius 10 with a cone on it, tangent to it along a circle of radius 8 at 6 from
+    /// the centre, about the axis at the longitude `axis` in the equator, the apex 100/6 out
+    /// along it, built by hand. The ball's face keeps its whole seam, the meridian in the half
+    /// plane y = 0, x > 0, and the circle cuts a hole in it, shared with the cone. The circle,
+    /// a `Circle` or, when `spline`, the same circle as a rational quadratic spline, starts at
+    /// the angle `start` from the ball's axis round the cone's. Its angular radius is acos 0.6,
+    /// so it reaches past the seam where the axis lies nearer the seam than that; a circle is
+    /// parted into edges at the angles `splits`. The hole's
+    /// loop closes in the ball's parameters, so the face's integrals are those of the ball less
+    /// its cap: the solid holds the ball less the cap of height 4 and the cone, under their
+    /// skins.
+    fn ice_cream(axis: f64, start: f64, spline: bool, splits: &[f64]) -> Brep {
+        use crate::geom::{Circle, Cone, Line, NurbsCurve};
+        use crate::topo::{CoedgeSpec, PCurve};
+        use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, TAU};
+        let ball = crate::primitive::sphere(&Frame::WORLD, 10.0, "ball").unwrap();
+        let mut b = Brep::new();
+        let mut vs = HashMap::new();
+        let mut vertex = |b: &mut Brep, v: VertexId| {
+            *vs.entry(v)
+                .or_insert_with(|| b.add_vertex(ball.vertex(v).point))
+        };
+        let mut es = HashMap::new();
+        for e in ball.edge_ids() {
+            let edge = ball.edge(e).clone();
+            let (s, t) = (vertex(&mut b, edge.start), vertex(&mut b, edge.end));
+            let x = match edge.curve {
+                Some(c) => b.add_edge(c, edge.range, s, t),
+                None => b.add_degenerate_edge(s, edge.range),
+            };
+            es.insert(e, x);
+        }
+        let [skin] = ball.face_ids().collect::<Vec<_>>()[..] else {
+            unreachable!("a ball has one face")
+        };
+        let face = ball.face(skin);
+        let nf = b.add_face(face.surface.clone(), face.reversed, face.names.clone());
+        for &lp in &face.loops {
+            let specs = ball
+                .lp(lp)
+                .coedges
+                .iter()
+                .map(|&c| {
+                    let co = ball.coedge(c);
+                    CoedgeSpec {
+                        edge: es[&co.edge],
+                        reversed: co.reversed,
+                        pcurve: co.pcurve.clone(),
+                    }
+                })
+                .collect();
+            b.add_loop(nf, specs);
+        }
+        let a = Vec3::new(axis.cos(), axis.sin(), 0.0);
+        let x = Vec3::Z * start.cos() + a.cross(Vec3::Z) * start.sin();
+        let y = a.cross(x);
+        let centre = a * 6.0;
+        let first = centre + x * 8.0;
+        let at = b.add_vertex(first);
+        let apex = b.add_vertex(a * (100.0 / 6.0));
+        let rim = if spline {
+            let corners = [(1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (-1.0, 1.0), (-1.0, 0.0)];
+            let corners =
+                corners
+                    .into_iter()
+                    .chain([(-1.0, -1.0), (0.0, -1.0), (1.0, -1.0), (1.0, 0.0)]);
+            let ctrl = corners
+                .map(|(i, j)| centre + (x * i + y * j) * 8.0)
+                .collect();
+            let weights = (0..9)
+                .map(|k| if k % 2 == 1 { FRAC_1_SQRT_2 } else { 1.0 })
+                .collect();
+            let knots = [0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 4.0];
+            let knots = knots.map(|k| k * FRAC_PI_2).to_vec();
+            let circle = NurbsCurve::new(2, knots, ctrl, Some(weights)).unwrap();
+            Curve::Nurbs(Box::new(circle))
+        } else {
+            let frame = Frame::new(centre, a, x).unwrap();
+            Curve::Circle(Circle { frame, radius: 8.0 })
+        };
+        let mut cuts = vec![0.0];
+        cuts.extend_from_slice(splits);
+        cuts.push(TAU);
+        let mut corners = vec![at];
+        corners.extend(splits.iter().map(|&t| b.add_vertex(rim.eval(t))));
+        corners.push(at);
+        let rims: Vec<EdgeId> = (0..cuts.len() - 1)
+            .map(|k| {
+                b.add_edge(
+                    rim.clone(),
+                    (cuts[k], cuts[k + 1]),
+                    corners[k],
+                    corners[k + 1],
+                )
+            })
+            .collect();
+        // The hole runs the circle backwards from its start, its longitude unwrapped as it goes.
+        let longitude = |p: Point3| p.y.atan2(p.x);
+        let mut u = longitude(first).rem_euclid(TAU);
+        let mut last = TAU;
+        let mut hole = Vec::new();
+        for k in (0..rims.len()).rev() {
+            let to = cuts[k + 1];
+            for step in 1..=256 {
+                let t = last + (to - last) * step as f64 / 256.0;
+                let back = last + (to - last) * (step - 1) as f64 / 256.0;
+                let turn = longitude(rim.eval(t)) - longitude(rim.eval(back));
+                u += turn - TAU * (turn / TAU).round();
+            }
+            last = to;
+            let p = rim.eval(to);
+            hole.push(CoedgeSpec {
+                edge: rims[k],
+                reversed: true,
+                pcurve: PCurve::Projected {
+                    seed: Vec2::new(u, (p.z / 10.0).asin()),
+                },
+            });
+        }
+        b.add_loop(nf, hole);
+        // The cone about the axis, its frame's z pointing away from the apex, through the rim at
+        // v = 0 with u = −t, and its apex at v = −40/3.
+        let cone = Surface::Cone(Cone {
+            frame: Frame::new(centre, -a, x).unwrap(),
+            radius: 8.0,
+            half_angle: 0.75f64.atan(),
+        });
+        let tip = -40.0 / 3.0;
+        let (line, len) = Line::through(a * (100.0 / 6.0), first).unwrap();
+        let side = b.add_edge(Curve::Line(line), (0.0, len), apex, at);
+        let point = b.add_degenerate_edge(apex, (0.0, TAU));
+        let cf = b.add_face(cone, false, []);
+        let affine = |origin: Vec2, dir: Vec2| PCurve::Affine { origin, dir };
+        let around = |k: usize| {
+            if spline {
+                PCurve::Projected {
+                    seed: Vec2::new(TAU - cuts[k], 0.0),
+                }
+            } else {
+                affine(Vec2::new(TAU, 0.0), Vec2::new(-1.0, 0.0))
+            }
+        };
+        let mut specs = vec![
+            CoedgeSpec {
+                edge: point,
+                reversed: false,
+                pcurve: affine(Vec2::new(0.0, tip), Vec2::new(1.0, 0.0)),
+            },
+            CoedgeSpec {
+                edge: side,
+                reversed: false,
+                pcurve: affine(Vec2::new(TAU, tip), Vec2::new(0.0, 1.0)),
+            },
+        ];
+        specs.extend(rims.iter().enumerate().map(|(k, &edge)| CoedgeSpec {
+            edge,
+            reversed: false,
+            pcurve: around(k),
+        }));
+        specs.push(CoedgeSpec {
+            edge: side,
+            reversed: true,
+            pcurve: affine(Vec2::new(0.0, tip), Vec2::new(0.0, 1.0)),
+        });
+        b.add_loop(cf, specs);
+        let shell = b.add_shell(vec![nf, cf]);
+        b.add_solid_of(vec![shell], 1);
+        b.pair_radial();
+        b
+    }
+
+    /// The issues `check` finds in [`ice_cream`], once its volume and area are seen to be the
+    /// ball's less the cap and the cone's.
+    fn ice_cream_issues(axis: f64, start: f64, spline: bool, splits: &[f64]) -> Vec<Issue> {
+        use std::f64::consts::PI;
+        let b = ice_cream(axis, start, spline, splits);
+        let (cap, cone) = (
+            PI * 16.0 * 26.0 / 3.0,
+            PI * 64.0 * (40.0 / 3.0 - 8.0 / 3.0) / 3.0,
+        );
+        let volume = 4000.0 / 3.0 * PI - cap + cone;
+        let area = 400.0 * PI - 80.0 * PI + PI * 8.0 * 40.0 / 3.0;
+        let (v, a) = (measure::volume(&b), measure::area(&b));
+        assert!((v - volume).abs() <= 1e-9 * volume, "{v} vs {volume}");
+        assert!((a - area).abs() <= 1e-9 * area, "{a} vs {area}");
+        check(&b)
+    }
+
+    fn crosses_seam(issues: &[Issue]) -> bool {
+        issues
+            .iter()
+            .any(|i| i.message.contains("crosses its own seam"))
+    }
+
+    #[test]
+    fn a_face_whose_boundary_crosses_its_own_seam_beside_a_tangent_face_is_reported() {
+        // The cone along x, the circle from (6, 8, 0) through (6, 0, ±8) on the seam.
+        let issues = ice_cream_issues(0.0, -FRAC_PI_2, false, &[]);
+        assert!(crosses_seam(&issues), "{issues:?}");
+    }
+
+    /// The angular radius of [`ice_cream`]'s circle about its axis, seen from the ball's centre.
+    const RIM: f64 = 0.927_295_218_001_612_2;
+
+    #[test]
+    fn a_rim_that_reaches_over_the_seam_and_back_within_a_sixteenth_of_it_is_reported() {
+        // The axis 0.005 short of the circle's angular radius from the seam: the circle reaches
+        // 0.05 over it about the equator, from 3.194 to 3.482 round it, both inside one
+        // sixteenth of its turn, between π and 9π/8, where the circle starts at −9π/16.
+        let issues = ice_cream_issues(RIM - 0.005, -9.0 * PI / 16.0, false, &[]);
+        assert!(crosses_seam(&issues), "{issues:?}");
+    }
+
+    #[test]
+    fn a_spline_rim_that_grazes_over_the_seam_is_reported() {
+        // The same circle as a rational spline, its axis 1e-4 short, so it reaches 0.001 over
+        // the seam between the angles 3.318 and 3.358, inside the spline's parameters from π
+        // to 9π/8, which reach the angles π to 3.519.
+        let issues = ice_cream_issues(RIM - 1e-4, -9.0 * PI / 16.0, true, &[]);
+        assert!(crosses_seam(&issues), "{issues:?}");
+    }
+
+    #[test]
+    fn a_rim_that_touches_the_seam_without_crossing_it_is_not_reported() {
+        // The axis at the circle's angular radius: the circle touches the seam at (10, 0, 0)
+        // and stays on one side, as a circle or as a spline.
+        for spline in [false, true] {
+            let issues = ice_cream_issues(RIM, -9.0 * PI / 16.0, spline, &[]);
+            assert!(!crosses_seam(&issues), "spline {spline}: {issues:?}");
+        }
+    }
+
+    #[test]
+    fn a_rim_that_crosses_the_seam_at_its_vertices_is_reported() {
+        // The first case's circle parted where it crosses the seam, at (6, 0, ±8): no edge
+        // crosses the seam inside itself, and the loop crosses it at two of its vertices.
+        let issues = ice_cream_issues(0.0, -FRAC_PI_2, false, &[FRAC_PI_2, 1.5 * PI]);
+        assert!(crosses_seam(&issues), "{issues:?}");
+    }
+
+    #[test]
+    fn a_rim_that_touches_the_seam_at_a_vertex_and_turns_back_is_not_reported() {
+        // The circle that touches the seam at (10, 0, 0), parted there: both edges leave the
+        // vertex to the same side.
+        let issues = ice_cream_issues(RIM, -9.0 * PI / 16.0, false, &[17.0 * PI / 16.0]);
+        assert!(!crosses_seam(&issues), "{issues:?}");
     }
 }
