@@ -328,6 +328,7 @@ fn pole_param(
             Surface::Sphere(x) => Some(x.frame.z),
             Surface::Cone(x) => Some(x.frame.z),
             Surface::Torus(x) => Some(x.frame.z),
+            Surface::Revolution(x) => x.axis.unit(),
             _ => None,
         };
         let across = |v: Vec3, z: Vec3| v - z * v.dot(z);

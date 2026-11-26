@@ -265,6 +265,7 @@ fn pole_rate(
         Surface::Sphere(x) => x.frame.z,
         Surface::Cone(x) => x.frame.z,
         Surface::Torus(x) => x.frame.z,
+        Surface::Revolution(x) => x.axis.unit()?,
         _ => return None,
     };
     if su.norm() > tol::LINEAR || sv.norm() <= tol::LINEAR {

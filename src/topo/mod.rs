@@ -783,18 +783,35 @@ impl Brep {
     }
 
     /// Which way `u` turns, by half a period, where a coedge of face `f` passes through the pole of
-    /// its sphere that the parameters `at` lie beside; 0 on other surfaces. The face's loops,
-    /// running with it on their left, cover the pole's line in the parameter plane once over the
-    /// longitudes the face takes there. Where no loop has an edge at the pole, the coedge alone
+    /// its sphere or surface of revolution that the parameters `at` lie beside; 0 on other
+    /// surfaces. The face's loops, running with it on their left, cover the pole's line in the
+    /// parameter plane once over the longitudes the face takes there. Where no loop has an edge at the pole, the coedge alone
     /// runs across those, as the face's outline does along the top of its rectangle; where one
     /// runs the pole's whole line, the coedge runs back across the longitudes the face lacks.
     fn past_pole(&self, f: FaceId, at: Vec2) -> f64 {
         let face = self.face(f);
-        let Surface::Sphere(s) = &face.surface else {
-            return 0.0;
+        let (pole, up) = match &face.surface {
+            Surface::Sphere(s) => {
+                let up = at.y > 0.0;
+                (
+                    s.frame.origin + s.frame.z * if up { s.radius } else { -s.radius },
+                    up,
+                )
+            }
+            // A revolution's poles are where its curve meets the axis; the one `at` lies beside
+            // closes the face's `v` above it or below.
+            Surface::Revolution(r) => {
+                let period = r.curve.period();
+                let near = |p: f64| period.map_or(p, |w| p + w * ((at.y - p) / w).round());
+                let poles = crate::geom::revolution_poles(r).into_iter().map(near);
+                let Some(v) = poles.min_by(|a, b| (a - at.y).abs().total_cmp(&(b - at.y).abs()))
+                else {
+                    return 0.0;
+                };
+                (r.curve.eval(v), at.y <= v)
+            }
+            _ => return 0.0,
         };
-        let up = at.y > 0.0;
-        let pole = s.frame.origin + s.frame.z * if up { s.radius } else { -s.radius };
         let lined = face.loops.iter().any(|&lp| {
             self.lp(lp).coedges.iter().any(|&c| {
                 let e = self.edge(self.coedge(c).edge);

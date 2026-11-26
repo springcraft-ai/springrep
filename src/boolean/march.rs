@@ -398,6 +398,18 @@ fn stalled_onto(
         .max_by(|x, y| (*x - p).dot(t).total_cmp(&(*y - p).dot(t)))
 }
 
+/// Whether surface `s` comes to a sharp point at `uv`: a line of `u` drawn to a point there,
+/// along which its normal turns, as at a cone's apex or where a turned curve meets the axis at an
+/// angle. Where the curve meets the axis square, as at a sphere's pole, the normal is the axis
+/// all along the line, and the surface is smooth.
+fn sharp(s: &Surface, uv: Vec2) -> bool {
+    s.line_is_point(uv, false)
+        && (1..4).any(|k| {
+            let u = uv.x + std::f64::consts::FRAC_PI_2 * k as f64;
+            s.normal(uv.x, uv.y).cross(s.normal(u, uv.y)).norm() > tol::TANGENT
+        })
+}
+
 fn branch(
     a: &Surface,
     b: &Surface,
@@ -407,13 +419,23 @@ fn branch(
     known: &[Point3],
     crossings: &mut Vec<Point3>,
 ) -> Branch {
-    let (fwd, closed, end) = walk(a, b, region, p0, 1.0, h_max, known);
+    // A loop back to a seed where a surface comes to a sharp point has a corner there, which a
+    // closed fit would round off: the branch starts and ends at the seed instead.
+    let tip = sharp(a, p0.1.0) || sharp(b, p0.1.1);
+    let (mut fwd, closed, end) = walk(a, b, region, p0, 1.0, h_max, known);
     crossings.extend(end);
     if closed {
-        return Branch::new(fwd, closed, Vec::new());
+        if tip {
+            fwd.push(p0);
+        }
+        return Branch::new(fwd, closed && !tip, Vec::new());
     }
-    let (back, _, back_end) = walk(a, b, region, p0, -1.0, h_max, known);
+    let (mut back, back_closed, back_end) = walk(a, b, region, p0, -1.0, h_max, known);
     crossings.extend(back_end);
+    if back_closed && tip {
+        back.push(p0);
+        return Branch::new(back, false, Vec::new());
+    }
     let mut all: Vec<(Point3, UvPair)> = back.into_iter().skip(1).rev().collect();
     all.extend(fwd);
     Branch::new(all, false, end.into_iter().chain(back_end).collect())

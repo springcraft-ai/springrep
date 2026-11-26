@@ -2058,6 +2058,16 @@ impl<'a> Work<'a> {
         points.query(&bb, &mut near);
         near.extend(indexed..self.pool.len());
         near.sort_unstable();
+        // A loop traced through a sharp tip, where its two branches meet at a corner, starts and
+        // ends there; a smooth loop's ends are one point of it.
+        let corner = {
+            let (a, b) = (
+                curve.d1(base.range.0).1.unit(),
+                curve.d1(base.range.1).1.unit(),
+            );
+            a.zip(b)
+                .is_some_and(|(a, b)| a.cross(b).norm() > tol::TANGENT || a.dot(b) < 0.0)
+        };
         let mut out: Vec<(f64, usize, f64)> = Vec::new();
         for vi in near {
             let p = self.pool[vi];
@@ -2072,14 +2082,18 @@ impl<'a> Work<'a> {
             if d <= within || (d <= GRAZE_REACH && self.branch_point(cut, vi, d)) {
                 out.push((t, vi, d));
                 // A curve that crosses itself, as where a plane cuts a swept sheet trimmed where
-                // it runs into itself, passes such a vertex twice.
+                // it runs into itself, passes such a vertex twice, as does a loop at its corner.
                 let gap = 1e-3 * (base.range.1 - base.range.0);
                 for (lo, hi) in [(base.range.0, t - gap), (t + gap, base.range.1)] {
                     if hi - lo <= gap {
                         continue;
                     }
                     let (d2, t2) = csi::curve_distance(curve, (lo, hi), p);
-                    if d2 <= within && t2 - lo > 0.5 * gap && hi - t2 > 0.5 * gap {
+                    let from =
+                        t2 - lo > 0.5 * gap || (corner && lo == base.range.0 && base.v0.is_none());
+                    let to =
+                        hi - t2 > 0.5 * gap || (corner && hi == base.range.1 && base.v1.is_none());
+                    if d2 <= within && from && to {
                         out.push((t2, vi, d2));
                     }
                 }
@@ -2976,7 +2990,10 @@ pub(crate) fn split_poles(
             }
             let v = tr.v0;
             let (lo, hi) = (tr.t0.min(tr.t1), tr.t0.max(tr.t1));
-            let margin = 1e-9 * (hi - lo);
+            // Along a pole the parameter is the angle a curve leaves it at: two closer than the
+            // tangent tolerance leave it as one, and a cut's, read off a fitted curve's tangent,
+            // is good to no better.
+            let margin = (1e-9 * (hi - lo)).max(tol::TANGENT / dir.x.abs());
             let mut at: Vec<f64> = cuts
                 .iter()
                 .flat_map(|c| [(c.v0, c.uv0), (c.v1, c.uv1)])

@@ -245,6 +245,21 @@ impl Surface {
                         return if top { -l } else { l };
                     }
                 }
+                // A revolution's `su` is `z × (p − o)`, which off its pole grows as `(z × sv)·(v −
+                // v_pole)`: the normal is the limit of `(z × sv) × sv` taken from inside the curve's
+                // domain, not from past its end, where the curve runs on across the axis.
+                if let Surface::Revolution(r) = self
+                    && let Some(z) = r.axis.unit()
+                {
+                    let (lo, hi) = r.curve.domain();
+                    let inside = if v >= hi { -1.0 } else { 1.0 };
+                    if v <= lo || v >= hi {
+                        let (_, _, sv) = self.d1(u, v);
+                        if let Some(n) = z.cross(sv).cross(sv).unit() {
+                            return n * inside;
+                        }
+                    }
+                }
                 for (du, dv) in [(0.0, 1e-6), (0.0, -1e-6), (1e-6, 0.0), (-1e-6, 0.0)] {
                     let (_, su, sv) = self.d1(u + du, v + dv);
                     if let Some(n) = su.cross(sv).unit() {
@@ -744,7 +759,11 @@ impl Meridian {
     pub(crate) fn of(s: &Revolution) -> Meridian {
         let (a, b) = finite_domain(&s.curve);
         let frame = Frame::from_axis(s.origin, s.axis).unwrap_or(Frame::WORLD);
-        let samples = curve_seeds(&s.curve, a, b);
+        // Where the curve meets the axis its distance from it turns back through zero, a kink in
+        // the meridian distance that a Newton step strays across onto the other sheet: each stretch
+        // between the poles is sampled and searched on its own.
+        let poles = super::revolution_poles(s);
+        let samples = curve_seeds_cut(&s.curve, a, b, &poles);
         let mut m = Meridian {
             frame,
             end: b,
@@ -852,10 +871,12 @@ fn meridian_newton(
         }
         let mut step = -grad / hess;
         let mut taken = false;
-        for _ in 0..8 {
+        for _ in 0..52 {
             let next = (v + step).clamp(range.0, range.1);
             let gn = gap2(next);
-            if gn < g {
+            // On the axis the distance from it turns back through zero, and a step clamped onto
+            // a pole there would hold: the halving goes on until it stops short of it.
+            if gn < g && state(next).0 > 1e-12 {
                 taken = true;
                 let done = (next - v).abs() <= 1e-15 * (1.0 + v.abs());
                 (v, g) = (next, gn);
@@ -874,8 +895,16 @@ fn meridian_newton(
 }
 
 fn curve_seeds(c: &Curve, a: f64, b: f64) -> Vec<f64> {
+    curve_seeds_cut(c, a, b, &[])
+}
+
+/// [`curve_seeds`] with the curve also cut at `more`.
+fn curve_seeds_cut(c: &Curve, a: f64, b: f64, more: &[f64]) -> Vec<f64> {
     let mut cuts = vec![a];
     cuts.extend(c.breakpoints(a, b));
+    cuts.extend(more.iter().copied().filter(|&t| t > a && t < b));
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
     cuts.push(b);
     let mut out = Vec::new();
     for w in cuts.windows(2) {

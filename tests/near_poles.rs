@@ -209,32 +209,51 @@ fn a_spindle_torus_cut_a_hair_from_its_poles_keeps_its_whole_skin() {
 
 /// `body` cut by the plane x = d into the piece past it and the rest, both in one arena: about
 /// one centre their volumes make up the whole, and their skins off the plane the whole skin.
-fn assert_halves_make_whole(
-    body: &Brep,
-    gaps: &[f64],
-    size: f64,
-    (volume, skin): (f64, f64),
-    what: &str,
-) {
+fn assert_halves_make_whole(body: &Brep, gaps: &[f64], size: f64, whole: (f64, f64), what: &str) {
     for &d in gaps {
         let cut = past_x(d, size);
-        let mut both = intersection(body, &cut).unwrap();
-        both.append(&difference(body, &cut).unwrap());
-        let flat: f64 = both
-            .face_ids()
-            .filter(|&f| matches!(both.face(f).surface, Surface::Plane(_)))
-            .map(|f| measure::face_area(&both, f))
-            .sum();
-        assert_near(
-            measure::area(&both) - flat,
-            skin,
-            &format!("{what}, gap {d}, skin"),
-        );
-        assert_near(
-            measure::volume(&both),
-            volume,
-            &format!("{what}, gap {d}, volume"),
-        );
+        assert_cut_makes_whole(body, &cut, whole, &format!("{what}, gap {d}"));
+    }
+}
+
+/// `body` cut by the half-space `cut` into the piece inside it and the rest, both in one arena:
+/// about one centre their volumes make up `volume`, and their skins off planes `skin`.
+fn assert_cut_makes_whole(body: &Brep, cut: &Brep, (volume, skin): (f64, f64), what: &str) {
+    let mut both = intersection(body, cut).unwrap();
+    both.append(&difference(body, cut).unwrap());
+    let flat: f64 = both
+        .face_ids()
+        .filter(|&f| matches!(both.face(f).surface, Surface::Plane(_)))
+        .map(|f| measure::face_area(&both, f))
+        .sum();
+    assert_near(measure::area(&both) - flat, skin, &format!("{what}, skin"));
+    assert_near(measure::volume(&both), volume, &format!("{what}, volume"));
+}
+
+/// The half-space past the plane through `at` with unit normal `n`, as a slab far larger than
+/// `size`.
+fn past(at: Vec3, n: Vec3, size: f64) -> Brep {
+    let frame = Frame::new(at, n, n.any_perpendicular()).unwrap();
+    extrude(
+        &Profile::rect(Vec2::ZERO, 8.0 * size, 8.0 * size),
+        &frame,
+        4.0 * size,
+        "past",
+    )
+    .unwrap()
+}
+
+/// [`assert_cut_makes_whole`] for planes through `pole` leaning from the axis, each turned about
+/// it: their sections run through the pole across it.
+fn assert_cut_through_pole(body: &Brep, pole: Vec3, size: f64, whole: (f64, f64), what: &str) {
+    for lean in [0.3, 1.0, 1.4] {
+        for round in [0.0, 1.0, PI / 2.0, 4.0] {
+            let flat = Vec3::new(f64::cos(round), f64::sin(round), 0.0);
+            let n = flat * f64::sin(lean) + Vec3::Z * f64::cos(lean);
+            let cut = past(pole, n, size);
+            let what = format!("{what}, through the pole, lean {lean} round {round}");
+            assert_cut_makes_whole(body, &cut, whole, &what);
+        }
     }
 }
 
@@ -276,9 +295,11 @@ fn a_lemon_cut_near_its_poles_keeps_its_whole_skin() {
     let volume =
         PI * (2.0 * h * (r * r + a * a) - 2.0 * h.powi(3) / 3.0 - 2.0 * a * (a * h + r * r * top));
     assert_measures(&lemon, volume, skin, "lemon");
-    // Cut nearer its poles the lemon's pieces are not built yet: a boolean's section through a
-    // pole of a surface turned from a circle comes out off the surface.
-    assert_halves_make_whole(&lemon, &[1e-2], 2.0 * r, (volume, skin), "lemon");
+    assert_halves_make_whole(&lemon, &GAPS, 2.0 * r, (volume, skin), "lemon");
+    for pole in [h, -h] {
+        let at = Vec3::new(0.0, 0.0, pole);
+        assert_cut_through_pole(&lemon, at, 2.0 * r, (volume, skin), "lemon");
+    }
 }
 
 /// `∫ p(t)·q(t)·r′(t) dt` over [0, 1] for cubics given by their Bézier ordinates.
@@ -337,4 +358,11 @@ fn a_spline_dome_cut_a_hair_from_its_pole_holds_what_its_profile_turns() {
     assert_near(measure::volume(&dome), volume, "dome, volume");
     let skin = measure::area(&dome) - PI * 36.0;
     assert_halves_make_whole(&dome, &GAPS, 12.0, (volume, skin), "dome");
+    assert_cut_through_pole(
+        &dome,
+        Vec3::new(0.0, 0.0, 5.0),
+        12.0,
+        (volume, skin),
+        "dome",
+    );
 }

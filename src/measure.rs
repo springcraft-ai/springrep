@@ -23,8 +23,8 @@ use std::{
 };
 
 use crate::{
-    check::{coedge_params, plane_zeros},
-    geom::{Curve, IsoLine, NurbsSurface, Patch, Revolution, Surface},
+    check::coedge_params,
+    geom::{Curve, IsoLine, NurbsSurface, Patch, Surface, revolution_poles},
     math::{Aabb, Frame, Point3, Vec2, Vec3},
     numeric::{KRONROD_7, KRONROD_15, gauss, solve2},
     threads,
@@ -72,6 +72,7 @@ fn inner_start(b: &Brep, f: FaceId) -> Option<(bool, f64, (f64, f64))> {
 /// `∫ F` along the inner parameter from `lo` to `to` at the other parameter `at`, by a Gauss rule
 /// of `order` on each smooth piece no longer than a turn, `F` given the point and `su × sv`.
 #[allow(clippy::too_many_arguments)]
+#[inline(always)]
 fn inner_rule<const K: usize>(
     s: &Surface,
     iso: Option<&IsoLine<'_>>,
@@ -356,61 +357,6 @@ fn near_poles(s: &Surface, (lo, hi): (f64, f64)) -> Vec<f64> {
     poles.sort_by(f64::total_cmp);
     poles.dedup_by(|a, b| (*a - *b).abs() <= 1e-12);
     poles
-}
-
-/// The parameters of a surface of revolution's curve where it meets the axis: its poles. The
-/// curve lies in a plane through the axis, and its distance from the axis there is its distance
-/// from the plane through the axis square to that one, which [`plane_zeros`] solves exactly:
-/// a line and a conic in closed form, a spline by its control values' bounds, where it crosses
-/// the axis or touches it. None for a curve off every plane through the axis.
-fn revolution_poles(r: &Revolution) -> Vec<f64> {
-    let Some(z) = r.axis.unit() else {
-        return Vec::new();
-    };
-    let o = r.origin;
-    let points: Vec<Point3> = match &r.curve {
-        Curve::Line(l) => vec![l.origin, l.origin + l.dir],
-        Curve::Circle(k) => {
-            let f = &k.frame;
-            vec![
-                f.origin + f.x * k.radius,
-                f.origin + f.y * k.radius,
-                f.origin - f.x * k.radius,
-            ]
-        }
-        Curve::Ellipse(k) => {
-            let f = &k.frame;
-            vec![
-                f.origin + f.x * k.major,
-                f.origin + f.y * k.minor,
-                f.origin - f.x * k.major,
-            ]
-        }
-        Curve::Nurbs(n) => n.control_points().to_vec(),
-        other => other
-            .spline()
-            .map_or(Vec::new(), |s| s.control_points().to_vec()),
-    };
-    let off = |p: Point3| (p - o) - z * (p - o).dot(z);
-    let Some(far) = points
-        .iter()
-        .map(|&p| off(p))
-        .max_by(|a, b| a.norm().total_cmp(&b.norm()))
-    else {
-        return Vec::new();
-    };
-    let Some(out) = far.unit() else {
-        return Vec::new();
-    };
-    // Three points of a conic, or a spline's control points, fix its plane, or bound it.
-    let normal = z.cross(out);
-    if points
-        .iter()
-        .any(|&p| normal.dot(p - o).abs() > crate::tol::LINEAR)
-    {
-        return Vec::new();
-    }
-    plane_zeros(&r.curve, r.curve.domain(), (o, out), crate::tol::LINEAR)
 }
 
 /// The integrals along `v` from `from` to `v` of what the area and volume integrands of a cone,
@@ -757,7 +703,7 @@ fn coedge_integral<const K: usize>(
         cuts.sort_by(f64::total_cmp);
     }
     cuts.push(t1);
-    let sum = match iso_line(table) {
+    let mut sum = match iso_line(table) {
         Some((v_fixed, at)) => {
             // Along a parameter line of the surface the integral runs along that parameter
             // between the edge's two ends, and no point of the edge is projected. Beside a cusp of
@@ -801,17 +747,60 @@ fn coedge_integral<const K: usize>(
         // a projected one turns it by about the step over its distance from the pole at each
         // step of its table. Turning less than a quarter radian a step, it passes the pole at
         // four steps or more, and the turn spreads over an eighth of the edge, which the rules
-        // resolve.
+        // resolve. One that ends on a pole has no `u` of its own there, only the one its way in
+        // gives it, and the inner integral along `u` takes that as exact.
         None => match polar.filter(|p| {
+            let at_pole =
+                |uv: Option<&Vec2>| uv.is_some_and(|&uv| surface.line_is_point(uv, false));
             !inner_v
                 && !p.poles.is_empty()
                 && matches!(coedge.pcurve, PCurve::Projected { .. })
-                && table.windows(2).any(|w| (w[1].x - w[0].x).abs() > 0.25)
+                && (table.windows(2).any(|w| (w[1].x - w[0].x).abs() > 0.25)
+                    || at_pole(table.first())
+                    || at_pole(table.last()))
         }) {
             Some(polar) => past_poles(polar, &uv_and_rate, table, (a, z), cuts, tol, rel),
             None => integrate_pieces(&f, &cuts, tol, rel),
         },
     };
+    // A fitted curve ends within the tolerance of its vertices, not on them, and the feet of its
+    // ends miss the vertices' feet, where the coedges beside it end, by as much: the straight
+    // steps between them close the loop the face's integral runs round, through the same points
+    // for every face and every solid that shares the vertex.
+    if matches!(coedge.pcurve, PCurve::Projected { .. }) && iso_line(table).is_none() {
+        let step = |p: Vec2, q: Vec2| -> [f64; K] {
+            let d = q - p;
+            let mut out = [0.0; K];
+            for s in [0.5 - 0.5 / 3f64.sqrt(), 0.5 + 0.5 / 3f64.sqrt()] {
+                let uv = p + d * s;
+                let g = if inner_v {
+                    inner(uv.x, uv.y).map(|g| -g * d.x)
+                } else {
+                    inner(uv.y, uv.x).map(|g| g * d.y)
+                };
+                for i in 0..K {
+                    out[i] += 0.5 * g[i];
+                }
+            }
+            out
+        };
+        let curve = edge.curve.as_ref().expect("projected pcurves have curves");
+        // A curve that ends on its vertex has the vertex's foot there already.
+        let gap = |t: f64, v: VertexId| -> Option<(Vec2, Vec2)> {
+            let (p, q) = (curve.eval(t), b.vertex(v).point);
+            (p != q).then(|| {
+                let at = uv_and_rate(t).0;
+                (at, surface.project_near(q, at))
+            })
+        };
+        let into = gap(t0, edge.start).map(|(at, foot)| step(foot, at));
+        let out_of = gap(t1, edge.end).map(|(at, foot)| step(at, foot));
+        for g in [into, out_of].into_iter().flatten() {
+            for i in 0..K {
+                sum[i] += g[i];
+            }
+        }
+    }
     if coedge.reversed {
         sum.map(|x| -x)
     } else {

@@ -503,6 +503,13 @@ pub(crate) fn curve_surface_in(
                 range,
             );
         }
+        // A spline's distance from a plane is a spline of its control points' distances, whose
+        // zeros its Bernstein pieces find exactly.
+        (Curve::BSpline(_) | Curve::Intersection(_) | Curve::Nurbs(_), Surface::Plane(p)) => {
+            let (ts, on_surface) =
+                crate::geom::spline_plane_hits(c, range, (p.frame.origin, p.frame.z), tol::LINEAR);
+            Hits { ts, on_surface }
+        }
         (Curve::Circle(ci), Surface::Cylinder(cyl))
             if ci.frame.z.cross(cyl.frame.z).norm() <= tol::ANGULAR =>
         {
