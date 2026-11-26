@@ -12,13 +12,14 @@ use springrep::{
     boolean::unify,
     check,
     edit::{self, Wall},
-    geom::Surface,
+    geom::{Curve, Surface},
     math::{Frame, Vec2, Vec3},
     measure,
     pick::faces_named,
     profile::{NamedSegment, Profile, ProfileLoop, Segment},
     sweep::{extrude, revolve},
-    topo::{Brep, FaceId},
+    tol,
+    topo::{Brep, FaceId, FaceName},
 };
 
 fn up(z: f64) -> Frame {
@@ -352,4 +353,89 @@ fn a_drafted_bore_widens_along_the_pull() {
         "{}",
         measure::volume(&b)
     );
+}
+
+fn shell_at_a_torus_cylinder_join(side: Wall, wall: f64) {
+    let (width, height, corner, rim) = (20.0, 10.0, 3.0, 2.0);
+    let b = extrude(
+        &Profile::rect(Vec2::ZERO, width, width),
+        &Frame::WORLD,
+        height,
+        "block",
+    )
+    .unwrap();
+    let edge = measure::edge_at(&b, Vec3::new(width / 2.0, width / 2.0, height / 2.0))
+        .unwrap()
+        .0;
+    let b = springrep::blend::fillet_edges(&b, &[edge], corner, "corner").unwrap();
+    let top = *picked(&b, &["block.end"]).first().unwrap();
+    let edges: Vec<_> = b
+        .lp(b.face(top).loops[0])
+        .coedges
+        .iter()
+        .map(|&c| b.coedge(c).edge)
+        .collect();
+    let b = springrep::blend::fillet_edges(&b, &edges, rim, "rim").unwrap();
+
+    // At inward distance d the horizontal section is a square of side width − 2d with
+    // one corner of radius corner − d. Along the rim d grows by r − √(r² − z²),
+    // for z in [0, r]. Its first two moments are r²(1 − π/4) and r³(5/3 − π/2).
+    let cut = 1.0 - PI / 4.0;
+    let volume = |d: f64| {
+        let (w, c, r) = (width - 2.0 * d, corner - d, rim - d);
+        let area = w * w - cut * c * c;
+        let area_slope = -4.0 * w + 2.0 * cut * c;
+        area * (height - d)
+            + area_slope * r * r * cut
+            + (4.0 - cut) * r.powi(3) * (5.0 / 3.0 - PI / 2.0)
+    };
+    let volume_tolerance = tol::LINEAR * (2.0 * width * width + 4.0 * width * height);
+    let original_volume = volume(0.0);
+    assert!((measure::volume(&b) - original_volume).abs() <= volume_tolerance);
+
+    let open: Vec<_> = picked(&b, &["block.start"]).into_iter().collect();
+    let shell = edit::shell(&b, &open, wall, side, "wall").unwrap();
+    let issues = check::check(&shell);
+    assert!(issues.is_empty(), "{issues:?}");
+    let (expected_volume, join_radius) = match side {
+        Wall::Inward => (original_volume - volume(wall), rim - wall),
+        Wall::Outward => (volume(-wall) - original_volume, rim + wall),
+    };
+    let actual_volume = measure::volume(&shell);
+    assert!(
+        (actual_volume - expected_volume).abs() <= volume_tolerance,
+        "{actual_volume} vs {expected_volume}"
+    );
+
+    let inner = FaceName::new("wall", FaceName::INNER);
+    let mut joins = 0;
+    for edge in shell.edge_ids() {
+        let [a, b] = shell.edge_uses(edge) else {
+            continue;
+        };
+        let faces = [a, b].map(|&c| shell.face(shell.coedge_face(c)));
+        if faces.iter().all(|f| f.names.contains(&inner) == matches!(side, Wall::Inward))
+            && faces.iter().any(|f| matches!(f.surface, Surface::Torus(_)))
+            && faces.iter().any(|f| {
+                matches!(&f.surface, Surface::Cylinder(c) if c.frame.z.dot(Vec3::Z).abs() <= tol::ANGULAR)
+            })
+        {
+            joins += 1;
+            let Some(Curve::Circle(circle)) = &shell.edge(edge).curve else {
+                panic!("offset torus and cylinder share a noncircular edge {edge:?}");
+            };
+            assert!((circle.radius - join_radius).abs() <= tol::LINEAR);
+        }
+    }
+    assert!(joins > 0);
+}
+
+#[test]
+fn an_inward_shell_keeps_the_circular_join_of_a_torus_and_cylinder() {
+    shell_at_a_torus_cylinder_join(Wall::Inward, 1.5);
+}
+
+#[test]
+fn an_outward_shell_keeps_the_circular_join_of_a_torus_and_cylinder() {
+    shell_at_a_torus_cylinder_join(Wall::Outward, 0.25);
 }

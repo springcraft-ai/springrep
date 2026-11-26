@@ -1176,6 +1176,47 @@ impl<'g, 'a> Reader<'g, 'a> {
         Ok(true)
     }
 
+    /// Splits each edge of `bounds` that passes through a pole of `surface` between its vertices,
+    /// at that pole. A pole is a whole line of the parameter plane, so a loop through one leaves
+    /// it at another value of the free parameter than it arrived with (a meridian over a sphere's
+    /// pole turns by half a turn there). Only at a vertex can the loop's parameters jump, along
+    /// the pole's own line, as a degenerate edge does, and only a vertex there gives it one. An
+    /// edge is split at the parameter nearest the pole, so one that passes through the same pole
+    /// twice is split at one of the two only.
+    fn split_at_poles(&mut self, surface: &Surface, bounds: &mut [(bool, Vec<Use>)]) {
+        for pole in poles(surface) {
+            loop {
+                let mut found = None;
+                'search: for (_, uses) in bounds.iter() {
+                    for u in uses {
+                        let e = &self.raw.edges[u.edge];
+                        let (ps, pe) = (self.raw.points[e.start], self.raw.points[e.end]);
+                        if ps.dist(pole) <= tol::LINEAR || pe.dist(pole) <= tol::LINEAR {
+                            continue;
+                        }
+                        let Some((t0, t1)) = edge_range(&e.curve, ps, pe, e.start == e.end) else {
+                            continue;
+                        };
+                        let t = param_of(&e.curve, pole);
+                        let shifts = match e.curve.period() {
+                            Some(p) => [0.0, p, -p],
+                            None => [0.0; 3],
+                        };
+                        for d in shifts {
+                            let t = t + d;
+                            if t > t0 && t < t1 && e.curve.eval(t).dist(pole) <= tol::LINEAR {
+                                found = Some((u.edge, t));
+                                break 'search;
+                            }
+                        }
+                    }
+                }
+                let Some((e, t)) = found else { break };
+                self.split_edge(e, t, bounds);
+            }
+        }
+    }
+
     fn face(&mut self, id: u64, flip_face: bool) -> Result<usize> {
         let (_, a) = self.params(id, &["ADVANCED_FACE", "FACE_SURFACE"])?;
         let name = a.first().and_then(Param::as_str).unwrap_or("").to_string();
@@ -1277,6 +1318,7 @@ impl<'g, 'a> Reader<'g, 'a> {
         {
             self.capped(id, &mut surface, reversed, &mut bounds)?;
         }
+        self.split_at_poles(&surface, &mut bounds);
         let f = self.raw.faces.len();
         for (_, uses) in &bounds {
             for u in uses {
@@ -1618,6 +1660,21 @@ fn coincides_with_twin(uses: &[Use], acc: &[Track], k: usize, uvs: &[Vec2]) -> b
 fn pole_free(s: &Surface, uv: Vec2) -> (bool, bool) {
     let (_, su, sv) = s.d1(uv.x, uv.y);
     (su.norm() <= tol::LINEAR, sv.norm() <= tol::LINEAR)
+}
+
+/// The poles of `s` through which an edge of a face on it may pass between its vertices: a
+/// sphere's two, `origin ± radius·z`. The other surfaces with poles are not split for: an edge
+/// through a cone's apex passes from one nappe to the other, and the reader keeps a cone face on
+/// one; loops through the pole of a surface of revolution, a spindle torus or a spline are not yet
+/// tracked there.
+fn poles(s: &Surface) -> Vec<Point3> {
+    match s {
+        Surface::Sphere(sp) => {
+            let (o, z) = (sp.frame.origin, sp.frame.z);
+            vec![o + z * sp.radius, o - z * sp.radius]
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Whether `a` and `b` are the same point of the parameter plane, not a period apart.

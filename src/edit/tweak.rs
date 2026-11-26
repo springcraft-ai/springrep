@@ -12,7 +12,7 @@ use std::f64::consts::TAU;
 use crate::{
     Error, Result, check,
     error::invalid,
-    geom::{Cone, Curve, Cylinder, Line, Plane, Sphere, Surface, Torus},
+    geom::{Circle, Cone, Curve, Cylinder, Line, Plane, Sphere, Surface, Torus},
     math::{Frame, Point3, Transform, Vec2, Vec3},
     numeric::solve_dense,
     tol,
@@ -1037,6 +1037,36 @@ fn circle_through(a: Point3, b: Point3, c: Point3) -> Option<crate::geom::Circle
     Some(crate::geom::Circle { frame, radius })
 }
 
+fn shared_torus_meridian(a: &Surface, b: &Surface) -> Option<Curve> {
+    let (cylinder, torus) = match (a, b) {
+        (Surface::Cylinder(c), Surface::Torus(t)) | (Surface::Torus(t), Surface::Cylinder(c)) => {
+            (c, t)
+        }
+        _ => return None,
+    };
+    let axis = cylinder.frame.z;
+    let foot =
+        cylinder.frame.origin + axis * (torus.frame.origin - cylinder.frame.origin).dot(axis);
+    let local = torus.frame.to_local(foot);
+    let radial = (torus.frame.x * local.x + torus.frame.y * local.y).unit()?;
+    let centre = torus.frame.origin + radial * torus.major;
+    let normal = radial.cross(torus.frame.z);
+    // Projection onto a plane normal to the cylinder axis changes the radius by at most
+    // the tilt term. The centre and radius differences then bound the gap around the circle.
+    let gap = (centre - cylinder.frame.origin).cross(axis).norm()
+        + normal.cross(axis).norm() * torus.minor
+        + (torus.minor - cylinder.radius).abs();
+    (gap <= tol::LINEAR).then_some(Curve::Circle(Circle {
+        frame: Frame {
+            origin: centre,
+            x: radial,
+            y: torus.frame.z,
+            z: normal,
+        },
+        radius: torus.minor,
+    }))
+}
+
 /// The surface parameters of `p` on `s` near `last`, moved by whole periods to continue it.
 pub(super) fn near_uv(s: &Surface, p: Point3, last: Option<Vec2>) -> Vec2 {
     // The angle of `p` itself, which turns with it along an edge. The nearest point can lie a half
@@ -1302,24 +1332,38 @@ fn move_faces_carried(
             min: region.min - pad,
             max: region.max + pad,
         };
-        let ssi = crate::boolean::ssi::intersect(on[0], on[1], &region, &mut || vec![mid])?;
-        let crate::boolean::ssi::Ssi::Curves { curves, .. } = ssi else {
-            return unsupported("moving an edge between faces that come to coincide");
-        };
-        let Some(best) = curves
-            .iter()
-            .map(|sc| {
-                let tm = sc.curve.project(mid, sc.range.0, sc.range.1);
-                (sc.curve.eval(tm).dist(mid), sc)
+        let meridian = if matches!(old, Curve::Circle(_)) {
+            shared_torus_meridian(on[0], on[1]).filter(|c| {
+                [a, mid, z]
+                    .into_iter()
+                    .all(|p| c.eval(c.project(p, 0.0, TAU)).dist(p) <= tol::LINEAR)
             })
-            .filter(|(d, _)| *d <= 10.0 * tol::LINEAR)
-            .min_by(|p, q| p.0.total_cmp(&q.0))
-            .map(|(_, sc)| sc)
-        else {
-            return unsupported("moving an edge whose new faces meet nowhere near it");
+        } else {
+            None
         };
-        let c = &best.curve;
-        let (r0, r1) = best.range;
+        let intersections;
+        let (c, (r0, r1)) = if let Some(c) = &meridian {
+            (c, (0.0, TAU))
+        } else {
+            intersections =
+                crate::boolean::ssi::intersect(on[0], on[1], &region, &mut || vec![mid])?;
+            let crate::boolean::ssi::Ssi::Curves { curves, .. } = &intersections else {
+                return unsupported("moving an edge between faces that come to coincide");
+            };
+            let Some(best) = curves
+                .iter()
+                .map(|sc| {
+                    let tm = sc.curve.project(mid, sc.range.0, sc.range.1);
+                    (sc.curve.eval(tm).dist(mid), sc)
+                })
+                .filter(|(d, _)| *d <= 10.0 * tol::LINEAR)
+                .min_by(|p, q| p.0.total_cmp(&q.0))
+                .map(|(_, sc)| sc)
+            else {
+                return unsupported("moving an edge whose new faces meet nowhere near it");
+            };
+            (&best.curve, best.range)
+        };
         let ts = c.project(a, r0, r1);
         let te = c.project(z, r0, r1);
         let tm = c.project(mid, r0, r1);
