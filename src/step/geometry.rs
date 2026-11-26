@@ -11,6 +11,7 @@ use crate::{
     },
     math::{Frame, Point3, Transform, Vec3},
     tol,
+    topo::Brep,
 };
 
 /// The largest shape factor w₁²/(w₀w₂) of one piece of a hyperbola's arc read from a file.
@@ -59,49 +60,74 @@ fn si_prefix(p: &Param) -> f64 {
     }
 }
 
-/// A placement that may also scale, as a `CARTESIAN_TRANSFORMATION_OPERATOR_3D` can:
-/// `x ↦ rigid(scale · x)`. The scale is applied by reading the solid in scaled units, so the
-/// kernel's transforms stay rigid.
+/// The basis is orthonormal and can be left-handed. Scale is built into the solid's units before
+/// the basis and origin are applied.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Placing {
-    pub rigid: Transform,
+    basis: [Vec3; 3],
+    origin: Point3,
     pub scale: f64,
 }
 
 impl Placing {
     pub(super) const IDENTITY: Placing = Placing {
-        rigid: Transform::IDENTITY,
+        basis: [Vec3::X, Vec3::Y, Vec3::Z],
+        origin: Point3::ZERO,
         scale: 1.0,
     };
 
-    pub(super) fn rigid(t: Transform) -> Placing {
+    fn from_frame(frame: Frame, scale: f64) -> Placing {
         Placing {
-            rigid: t,
-            scale: 1.0,
+            basis: [frame.x, frame.y, frame.z],
+            origin: frame.origin,
+            scale,
+        }
+    }
+
+    fn vector(&self, v: Vec3) -> Vec3 {
+        let [x, y, z] = self.basis;
+        x * v.x + y * v.y + z * v.z
+    }
+
+    /// Applies the basis and origin to a point already in scaled units.
+    pub(super) fn place_scaled_point(&self, p: Point3) -> Point3 {
+        self.origin + self.vector(p)
+    }
+
+    fn matrix(&self) -> [[f64; 3]; 3] {
+        let [x, y, z] = self.basis;
+        [[x.x, y.x, z.x], [x.y, y.y, z.y], [x.z, y.z, z.z]]
+    }
+
+    /// Applies the basis and origin to a body already built in scaled units.
+    pub(super) fn place_scaled_body(&self, body: &mut Brep) -> Result<()> {
+        let [x, y, z] = self.basis;
+        let r = self.matrix();
+        if x.cross(y).dot(z) < 0.0 {
+            body.transform_similar(r, self.origin)
+        } else {
+            body.transform(&Transform { r, t: self.origin });
+            Ok(())
         }
     }
 
     /// `self` followed by `next`.
     pub(super) fn then(&self, next: &Placing) -> Placing {
-        let r = self.rigid.then(&next.rigid).r;
         Placing {
-            rigid: Transform {
-                r,
-                t: next.rigid.vector(self.rigid.t * next.scale) + next.rigid.t,
-            },
+            basis: self.basis.map(|axis| next.vector(axis)),
+            origin: next.place_scaled_point(self.origin * next.scale),
             scale: self.scale * next.scale,
         }
     }
 
     pub(super) fn inverse(&self) -> Placing {
-        let inv = self.rigid.inverse();
-        Placing {
-            rigid: Transform {
-                r: inv.r,
-                t: inv.t / self.scale,
-            },
+        let mut inv = Placing {
+            basis: self.matrix().map(Vec3::from_array),
+            origin: Point3::ZERO,
             scale: 1.0 / self.scale,
-        }
+        };
+        inv.origin = -inv.vector(self.origin) / self.scale;
+        inv
     }
 }
 
@@ -382,11 +408,11 @@ impl<'a> Geometry<'a> {
     }
 
     /// The motion of an `AXIS2_PLACEMENT_3D` or a `CARTESIAN_TRANSFORMATION_OPERATOR_3D`, which
-    /// may also scale uniformly.
+    /// may also reflect or scale uniformly.
     pub(super) fn transform_of(&mut self, id: u64) -> Result<Placing> {
         let e = self.entity(id)?;
         if e.has("AXIS2_PLACEMENT_3D") {
-            return Ok(Placing::rigid(self.placement(id)?.to_transform()));
+            return Ok(Placing::from_frame(self.placement(id)?, 1.0));
         }
         if let Some(a) = e.part("CARTESIAN_TRANSFORMATION_OPERATOR_3D") {
             let dir = |s: &Self, i: usize, d: Vec3| -> Result<Vec3> {
@@ -395,25 +421,32 @@ impl<'a> Geometry<'a> {
                     None => Ok(d),
                 }
             };
-            let x = dir(self, 2, Vec3::X)?;
-            let y = dir(self, 3, Vec3::Y)?;
             let origin = self.point(self.reference(id, a.get(4))?)?;
             let scale = a.get(5).and_then(Param::as_f64).unwrap_or(1.0);
             if !(scale > 0.0 && scale.is_finite()) {
                 return bad(id, "a transformation's scale must be positive");
             }
-            let z = match a.get(6).and_then(Param::as_ref) {
-                Some(r) => self.direction(r)?,
-                None => x.cross(y),
+            // ISO 10303-42:2021 §§4.5.21, 4.6.6, 4.6.23 and 4.6.34 fix Z first.
+            // Project X perpendicular to Z, then use Y's projection to set the handedness.
+            let z = dir(self, 6, Vec3::Z)?;
+            let default_x = if z.cross(Vec3::X).norm() <= tol::ANGULAR {
+                Vec3::Y
+            } else {
+                Vec3::X
             };
-            if z.dot(x.cross(y)) < 0.0 {
-                return unsupported(id, "mirroring transformation");
+            let x_hint = dir(self, 2, default_x)?;
+            let Ok(frame) = Frame::new(origin, z, x_hint) else {
+                return bad(id, "a transformation's first axis is parallel to its third");
+            };
+            let y_projection = dir(self, 3, Vec3::Y)?.dot(frame.y);
+            if y_projection.abs() <= tol::ANGULAR {
+                return bad(id, "a transformation's axes are coplanar");
             }
-            let f = Frame::new(origin, z, x)?;
-            return Ok(Placing {
-                rigid: f.to_transform(),
-                scale,
-            });
+            let mut placing = Placing::from_frame(frame, scale);
+            if y_projection < 0.0 {
+                placing.basis[1] = -placing.basis[1];
+            }
+            return Ok(placing);
         }
         unsupported(id, &format!("transformation {}", e.kind()))
     }

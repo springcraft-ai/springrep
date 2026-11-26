@@ -51,7 +51,7 @@ impl ReadOptions {
 #[non_exhaustive]
 pub struct Import {
     pub brep: Brep,
-    /// One entry per rejected solid placement: `#id: error`.
+    /// Rejected solids and placements, each as `#id: error`.
     pub rejected: Vec<String>,
     /// One entry per placed solid whose geometry healing moved, in placement order.
     pub healed: Vec<Healing>,
@@ -173,6 +173,12 @@ const MAX_PLACEMENTS: usize = 1_000_000;
 
 fn cyclic<T>(id: u64, what: &str) -> Result<T> {
     Err(Error::InvalidInput(format!("STEP #{id}: {what}")))
+}
+
+#[derive(Default)]
+struct Placements {
+    solids: Vec<Placement>,
+    rejected: Vec<String>,
 }
 
 /// A solid to build, the representation context its units come from, and where it goes.
@@ -317,7 +323,7 @@ impl<'a> Assembly<'a> {
         rep: u64,
         at: &Placing,
         path: &mut Vec<u64>,
-        out: &mut Vec<Placement>,
+        out: &mut Placements,
     ) -> Result<()> {
         if path.contains(&rep) {
             return cyclic(rep, "a mapped representation contains itself");
@@ -334,7 +340,7 @@ impl<'a> Assembly<'a> {
         rep: u64,
         at: &Placing,
         path: &mut Vec<u64>,
-        out: &mut Vec<Placement>,
+        out: &mut Placements,
     ) -> Result<()> {
         for r in self.linked(rep) {
             let Some((items, context)) = representation(self.file, r) else {
@@ -343,10 +349,10 @@ impl<'a> Assembly<'a> {
             for it in items {
                 let Some(e) = self.file.get(it) else { continue };
                 if SOLIDS.contains(&e.kind()) {
-                    if out.len() >= MAX_PLACEMENTS {
+                    if out.solids.len() >= MAX_PLACEMENTS {
                         return cyclic(it, "the assembly places too many solids");
                     }
-                    out.push(Placement {
+                    out.solids.push(Placement {
                         solid: it,
                         context,
                         at: *at,
@@ -354,10 +360,11 @@ impl<'a> Assembly<'a> {
                         uses: Vec::new(),
                     });
                 } else if let Some(p) = e.part("MAPPED_ITEM") {
-                    let _ = (geo.use_context(context), p);
-                    if let Some(t) = self.mapped(geo, p) {
-                        let (src, place) = t;
-                        self.rep_solids(geo, src, &place.then(at), path, out)?;
+                    match self.mapped(geo, it, p, context) {
+                        Ok((src, place)) => {
+                            self.rep_solids(geo, src, &place.then(at), path, out)?;
+                        }
+                        Err(e) => out.rejected.push(format!("#{it}: {e}")),
                     }
                 }
             }
@@ -366,23 +373,47 @@ impl<'a> Assembly<'a> {
     }
 
     /// A `MAPPED_ITEM`'s source representation and its placement in the target.
-    fn mapped(&self, geo: &mut Geometry, p: &[Param]) -> Option<(u64, Placing)> {
-        let map = params(self.file, p.get(1)?.as_ref()?, "REPRESENTATION_MAP")?;
-        let origin = geo.transform_of(map.first()?.as_ref()?).ok()?;
-        let src = map.get(1)?.as_ref()?;
-        let target = geo.transform_of(p.get(2)?.as_ref()?).ok()?;
-        Some((src, origin.inverse().then(&target)))
+    fn mapped(
+        &self,
+        geo: &mut Geometry,
+        item: u64,
+        p: &[Param],
+        context: Option<u64>,
+    ) -> Result<(u64, Placing)> {
+        let map_id = geo.reference(item, p.get(1))?;
+        let map = self
+            .file
+            .get(map_id)
+            .and_then(|e| e.part("REPRESENTATION_MAP"))
+            .ok_or_else(|| {
+                Error::InvalidInput(format!("STEP #{map_id}: expected a representation map"))
+            })?;
+        let src = geo.reference(map_id, map.get(1))?;
+        geo.use_context(context)?;
+        let origin = geo.transform_of(geo.reference(map_id, map.first())?)?;
+        let target = geo.transform_of(geo.reference(item, p.get(2))?)?;
+        Ok((src, origin.inverse().then(&target)))
     }
 
     /// The motion that places `child`'s shape in its parent's, from the placing relation.
-    fn placement(&self, geo: &mut Geometry, child: u64, rel: u64) -> Option<Placing> {
-        let e = self.file.get(rel)?;
-        let rr = e.part("REPRESENTATION_RELATIONSHIP")?;
-        let (r1, r2) = (rr.get(2)?.as_ref()?, rr.get(3)?.as_ref()?);
-        let op = e
-            .part("REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION")?
-            .first()?
-            .as_ref()?;
+    fn placement(&self, geo: &mut Geometry, child: u64, rel: u64) -> Result<Placing> {
+        let e = self
+            .file
+            .get(rel)
+            .ok_or_else(|| Error::InvalidInput(format!("STEP #{rel}: missing instance")))?;
+        let rr = e.part("REPRESENTATION_RELATIONSHIP").ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "STEP #{rel}: expected a representation relationship"
+            ))
+        })?;
+        let r1 = geo.reference(rel, rr.get(2))?;
+        let r2 = geo.reference(rel, rr.get(3))?;
+        let transformation = e
+            .part("REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION")
+            .ok_or_else(|| {
+                Error::InvalidInput(format!("STEP #{rel}: expected a placing transformation"))
+            })?;
+        let op = geo.reference(rel, transformation.first())?;
         let child_reps: Vec<u64> = self
             .reps
             .get(&child)
@@ -392,60 +423,71 @@ impl<'a> Assembly<'a> {
             .collect();
         let child_is_r1 = child_reps.contains(&r1) || !child_reps.contains(&r2);
         let context = |r: u64| representation(self.file, r).and_then(|x| x.1);
-        let oe = self.file.get(op)?;
-        if let Some(it) = oe.part("ITEM_DEFINED_TRANSFORMATION") {
-            geo.use_context(context(r1)).ok()?;
-            let a = geo.transform_of(it.get(2)?.as_ref()?).ok()?;
-            geo.use_context(context(r2)).ok()?;
-            let b = geo.transform_of(it.get(3)?.as_ref()?).ok()?;
+        if let Some(it) = self
+            .file
+            .get(op)
+            .and_then(|e| e.part("ITEM_DEFINED_TRANSFORMATION"))
+        {
+            geo.use_context(context(r1))?;
+            let a = geo.transform_of(geo.reference(op, it.get(2))?)?;
+            geo.use_context(context(r2))?;
+            let b = geo.transform_of(geo.reference(op, it.get(3))?)?;
             let (from, to) = if child_is_r1 { (a, b) } else { (b, a) };
-            Some(from.inverse().then(&to))
+            Ok(from.inverse().then(&to))
         } else {
-            geo.use_context(context(if child_is_r1 { r2 } else { r1 }))
-                .ok()?;
-            let t = geo.transform_of(op).ok()?;
-            Some(if child_is_r1 { t } else { t.inverse() })
+            geo.use_context(context(if child_is_r1 { r2 } else { r1 }))?;
+            let t = geo.transform_of(op)?;
+            Ok(if child_is_r1 { t } else { t.inverse() })
         }
     }
 
     /// Places `pd` and its children at `at`. `path` holds the products above it, so an assembly
-    /// that contains itself is an error.
+    /// that contains itself is an error. With no placement, the walk only checks product links.
     fn walk(
         &self,
         geo: &mut Geometry,
         pd: u64,
-        at: &Placing,
+        at: Option<&Placing>,
         path: &mut Vec<u64>,
         seen: &mut HashSet<u64>,
-        out: &mut Vec<Placement>,
+        out: &mut Placements,
     ) -> Result<()> {
         if path.contains(&pd) {
             return cyclic(pd, "the assembly contains itself");
         }
-        seen.insert(pd);
-        path.push(pd);
-        let own = out.len();
-        for &rep in self.reps.get(&pd).into_iter().flatten() {
-            self.rep_solids(geo, rep, at, &mut Vec::new(), out)?;
+        if !seen.insert(pd) && at.is_none() {
+            return Ok(());
         }
-        for p in &mut out[own..] {
-            p.product = Some(pd);
+        path.push(pd);
+        if let Some(at) = at {
+            let own = out.solids.len();
+            for &rep in self.reps.get(&pd).into_iter().flatten() {
+                self.rep_solids(geo, rep, at, &mut Vec::new(), out)?;
+            }
+            for p in &mut out.solids[own..] {
+                p.product = Some(pd);
+            }
         }
         for &(child, rel, used) in self.children.get(&pd).into_iter().flatten() {
-            if let Some(t) = self.placement(geo, child, rel) {
-                let below = out.len();
-                self.walk(geo, child, &t.then(at), path, seen, out)?;
-                for p in &mut out[below..] {
-                    p.uses.insert(0, used);
+            let child_at = at.and_then(|at| match self.placement(geo, child, rel) {
+                Ok(t) => Some(t.then(at)),
+                Err(e) => {
+                    out.rejected.push(format!("#{used}: {e}"));
+                    None
                 }
+            });
+            let below = out.solids.len();
+            self.walk(geo, child, child_at.as_ref(), path, seen, out)?;
+            for p in &mut out.solids[below..] {
+                p.uses.insert(0, used);
             }
         }
         path.pop();
         Ok(())
     }
 
-    fn placements(&self, geo: &mut Geometry) -> Result<Vec<Placement>> {
-        let mut out = Vec::new();
+    fn placements(&self, geo: &mut Geometry) -> Result<Placements> {
+        let mut out = Placements::default();
         let mut roots: Vec<u64> = self
             .reps
             .keys()
@@ -460,7 +502,7 @@ impl<'a> Assembly<'a> {
             self.walk(
                 geo,
                 pd,
-                &Placing::IDENTITY,
+                Some(&Placing::IDENTITY),
                 &mut Vec::new(),
                 &mut seen,
                 &mut out,
@@ -516,8 +558,11 @@ pub fn read_with(text: &[u8], feature: &str, options: &ReadOptions) -> Result<Im
     let file = part21::parse(text)?;
     let ours = file.originating_system() == Some(WRITER);
     let mut geo = Geometry::new(&file);
-    let mut placements = Assembly::new(&file).placements(&mut geo)?;
-    if placements.is_empty() {
+    let Placements {
+        solids: mut placements,
+        mut rejected,
+    } = Assembly::new(&file).placements(&mut geo)?;
+    if placements.is_empty() && rejected.is_empty() {
         // Without a product structure, a solid takes its units and uncertainty from a
         // representation that holds it, if one does.
         let mut contexts: HashMap<u64, u64> = HashMap::new();
@@ -539,16 +584,15 @@ pub fn read_with(text: &[u8], feature: &str, options: &ReadOptions) -> Result<Im
                 });
             }
         }
-    }
-    if placements.is_empty() {
-        return Err(Error::InvalidInput("STEP: the file holds no solids".into()));
+        if placements.is_empty() {
+            return Err(Error::InvalidInput("STEP: the file holds no solids".into()));
+        }
     }
     let mut keys: Vec<Key> = placements.iter().map(Placement::key).collect();
     keys.sort_unstable();
     keys.dedup();
     let built = build_all(&file, &keys, options.strict);
     let mut out = Brep::new();
-    let mut rejected = Vec::new();
     let mut healed = Vec::new();
     let mut tolerant = Vec::new();
     let mut crossed = Vec::new();
@@ -579,12 +623,17 @@ pub fn read_with(text: &[u8], feature: &str, options: &ReadOptions) -> Result<Im
                         continue;
                     }
                 }
+                let mut copy = b.clone();
+                if let Err(e) = pl.at.place_scaled_body(&mut copy) {
+                    rejected.push(format!("#{}: {e}", pl.solid));
+                    continue;
+                }
                 for (k, h) in heal {
                     healed.push(Healing {
                         index: index + k,
                         step_id: pl.solid,
                         moved: h.moved,
-                        at: pl.at.rigid.point(h.at),
+                        at: pl.at.place_scaled_point(h.at),
                         what: h.what.clone(),
                         surfaces: h.surfaces,
                     });
@@ -630,8 +679,6 @@ pub fn read_with(text: &[u8], feature: &str, options: &ReadOptions) -> Result<Im
                 let first = out.face_count();
                 let solid_index = index;
                 index += b.solid_ids().count();
-                let mut copy = b.clone();
-                copy.transform(&pl.at.rigid);
                 let mut own_colours = Vec::new();
                 let faces = copy.face_ids().collect::<Vec<_>>();
                 for (k, (f, (step, name))) in faces.into_iter().zip(names).enumerate() {
@@ -663,7 +710,7 @@ pub fn read_with(text: &[u8], feature: &str, options: &ReadOptions) -> Result<Im
                         index: solid_index + within.map_or(0, |s| s.index()),
                         step_id: pl.solid,
                         faces: (ids[x.a.index()], ids[x.b.index()]),
-                        at: pl.at.rigid.point(x.at),
+                        at: pl.at.place_scaled_point(x.at),
                         depth: x.depth,
                     });
                 }

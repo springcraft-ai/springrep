@@ -1297,6 +1297,153 @@ fn seamless_band(surface: &str, (zb, rb): (f64, f64), (zt, rt): (f64, f64), turn
     ))
 }
 
+/// `text` with a point `p` (a `VERTEX_LOOP`, as a file holds where something touches the face)
+/// added to the bounds of the face whose bounds `bounds` lists, `#66=ADVANCED_FACE('',(…),#30,.T.)`.
+fn holding(text: &str, bounds: &str, p: Vec3) -> String {
+    let face = format!("#66=ADVANCED_FACE('',({bounds}),#30,.T.);");
+    assert!(text.contains(&face));
+    text.replace(
+        &face,
+        &format!(
+            "#80=CARTESIAN_POINT('',({:?},{:?},{:?}));\n#81=VERTEX_POINT('',#80);\n\
+             #82=VERTEX_LOOP('',#81);\n#83=FACE_BOUND('',#82,.T.);\n\
+             #66=ADVANCED_FACE('',({bounds},#83),#30,.T.);",
+            p.x, p.y, p.z
+        ),
+    )
+}
+
+/// Reads `text`, a solid whose face holds the point `p`, whole and of volume `want`, and meshes
+/// it watertight with `corner`, `p` or the vertex `p` lies within the tolerance of, a corner of
+/// the mesh. Every mesh point lies on the surfaces and every
+/// triangle within the deflection of them, so the mesh's volume is within the area times the
+/// deflection of the solid's.
+fn meshes_through(text: &str, corner: Vec3, want: f64, name: &str) {
+    let opt = crate::mesh::MeshOptions::within(0.01);
+    let imp = read(text.as_bytes(), "imp").unwrap();
+    assert!(imp.rejected.is_empty(), "{name}: {:?}", imp.rejected);
+    let b = imp.brep;
+    assert!(
+        check::check(&b).is_empty(),
+        "{name}: {:?}",
+        check::check(&b)
+    );
+    assert!(b.loop_ids().any(|lp| b.is_vertex_loop(lp)), "{name}");
+    let (area, volume) = measure::area_and_volume(&b);
+    assert!((volume - want).abs() < 1e-9 * want, "{name}: {volume}");
+    let m = crate::mesh::tessellate(&b, &opt).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let s = b.solid_ids().next().unwrap();
+    let rep = crate::mesh::report(&b, &m, s);
+    assert!(rep.watertight(), "{name}: {rep:?}");
+    assert_eq!(rep.degenerate_triangles, 0, "{name}");
+    assert!(
+        (rep.volume.abs() - want).abs() <= area * opt.linear,
+        "{name}: {}",
+        rep.volume
+    );
+    let found = m
+        .triangles
+        .iter()
+        .flatten()
+        .any(|&i| m.positions[i as usize].dist(corner) <= 1e-12);
+    assert!(found, "{name}: no triangle has {corner:?} as a corner");
+}
+
+/// A cylinder of radius 5 from z 0 to 10, and the outer half of a torus R 10 r 2, each with its
+/// side bounded by its two circles and no seam, that holds a point at angle `at`. At the circles'
+/// vertices' angle the point lies on the seam the side is given, and at z 0 on the cylinder's
+/// bottom circle; elsewhere inside. Either way it is read whole, and meshes watertight through
+/// the point.
+#[test]
+fn a_point_bound_on_a_seam_meshes_through_the_point() {
+    let cylinder = 250.0 * PI;
+    // As in `seamless_bands_of_revolution_are_given_a_seam`.
+    let torus = 400.0 * PI + TAU * (10.0 + 8.0 / (3.0 * PI)) * TAU;
+    for turn in [0.0, 1.0] {
+        let band = seamless_band(
+            "CYLINDRICAL_SURFACE('',#4,5.)",
+            (0.0, 5.0),
+            (10.0, 5.0),
+            turn,
+        );
+        for (at, z) in [(0.0, 5.0), (1.0, 5.0), (PI, 5.0), (0.0, 0.0), (2.0, 0.0)] {
+            let p = Vec3::new(5.0 * f64::cos(at), 5.0 * f64::sin(at), z);
+            let name = format!("cylinder {turn} {at} {z}");
+            meshes_through(&holding(&band, "#62,#65", p), p, cylinder, &name);
+        }
+        let band = seamless_band(
+            "TOROIDAL_SURFACE('',#4,10.,2.)",
+            (-2.0, 10.0),
+            (2.0, 10.0),
+            turn,
+        );
+        for at in [0.0, 1.0, PI] {
+            let p = Vec3::new(12.0 * f64::cos(at), 12.0 * f64::sin(at), 0.0);
+            let name = format!("torus {turn} {at}");
+            meshes_through(&holding(&band, "#62,#65", p), p, torus, &name);
+        }
+    }
+}
+
+/// The cylinder of `a_point_bound_on_a_seam_meshes_through_the_point` with its seam written, a
+/// line from the bottom circle's vertex to the top's, and the point on it, within the linear
+/// tolerance of 1e-7 of the bottom vertex, or opposite.
+#[test]
+fn a_point_bound_on_a_written_seam_meshes_through_the_point() {
+    let text = step_file(
+        "#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=DIRECTION('',(0.,0.,1.));
+#3=DIRECTION('',(1.,0.,0.));
+#4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+#5=DIRECTION('',(0.,0.,-1.));
+#11=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+#12=CIRCLE('',#11,5.);
+#13=CARTESIAN_POINT('',(5.,0.,0.));
+#14=VERTEX_POINT('',#13);
+#15=EDGE_CURVE('',#14,#14,#12,.T.);
+#16=AXIS2_PLACEMENT_3D('',#1,#5,#3);
+#17=PLANE('',#16);
+#20=CARTESIAN_POINT('',(0.,0.,10.));
+#21=AXIS2_PLACEMENT_3D('',#20,#2,#3);
+#22=CIRCLE('',#21,5.);
+#23=CARTESIAN_POINT('',(5.,0.,10.));
+#24=VERTEX_POINT('',#23);
+#25=EDGE_CURVE('',#24,#24,#22,.T.);
+#26=PLANE('',#21);
+#27=VECTOR('',#2,1.);
+#28=LINE('',#13,#27);
+#29=EDGE_CURVE('',#14,#24,#28,.T.);
+#30=CYLINDRICAL_SURFACE('',#4,5.);
+#40=ORIENTED_EDGE('',*,*,#15,.F.);
+#41=EDGE_LOOP('',(#40));
+#42=FACE_OUTER_BOUND('',#41,.T.);
+#43=ADVANCED_FACE('',(#42),#17,.T.);
+#50=ORIENTED_EDGE('',*,*,#25,.T.);
+#51=EDGE_LOOP('',(#50));
+#52=FACE_OUTER_BOUND('',#51,.T.);
+#53=ADVANCED_FACE('',(#52),#26,.T.);
+#60=ORIENTED_EDGE('',*,*,#15,.T.);
+#61=ORIENTED_EDGE('',*,*,#29,.T.);
+#62=ORIENTED_EDGE('',*,*,#25,.F.);
+#63=ORIENTED_EDGE('',*,*,#29,.F.);
+#64=EDGE_LOOP('',(#60,#61,#62,#63));
+#65=FACE_OUTER_BOUND('',#64,.T.);
+#66=ADVANCED_FACE('',(#65),#30,.T.);
+#70=CLOSED_SHELL('',(#43,#53,#66));
+#71=MANIFOLD_SOLID_BREP('',#70);",
+    );
+    for (at, z) in [(0.0, 5.0), (0.0, 1e-3), (0.0, 5e-8), (PI, 5.0)] {
+        let p = Vec3::new(5.0 * f64::cos(at), 5.0 * f64::sin(at), z);
+        let corner = if z < 1e-7 {
+            Vec3::new(5.0, 0.0, 0.0)
+        } else {
+            p
+        };
+        let name = format!("written seam {at} {z}");
+        meshes_through(&holding(&text, "#65", p), corner, 250.0 * PI, &name);
+    }
+}
+
 #[test]
 fn seamless_bands_of_revolution_are_given_a_seam() {
     // Cylinder r 4 from z 0 to 5: 80π. Sphere r 5 between z ±3: π∫(25 − z²)dz = 132π. The outer
@@ -1456,9 +1603,8 @@ fn offset_surfaces_read_as_the_surface_they_are() {
     );
 }
 
-#[test]
-fn scaled_transformations_place_scaled_copies() {
-    let part = write(&block("b", [0.0, 0.0, 0.0], [1.0, 2.0, 3.0]), "blk").unwrap();
+fn mapped_part(part: &Brep, mapping_origin: u64, mapping: &str) -> String {
+    let part = write(part, "part").unwrap();
     let data = part
         .split("DATA;\n")
         .nth(1)
@@ -1471,30 +1617,43 @@ fn scaled_transformations_place_scaled_copies() {
         .find(|l| l.contains("ADVANCED_BREP_SHAPE_REPRESENTATION"))
         .and_then(|l| l[1..].split('=').next())
         .unwrap();
-    let extra = format!(
-        "#9000=(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.));
-#9010=PRODUCT('asm','asm','',(#3));
-#9011=PRODUCT_DEFINITION_FORMATION('','',#9010);
-#9012=PRODUCT_DEFINITION('design','',#9011,#6);
-#9013=PRODUCT_DEFINITION_SHAPE('','',#9012);
-#9014=SHAPE_REPRESENTATION('asm',(#9016),#9099);
-#9015=SHAPE_DEFINITION_REPRESENTATION(#9013,#9014);
-#9016=MAPPED_ITEM('',#9017,#9018);
-#9017=REPRESENTATION_MAP(#9020,#{rep});
-#9018=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',#9023,#9024,#9031,2.,#9022);
-#9020=AXIS2_PLACEMENT_3D('',#9021,#9022,#9023);
-#9021=CARTESIAN_POINT('',(0.,0.,0.));
-#9022=DIRECTION('',(0.,0.,1.));
-#9023=DIRECTION('',(1.,0.,0.));
-#9024=DIRECTION('',(0.,1.,0.));
-#9031=CARTESIAN_POINT('',(10.,0.,0.));
-#9099=(GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNIT_ASSIGNED_CONTEXT((#9000)) \
-       REPRESENTATION_CONTEXT('','3D'));
+    format!(
+        "ISO-10303-21;\nHEADER;\nFILE_NAME('a','',(''),(''),'','other','');
+ENDSEC;
+DATA;
+         {data}#9000=(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.));
+         #9010=PRODUCT('asm','asm','',(#3));
+         #9011=PRODUCT_DEFINITION_FORMATION('','',#9010);
+         #9012=PRODUCT_DEFINITION('design','',#9011,#6);
+         #9013=PRODUCT_DEFINITION_SHAPE('','',#9012);
+         #9014=SHAPE_REPRESENTATION('asm',(#9016),#9099);
+         #9015=SHAPE_DEFINITION_REPRESENTATION(#9013,#9014);
+         #9096=REPRESENTATION_MAP(#{mapping_origin},#{rep});
+         #9020=AXIS2_PLACEMENT_3D('',#9021,#9022,#9023);
+         #9021=CARTESIAN_POINT('',(0.,0.,0.));
+         #9022=DIRECTION('',(0.,0.,1.));
+         #9023=DIRECTION('',(1.,0.,0.));
+         #9024=DIRECTION('',(0.,1.,0.));
+         #9025=DIRECTION('',(-1.,0.,0.));
+         #9026=DIRECTION('',(0.,-1.,0.));
+         #9031=CARTESIAN_POINT('',(10.,0.,0.));
+         #9099=(GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNIT_ASSIGNED_CONTEXT((#9000))
+                REPRESENTATION_CONTEXT('','3D'));
+         {mapping}ENDSEC;
+END-ISO-10303-21;
 "
-    );
-    let text = format!(
-        "ISO-10303-21;\nHEADER;\nFILE_NAME('a','',(''),(''),'','other','');\nENDSEC;\nDATA;\n\
-         {data}{extra}ENDSEC;\nEND-ISO-10303-21;\n"
+    )
+}
+
+#[test]
+fn scaled_transformations_place_scaled_copies() {
+    let part = block("b", [0.0, 0.0, 0.0], [1.0, 2.0, 3.0]);
+    let text = mapped_part(
+        &part,
+        9020,
+        "#9016=MAPPED_ITEM('',#9096,#9018);
+         #9018=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',#9023,#9024,#9031,2.,#9022);
+",
     );
     let imp = read(text.as_bytes(), "imp").unwrap();
     assert!(imp.rejected.is_empty(), "{:?}", imp.rejected);
@@ -1506,6 +1665,202 @@ fn scaled_transformations_place_scaled_copies() {
     assert!(
         (bb.max - Vec3::new(12.0, 4.0, 6.0)).max_abs() < 1e-9,
         "{bb:?}"
+    );
+}
+
+#[test]
+fn a_mapped_solid_with_coplanar_axes_is_reported_as_rejected() {
+    let part = block("b", [0.0, 0.0, 0.0], [1.0, 2.0, 3.0]);
+    let text = mapped_part(
+        &part,
+        9020,
+        "#9016=MAPPED_ITEM('',#9096,#9018);
+         #9018=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',#9023,#9023,#9031,1.,#9022);
+",
+    );
+    let imp = read(text.as_bytes(), "imp").unwrap();
+    assert_eq!(imp.bodies.len(), 1);
+    assert_eq!(imp.rejected.len(), 1, "{:?}", imp.rejected);
+    let why = &imp.rejected[0];
+    assert!(why.starts_with("#9016:"), "{why}");
+    assert!(
+        why.contains("STEP #9018: a transformation's axes are coplanar"),
+        "{why}"
+    );
+}
+
+fn block_with_off_centre_bore() -> Brep {
+    let plate = Profile::rect(Vec2::new(0.5, 1.0), 1.0, 2.0);
+    let bore = Profile::circle(Vec2::new(0.25, 0.5), 0.25);
+    extrude(&plate.with_holes(bore.loops), &Frame::WORLD, 3.0, "plate").unwrap()
+}
+
+fn assert_bored_block(
+    body: &Brep,
+    solid: crate::topo::SolidId,
+    min: Vec3,
+    max: Vec3,
+    bore_centre: Vec2,
+    scale: f64,
+) {
+    let bounds = measure::solid_bbox(body, solid);
+    assert!(bounds.min.dist(min) <= crate::tol::LINEAR, "{bounds:?}");
+    assert!(bounds.max.dist(max) <= crate::tol::LINEAR, "{bounds:?}");
+
+    let bore_radius = 0.125;
+    let cylinders: Vec<_> = body
+        .solid_faces(solid)
+        .into_iter()
+        .filter_map(|f| match &body.face(f).surface {
+            Surface::Cylinder(cylinder) => Some(cylinder),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cylinders.len(), 1);
+    let bore = cylinders[0];
+    assert!((bore.frame.origin.x - bore_centre.x).abs() <= crate::tol::LINEAR);
+    assert!((bore.frame.origin.y - bore_centre.y).abs() <= crate::tol::LINEAR);
+    assert!((bore.radius - bore_radius * scale).abs() <= crate::tol::LINEAR);
+    let volume = measure::solid_volume(body, solid);
+    let expected = 3.0 * (2.0 - PI * bore_radius * bore_radius) * scale.powi(3);
+    assert!(
+        (volume - expected).abs() <= crate::tol::LINEAR * 22.0 * scale.powi(2),
+        "{volume}"
+    );
+}
+
+fn assert_reflected_bore(axis3: &str) {
+    let part = block_with_off_centre_bore();
+    let text = mapped_part(
+        &part,
+        9020,
+        &format!(
+            "#9016=MAPPED_ITEM('',#9096,#9018);
+             #9018=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',#9025,#9024,#9031,2.,{axis3});
+"
+        ),
+    );
+    let imp = read(text.as_bytes(), "imp").unwrap();
+    assert!(imp.rejected.is_empty(), "{:?}", imp.rejected);
+    assert_eq!(imp.bodies.len(), 2);
+    let b = imp.brep;
+    // The target maps (x, y, z) to (10 − 2x, 2y, 2z).
+    assert_bored_block(
+        &b,
+        imp.bodies[1].solid,
+        Vec3::new(8.0, 0.0, 0.0),
+        Vec3::new(10.0, 4.0, 6.0),
+        Vec2::new(9.5, 1.0),
+        2.0,
+    );
+    assert!(check::check(&b).is_empty());
+}
+
+#[test]
+fn a_mapped_solid_reflects_its_off_centre_bore() {
+    assert_reflected_bore("#9022");
+}
+
+#[test]
+fn a_reflected_mapping_defaults_its_third_axis_to_positive_z() {
+    assert_reflected_bore("$");
+}
+
+#[test]
+fn nested_reflections_compose_around_a_rotated_mapping_origin() {
+    let part = block_with_off_centre_bore();
+    let text = mapped_part(
+        &part,
+        9047,
+        "#9016=MAPPED_ITEM('',#9040,#9041);
+         #9040=REPRESENTATION_MAP(#9020,#9042);
+         #9041=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',#9023,#9026,#9043,0.5,#9022);
+         #9042=SHAPE_REPRESENTATION('nested',(#9044),#9099);
+         #9043=CARTESIAN_POINT('',(0.,10.,2.));
+         #9044=MAPPED_ITEM('',#9096,#9046);
+         #9046=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',#9025,#9024,#9031,2.,#9022);
+         #9047=AXIS2_PLACEMENT_3D('',#9048,#9022,#9024);
+         #9048=CARTESIAN_POINT('',(1.,2.,3.));
+",
+    );
+    let imp = read(text.as_bytes(), "imp").unwrap();
+    assert!(imp.rejected.is_empty(), "{:?}", imp.rejected);
+    assert_eq!(imp.bodies.len(), 2);
+    let b = imp.brep;
+    assert_bored_block(
+        &b,
+        imp.bodies[0].solid,
+        Vec3::ZERO,
+        Vec3::new(1.0, 2.0, 3.0),
+        Vec2::new(0.25, 0.5),
+        1.0,
+    );
+    // The inner map is (14 − 2y, 2 − 2x, 2z − 6). The outer map scales by 1/2,
+    // reflects Y, and translates by (0, 10, 2), giving (7 − y, 9 + x, z − 1).
+    assert_bored_block(
+        &b,
+        imp.bodies[1].solid,
+        Vec3::new(5.0, 9.0, -1.0),
+        Vec3::new(7.0, 10.0, 2.0),
+        Vec2::new(6.5, 9.25),
+        1.0,
+    );
+    assert!(check::check(&b).is_empty());
+}
+
+#[test]
+fn a_scaled_reflection_and_its_inverse_compose_to_identity() {
+    let file = super::part21::parse(
+        b"ISO-10303-21; DATA;
+        #1=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',#2,#3,#5,2.,#4);
+        #2=DIRECTION('',(0.,1.,0.));
+        #3=DIRECTION('',(1.,0.,0.));
+        #4=DIRECTION('',(0.,0.,1.));
+        #5=CARTESIAN_POINT('',(1.,2.,3.));
+        ENDSEC; END-ISO-10303-21;",
+    )
+    .unwrap();
+    let placing = super::geometry::Geometry::new(&file)
+        .transform_of(1)
+        .unwrap();
+    let identity = super::geometry::Placing::IDENTITY;
+    assert_eq!(placing.then(&placing.inverse()), identity);
+    assert_eq!(placing.inverse().then(&placing), identity);
+}
+
+#[test]
+fn a_transformation_operator_rejects_a_second_axis_in_the_first_and_third_axes_plane() {
+    let file = super::part21::parse(
+        b"ISO-10303-21; DATA;
+        #1=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',#2,#3,#5,1.,#4);
+        #2=DIRECTION('',(1.,0.,0.));
+        #3=DIRECTION('',(1.,0.,1.));
+        #4=DIRECTION('',(0.,0.,1.));
+        #5=CARTESIAN_POINT('',(0.,0.,0.));
+        ENDSEC; END-ISO-10303-21;",
+    )
+    .unwrap();
+    assert!(matches!(
+        super::geometry::Geometry::new(&file).transform_of(1),
+        Err(crate::Error::InvalidInput(message)) if message.contains("STEP #1:")
+    ));
+}
+
+#[test]
+fn a_transformation_operator_defaults_its_first_axis_to_y_when_its_third_axis_is_x() {
+    let file = super::part21::parse(
+        b"ISO-10303-21; DATA;
+        #1=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',$,#2,#4,1.,#3);
+        #2=DIRECTION('',(0.,0.,1.));
+        #3=DIRECTION('',(1.,0.,0.));
+        #4=CARTESIAN_POINT('',(0.,0.,0.));
+        ENDSEC; END-ISO-10303-21;",
+    )
+    .unwrap();
+    assert!(
+        super::geometry::Geometry::new(&file)
+            .transform_of(1)
+            .is_ok()
     );
 }
 

@@ -2134,7 +2134,8 @@ solid never pinches.
   solid's placements, converts units, builds each distinct solid once (in parallel, those with the
   most faces and spline control points first; the output does not depend on which finishes first)
   and copies it to each placement. A transformation that scales uniformly builds its solid in scaled
-  units, so every placement the kernel applies stays rigid; a mirroring one is an explicit error.
+  units. A left-handed placement uses `transform_similar` to reflect the geometry and turn the
+  loops, so the reflected solid still faces out.
   Faces of another system's file are named `<feature>.face_<i>` in placement order.
 - **Entities.** A B-spline curve or surface whose kind implies its knots (`UNIFORM_CURVE`,
   `QUASI_UNIFORM_CURVE`, `BEZIER_CURVE` and their surfaces, simple or rational) is read with the
