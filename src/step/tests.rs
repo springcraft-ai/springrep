@@ -4,7 +4,7 @@ use super::{ReadOptions, WriteOptions, read, read_part_with, read_with, write, w
 use crate::{
     boolean, check,
     geom::{Circle, Cone, Curve, Line, Ruled, Surface},
-    math::{Frame, Vec2, Vec3},
+    math::{Frame, Point3, Vec2, Vec3},
     measure, mesh,
     profile::{NamedSegment, PointsInterp, Profile, ProfileLoop, Segment},
     sweep::{extrude, revolve},
@@ -4670,4 +4670,150 @@ fn a_sphere_cap_flagged_against_its_edge_takes_its_pole_from_its_neighbour() {
             "#13=ADVANCED_FACE('',(#11),#12,.T.)",
         );
     read_turned(lower.as_bytes(), volume, area, &[]);
+}
+
+/// The quarter torus of `torus-bound-against-its-edges.step` as the outer shell of a solid, with
+/// a copy of its shell 50 mm along X listed as the solid's void, as a file writing two bodies this
+/// way would. The copy lies outside the outer shell, so it is no void and is read as a solid of its
+/// own (#117). The outer torus face's bound (#46) is flagged against its edges when
+/// `outer_against`, and the copy's (#146) when `void_against`; otherwise each is flagged `.T.`,
+/// the way its loop is listed.
+fn torus_with_void_outside(outer_against: bool, void_against: bool) -> String {
+    let text = std::str::from_utf8(include_bytes!(
+        "fixtures/torus-bound-against-its-edges.step"
+    ))
+    .unwrap();
+    // Instances #1 to #53 are the shell and everything it uses.
+    let shift = |l: &str| {
+        let mut out = String::new();
+        let mut rest = l;
+        while let Some(i) = rest.find('#') {
+            out.push_str(&rest[..=i]);
+            rest = &rest[i + 1..];
+            let n = rest.bytes().take_while(u8::is_ascii_digit).count();
+            let id: u64 = rest[..n].parse().unwrap();
+            out.push_str(&(id + 100).to_string());
+            rest = &rest[n..];
+        }
+        out.push_str(rest);
+        out
+    };
+    let mut out = String::new();
+    for l in text.lines() {
+        let id = l
+            .strip_prefix('#')
+            .and_then(|r| r.split_once('='))
+            .and_then(|(n, _)| n.parse::<u64>().ok());
+        if id == Some(54) {
+            out.push_str("#54=BREP_WITH_VOIDS('',#53,(#154));\n");
+            out.push_str("#154=ORIENTED_CLOSED_SHELL('',*,#153,.F.);\n");
+            continue;
+        }
+        out.push_str(l);
+        out.push('\n');
+        if id.is_some_and(|n| n <= 53) {
+            let mut copy = shift(l);
+            if let Some(at) = copy.strip_suffix("));")
+                && let Some((head, xyz)) = at.split_once("=CARTESIAN_POINT('',(")
+            {
+                let mut c: Vec<f64> = xyz.split(',').map(|x| x.parse().unwrap()).collect();
+                c[0] += 50.0;
+                copy = format!(
+                    "{head}=CARTESIAN_POINT('',({:?},{:?},{:?}));",
+                    c[0], c[1], c[2]
+                );
+            }
+            out.push_str(&copy);
+            out.push('\n');
+        }
+    }
+    for (id, against) in [(46, outer_against), (146, void_against)] {
+        if !against {
+            let flagged = format!("#{id}=FACE_OUTER_BOUND('',#{},.F.)", id - 1);
+            assert!(out.contains(&flagged));
+            out = out.replace(
+                &flagged,
+                &format!("#{id}=FACE_OUTER_BOUND('',#{},.T.)", id - 1),
+            );
+        }
+    }
+    out
+}
+
+#[test]
+fn a_torus_bound_turned_in_a_void_read_as_a_solid_of_its_own_is_reported_at_that_solid() {
+    // Each solid reads as the band, volume (pi r^2)(R pi/2) = 20 pi^2, R = 10 and r = 2, whichever
+    // bounds are flagged against their edges; a bound turned in the copy is reported at the
+    // second solid, of whose faces it is one.
+    let band = 20.0 * PI * PI;
+    for (outer_against, void_against) in
+        [(true, true), (false, true), (true, false), (false, false)]
+    {
+        let text = torus_with_void_outside(outer_against, void_against);
+        assert_eq!(instances(&text, "BREP_WITH_VOIDS"), 1);
+        assert_eq!(instances(&text, "MANIFOLD_SOLID_BREP"), 0);
+        let imp = read(text.as_bytes(), "band").unwrap();
+        assert!(imp.rejected.is_empty(), "{:?}", imp.rejected);
+        assert!(imp.healed.is_empty() && imp.tolerant.is_empty());
+        let b = &imp.brep;
+        assert!(
+            check::check_each(b).is_empty(),
+            "{:?}",
+            check::check_each(b)
+        );
+        let volumes = solid_volumes(b);
+        assert_eq!(volumes.len(), 2);
+        for v in &volumes {
+            assert!((v - band).abs() <= 1e-9 * band, "{volumes:?}");
+        }
+        assert_eq!(imp.separated.len(), 1);
+        assert_eq!(
+            (imp.separated[0].index, &imp.separated[0].shells[..]),
+            (0, &[154][..])
+        );
+        let reported: Vec<(usize, u64, usize)> = imp
+            .turned_bounds
+            .iter()
+            .map(|t| (t.index, t.face_step_id, t.bounds))
+            .collect();
+        let mut expected = Vec::new();
+        if outer_against {
+            expected.push((0, 52, 1));
+        }
+        if void_against {
+            expected.push((1, 152, 1));
+        }
+        assert_eq!(reported, expected);
+        let solids: Vec<_> = b.solid_ids().collect();
+        for t in &imp.turned_bounds {
+            let shell = b.face(t.face).shell.unwrap();
+            assert_eq!(b.shell(shell).solid, Some(solids[t.index]));
+            // The face reported is the original's, about the origin, or the copy's, 50 mm along X.
+            let Surface::Torus(s) = &b.face(t.face).surface else {
+                panic!("face {t:?} is not on a torus");
+            };
+            let x = if t.face_step_id == 52 { 0.0 } else { 50.0 };
+            assert!(
+                (s.frame.origin - Point3::new(x, 0.0, 0.0)).norm() < 1e-12,
+                "{t:?}"
+            );
+            // A quarter of the torus's 4 pi^2 R r.
+            let a = measure::face_area(b, t.face);
+            assert!((a - 20.0 * PI * PI).abs() <= 1e-9 * a, "{a}");
+        }
+        // A strict read rejects the solid, its void lying outside it, and so turns nothing.
+        let strict = read_with(
+            text.as_bytes(),
+            "band",
+            &ReadOptions::default().strict(true),
+        );
+        let strict = strict.unwrap();
+        assert_eq!(strict.brep.solid_ids().count(), 0);
+        assert!(strict.turned_bounds.is_empty() && strict.separated.is_empty());
+        let why = &strict.rejected[0];
+        assert!(
+            why.contains("void shell #154 lies outside the outer shell"),
+            "{why}"
+        );
+    }
 }
