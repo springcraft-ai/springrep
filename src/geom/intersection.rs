@@ -173,7 +173,7 @@ pub(crate) fn refine_on_contour(
             break;
         }
         let (q, su, sv) = a.d1(uv.x, uv.y);
-        hb = b.project_near(q, hb);
+        hb = b.project_onward_at(q, hb).0;
         let qb = b.eval(hb.x, hb.y);
         let nb = b.normal(hb.x, hb.y);
         let g = (q - qb).dot(nb);
@@ -219,7 +219,7 @@ fn refine(
     let mut x = p;
     for _ in 0..100 {
         let at = |s: &Surface, hint: Option<Vec2>| match hint {
-            Some(h) => s.project_near_at(x, h),
+            Some(h) => s.project_onward_at(x, h),
             None => {
                 let uv = s.project(x);
                 (uv, s.eval(uv.x, uv.y), s.normal(uv.x, uv.y))

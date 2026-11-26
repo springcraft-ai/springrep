@@ -3074,10 +3074,8 @@ fn seeds_for<'p>(
                 {
                     continue;
                 }
-                let uv = to.surface.project(p);
-                let q = to.surface.eval(uv.x, uv.y);
-                if p.dist(q) <= reach {
-                    out.push(p.lerp(q, 0.5));
+                if let Some(uv) = to.surface.point_within(p, reach) {
+                    out.push(p.lerp(to.surface.eval(uv.x, uv.y), 0.5));
                 }
             }
         }

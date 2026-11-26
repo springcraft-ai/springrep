@@ -535,7 +535,36 @@ impl Surface {
     /// [`Surface::project_near`] with the surface point there and its unit natural normal, from
     /// the one evaluation that places the parameters.
     pub fn project_near_at(&self, p: Point3, hint: Vec2) -> (Vec2, Point3, Vec3) {
-        let uv = self.project_near_raw(p, hint);
+        self.placed_near(self.project_near_raw(p, hint), hint)
+    }
+
+    /// The parameters of a point of the surface within `r` of `p`, if there is one: on a spline
+    /// [`NurbsSurface::point_within`], which is certain of the answer without finding the nearest
+    /// point; elsewhere the nearest point, where it is that near.
+    pub(crate) fn point_within(&self, p: Point3, r: f64) -> Option<Vec2> {
+        match self {
+            Surface::Nurbs(s) => s.point_within(p, r),
+            _ => {
+                let uv = self.project(p);
+                (self.eval(uv.x, uv.y).dist(p) <= r).then_some(uv)
+            }
+        }
+    }
+
+    /// [`Surface::project_near_at`] for a point carried on from `hint`, as an iterate of a
+    /// refinement onto two surfaces is, whose caller checks the point it converges to: on a
+    /// spline, [`NurbsSurface::project_onward`], which does not certify a fallback to the global
+    /// nearest point; elsewhere the same.
+    pub(crate) fn project_onward_at(&self, p: Point3, hint: Vec2) -> (Vec2, Point3, Vec3) {
+        match self {
+            Surface::Nurbs(s) => self.placed_near(s.project_onward(p, hint), hint),
+            _ => self.project_near_at(p, hint),
+        }
+    }
+
+    /// The parameters `uv` a projection near `hint` placed a point at, moved toward the hint, with
+    /// the surface point there and its unit natural normal.
+    fn placed_near(&self, uv: Vec2, hint: Vec2) -> (Vec2, Point3, Vec3) {
         let (q, su, sv) = self.d1(uv.x, uv.y);
         let out = self.toward(uv, hint, su);
         let n = match self {

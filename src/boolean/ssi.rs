@@ -215,14 +215,13 @@ pub(crate) fn same_domain_faces(a: &Domain, b: &Domain) -> bool {
                 let u = from.lo.x + (from.hi.x - from.lo.x) * i as f64 / n as f64;
                 let v = from.lo.y + (from.hi.y - from.lo.y) * j as f64 / n as f64;
                 let p = from.surface.eval(u, v);
-                let q = to.surface.project(p);
-                to.surface.eval(q.x, q.y).dist(p) <= tol::LINEAR
-                    && from
-                        .surface
+                to.surface.point_within(p, tol::LINEAR).is_some_and(|q| {
+                    from.surface
                         .normal(u, v)
                         .cross(to.surface.normal(q.x, q.y))
                         .norm()
                         <= tol::TANGENT
+                })
             })
         })
     })

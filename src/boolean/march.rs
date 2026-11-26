@@ -208,7 +208,7 @@ fn tilt(a: &Surface, b: &Surface, uv: Vec2, hint_b: &mut Vec2) -> Option<(Vec2, 
         if lu <= f64::EPSILON || lv <= f64::EPSILON {
             return None;
         }
-        *hint_b = b.project_near(q, *hint_b);
+        *hint_b = b.project_onward_at(q, *hint_b).0;
         let nb = b.normal(hint_b.x, hint_b.y);
         Some((Vec2::new(su.dot(nb) / lu, sv.dot(nb) / lv), lu, lv))
     };
@@ -580,9 +580,9 @@ fn lens_depth(a: &Surface, b: &Surface, br: &Branch) -> f64 {
         for (from, to, hint_from, hint_to) in [(a, b, ha, hb), (b, a, hb, ha)] {
             for f in [0.25, 0.5, 0.75] {
                 let x = p.lerp(br.points[j], f);
-                let uf = from.project_near(x, hint_from);
+                let uf = from.project_onward_at(x, hint_from).0;
                 let q = from.eval(uf.x, uf.y);
-                let ut = to.project_near(q, hint_to);
+                let ut = to.project_onward_at(q, hint_to).0;
                 let gap = (q - to.eval(ut.x, ut.y)).dot(to.normal(ut.x, ut.y)).abs();
                 deepest = deepest.max(gap);
             }

@@ -2673,8 +2673,30 @@ impl NurbsSurface {
     /// it. A piece neither set aside nor done with is halved (de Casteljau) across its longer
     /// side, until it is smaller than the tolerance.
     fn bounded(&self, p: Point3, best: (f64, Vec2)) -> (f64, Vec2) {
+        self.bounded_to(p, best, None)
+    }
+
+    /// The parameters of a point of the surface within `r` of `p`, if there is one, found with
+    /// the certainty of [`NurbsSurface::project`] but sooner: the seeds' nearest point where it
+    /// is that near, and otherwise the bounded search held to `r`, which sets aside every piece
+    /// farther than `r` and stops at the first point it finds within it.
+    pub(crate) fn point_within(&self, p: Point3, r: f64) -> Option<Vec2> {
+        let best = self.seeded(p);
+        if best.0 <= r {
+            return Some(best.1);
+        }
+        let found = self.bounded_to(p, best, Some(r));
+        (found.0 <= r).then_some(found.1)
+    }
+
+    /// [`NurbsSurface::bounded`], or where `within` is given the search for a point within that
+    /// distance, which reaches no farther and stops at the first.
+    fn bounded_to(&self, p: Point3, mut best: (f64, Vec2), within: Option<f64>) -> (f64, Vec2) {
         // Rounding in the squared distance's Bernstein forms grows with the coordinates.
         let margin = tol::LINEAR.max(1e-12 * (p.norm() + best.0));
+        if let Some(r) = within {
+            best.0 = best.0.min(r + margin);
+        }
         if best.0 <= margin {
             return best;
         }
@@ -2692,10 +2714,14 @@ impl NurbsSurface {
             p,
             best,
             margin,
+            enough: within.unwrap_or(f64::NEG_INFINITY),
             looked: 0,
             kinks: [self.kinks(true), self.kinks(false)],
         };
         for k in near {
+            if bound.best.0 <= bound.enough {
+                break;
+            }
             if gap(k).sqrt() <= bound.reach() {
                 let bz = &self.beziers()[k];
                 let nets = self.bound_nets(k);
@@ -2774,6 +2800,27 @@ impl NurbsSurface {
             return local;
         }
         let global = self.project(p);
+        if self.eval(global.x, global.y).dist(p) < d {
+            global
+        } else {
+            local
+        }
+    }
+
+    /// [`NurbsSurface::project_near`] for a point carried on from `hint`, as an iterate of a
+    /// refinement is, whose caller accepts only what it can check: the foot found from the hint,
+    /// or where that is not near the surface the nearer of it and the seeds' nearest point,
+    /// without [`NurbsSurface::bounded`] to make the seeds' answer certain.
+    pub(crate) fn project_onward(&self, p: Point3, hint: Vec2) -> Vec2 {
+        let at = self.d2(hint.x, hint.y);
+        if self.pole_at(hint, &at).is_some() {
+            return self.seeded(p).1;
+        }
+        let (local, d, settled) = self.search(p, hint, Some(at));
+        if settled && d <= self.near_radius() {
+            return local;
+        }
+        let global = self.seeded(p).1;
         if self.eval(global.x, global.y).dist(p) < d {
             global
         } else {
@@ -2989,6 +3036,8 @@ struct Bound<'a> {
     p: Point3,
     best: (f64, Vec2),
     margin: f64,
+    /// A distance the search stops at once it has a point that near.
+    enough: f64,
     looked: usize,
     /// [`NurbsSurface::kinks`] along u and along v.
     kinks: [Vec<f64>; 2],
@@ -3012,6 +3061,9 @@ impl Bound<'_> {
 
     /// Searches `pc`, at `depth` halvings into its patch.
     fn piece(&mut self, pc: Piece, depth: usize) {
+        if self.best.0 <= self.enough {
+            return;
+        }
         self.looked += 1;
         let bb = pc.bz.bbox();
         if box_gap2(&bb, self.p).sqrt() > self.reach() {
@@ -4377,6 +4429,19 @@ pub(crate) mod tests {
         let uv = s.project(p);
         let got = s.eval(uv.x, uv.y).dist(p);
         assert!((got - want).abs() <= tol::LINEAR, "{got} {want}");
+    }
+
+    #[test]
+    fn a_point_within_a_distance_is_found_where_the_seeds_miss_it_and_only_there() {
+        // Beside the bump the seeds' nearest point is the flat below, farther than the flank.
+        let s = bump(2.0, 1e4);
+        let p = Vec3::new(4.0, 6.6, 5.0 / 3.0);
+        let want = by_grid(&s, p, 400);
+        let uv = s
+            .point_within(p, want + 0.01)
+            .expect("the flank is that near");
+        assert!(s.eval(uv.x, uv.y).dist(p) <= want + 0.01);
+        assert_eq!(s.point_within(p, want - 0.01), None);
     }
 
     #[test]
