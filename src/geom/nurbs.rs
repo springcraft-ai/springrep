@@ -14,6 +14,7 @@ use super::steady::Swept;
 use crate::{
     Result,
     error::invalid,
+    geom::bernstein::{Net, mul, scalar_casteljau},
     math::{Aabb, Point3, Transform, Vec2, Vec3},
     mesh::bvh::Bvh,
     numeric::{self, solve2},
@@ -1014,6 +1015,8 @@ struct Kept {
     beziers: OnceLock<Vec<Bezier>>,
     /// The surface over each pair of spans as a polynomial.
     polys: OnceLock<SpanPolys>,
+    /// What projection's bounded search needs of each Bézier patch, by patch.
+    bound_nets: OnceLock<Vec<OnceLock<Arc<BoundNets>>>>,
 }
 
 /// The seeds of global projection: points of the surface with their parameters, row by row along
@@ -2619,6 +2622,12 @@ impl NurbsSurface {
 
     /// The parameters of the surface point nearest `p`, periodic parameters in the knot domain.
     pub fn project(&self, p: Point3) -> Vec2 {
+        self.bounded(p, self.seeded(p)).1
+    }
+
+    /// The nearest point to `p` that searches from the seeds nearest it find, as its distance and
+    /// parameters.
+    fn seeded(&self, p: Point3) -> (f64, Vec2) {
         // The four nearest seeds at distinct points, nearest first: a pole's row of seeds is one
         // point, and four of them would be one search.
         let near = self.nearest_seeds(p);
@@ -2638,7 +2647,108 @@ impl NurbsSurface {
                 break;
             }
         }
-        best.1
+        best
+    }
+
+    /// The point of the surface nearest `p`, within [`tol::LINEAR`] of the nearest, given a point
+    /// `best` found already as its distance and parameters: branch and bound over the surface's
+    /// Bézier patches (Y. L. Ma and W. T. Hewitt, "Point inversion and projection for NURBS curve
+    /// and surface: control polygon approach", CAGD 20, 2003; I. Selimovic, "Improved algorithms
+    /// for the projection of points on NURBS curves and surfaces", CAGD 23, 2006). The seeds
+    /// carry no guarantee: a surface folded back on itself, or narrowing past its face, can put
+    /// every nearby seed in the basin of a farther point.
+    ///
+    /// A patch, or a piece of one, is set aside where it cannot come nearer than `best` by more
+    /// than the tolerance: where the box of its control points is that far off, since with
+    /// positive weights it lies in their convex hull (L. Piegl and W. Tiller, *The NURBS Book*,
+    /// 2nd ed., 1997, §4.2), or where the squared distance, a polynomial in Bernstein form over
+    /// the piece once multiplied by the squared weight, has every control value that large. A
+    /// piece left is done with once its stationary points are known: a nearer point inside a
+    /// patch is a zero of the squared distance's gradient, and one on a side of a patch, where
+    /// the surface may kink or end, a zero of its derivative along that side, or a corner. Each
+    /// is ruled out where a Bernstein form keeps one sign. Inside a piece where interval bounds on
+    /// the gradient's derivatives leave room for one stationary point at most, an interval Newton
+    /// step (R. E. Moore, *Interval Analysis*, 1966) rules it out, or the surface's own search
+    /// finds it; along a side whose derivative is monotone, Newton's method on a bracket finds
+    /// it. A piece neither set aside nor done with is halved (de Casteljau) across its longer
+    /// side, until it is smaller than the tolerance.
+    fn bounded(&self, p: Point3, best: (f64, Vec2)) -> (f64, Vec2) {
+        // Rounding in the squared distance's Bernstein forms grows with the coordinates.
+        let margin = tol::LINEAR.max(1e-12 * (p.norm() + best.0));
+        if best.0 <= margin {
+            return best;
+        }
+        let mut near = Vec::new();
+        self.patch_tree()
+            .within(&Aabb { min: p, max: p }, best.0 - margin, &mut near);
+        if near.is_empty() {
+            return best;
+        }
+        let patches = self.patches();
+        let gap = |k: usize| box_gap2(&patches[k].bbox, p);
+        near.sort_by(|&a, &b| gap(a).total_cmp(&gap(b)));
+        let mut bound = Bound {
+            s: self,
+            p,
+            best,
+            margin,
+            looked: 0,
+            kinks: [self.kinks(true), self.kinks(false)],
+        };
+        for k in near {
+            if gap(k).sqrt() <= bound.reach() {
+                let bz = &self.beziers()[k];
+                let nets = self.bound_nets(k);
+                // The squared distance's bound first, before the rest is worked out.
+                let qq = nets.at(&nets.qq, p);
+                let m = bound.reach();
+                let far =
+                    qq.c.iter()
+                        .zip(&nets.qq[4].c)
+                        .all(|(a, w)| a - m * m * w > 0.0);
+                if !far {
+                    bound.piece(Piece::of(bz, &nets, qq, p), 0);
+                }
+            }
+        }
+        bound.best
+    }
+
+    /// [`BoundNets`] of patch `k` of [`NurbsSurface::beziers`], worked out on first use and kept
+    /// where the surface has few enough patches for that to be cheap.
+    fn bound_nets(&self, k: usize) -> Arc<BoundNets> {
+        let all = self
+            .kept
+            .bound_nets
+            .get_or_init(|| (0..self.beziers().len()).map(|_| OnceLock::new()).collect());
+        if all.len() > BOUND_KEPT {
+            return Arc::new(BoundNets::of(&self.beziers()[k]));
+        }
+        all[k]
+            .get_or_init(|| Arc::new(BoundNets::of(&self.beziers()[k])))
+            .clone()
+    }
+
+    /// The values of u, or of v, along whose lines the surface may kink or end: the ends of its
+    /// domain, which for a periodic parameter is its seam, and its knots repeated as often as the
+    /// degree.
+    fn kinks(&self, along_u: bool) -> Vec<f64> {
+        let b = if along_u { &self.bu } else { &self.bv };
+        let (lo, hi) = b.domain();
+        let mut out = vec![lo, hi];
+        let k = &b.knots;
+        let mut i = 0;
+        while i < k.len() {
+            let mut j = i;
+            while j + 1 < k.len() && k[j + 1] == k[i] {
+                j += 1;
+            }
+            if j + 1 - i >= b.degree && k[i] > lo && k[i] < hi {
+                out.push(k[i]);
+            }
+            i = j + 1;
+        }
+        out
     }
 
     /// How near the surface a point must lie for [`NurbsSurface::project_near`] to take the point
@@ -2711,6 +2821,400 @@ fn pole_of(at: &[Vec3; 6]) -> Option<usize> {
         Some(1)
     } else {
         None
+    }
+}
+
+/// Halvings of a Bézier patch before [`NurbsSurface::bounded`] takes a piece it could not settle
+/// as settled by its corners.
+const BOUND_DEPTH: usize = 64;
+
+/// Pieces [`NurbsSurface::bounded`] looks at in one projection before it takes the rest as
+/// settled by their corners.
+const BOUND_BUDGET: usize = 1 << 14;
+
+/// The most Bézier patches a surface keeps [`BoundNets`] for.
+const BOUND_KEPT: usize = 1 << 16;
+
+/// What [`NurbsSurface::bounded`] needs of a Bézier patch that does not depend on the point: with
+/// `X` the homogeneous coordinates about the patch's own `centre` and `W` the weight,
+/// `Q·Q = X·X − 2 p·(X W) + |p|² W²` for the offset `Q = X − p W` of a point `p` about it, so the
+/// squared distance's polynomials for any point are one sum of five fixed ones. `qq` holds `X·X`,
+/// `X W` (three) and `W²`, in Bernstein form; the gradient's holds `W·B_u / 2 − W_u·B` for each
+/// `B` of them, and its like across v. About the centre, the sum loses no more to cancellation
+/// than the patch's size and the point's distance allow.
+#[derive(Debug)]
+struct BoundNets {
+    centre: Point3,
+    w: Net,
+    qq: [Net; 5],
+    /// `gu` and `gv`, worked out on first use: most patches are set aside on `qq` alone.
+    grad: OnceLock<[[Net; 5]; 2]>,
+}
+
+impl BoundNets {
+    fn of(bz: &Bezier) -> BoundNets {
+        let net = |f: &dyn Fn(&[f64; 4]) -> f64| Net {
+            rows: bz.rows,
+            cols: bz.cols,
+            c: bz.net.iter().map(f).collect(),
+        };
+        let bb = bz.bbox();
+        let centre = (bb.min + bb.max) * 0.5;
+        let w = net(&|h| h[3]);
+        let x: [Net; 3] = std::array::from_fn(|k| net(&|h| h[k] - centre[k] * h[3]));
+        let qq = [
+            x[0].times(&x[0])
+                .plus(&x[1].times(&x[1]))
+                .plus(&x[2].times(&x[2])),
+            x[0].times(&w),
+            x[1].times(&w),
+            x[2].times(&w),
+            w.times(&w),
+        ];
+        BoundNets {
+            centre,
+            w,
+            qq,
+            grad: OnceLock::new(),
+        }
+    }
+
+    fn grad(&self) -> &[[Net; 5]; 2] {
+        self.grad.get_or_init(|| {
+            let (w, qq) = (&self.w, &self.qq);
+            let g = |across_u: bool| -> [Net; 5] {
+                let wd = w.derivative(across_u);
+                std::array::from_fn(|k| {
+                    w.times(&qq[k].derivative(across_u))
+                        .scaled(0.5)
+                        .minus(&wd.times(&qq[k]))
+                })
+            };
+            [g(true), g(false)]
+        })
+    }
+
+    /// The sum of `b` that stands for `p`: `b₀ − 2 q·(b₁, b₂, b₃) + |q|² b₄` for `q` the point
+    /// about the centre.
+    fn at(&self, b: &[Net; 5], p: Point3) -> Net {
+        let q = p - self.centre;
+        let k = [1.0, -2.0 * q.x, -2.0 * q.y, -2.0 * q.z, q.norm2()];
+        let mut c = vec![0.0; b[0].c.len()];
+        for (net, &f) in b.iter().zip(&k) {
+            for (x, &y) in c.iter_mut().zip(&net.c) {
+                *x += f * y;
+            }
+        }
+        Net {
+            rows: b[0].rows,
+            cols: b[0].cols,
+            c,
+        }
+    }
+}
+
+/// A piece of a Bézier patch in the search of [`NurbsSurface::bounded`], with polynomials over
+/// it in Bernstein form for the point `p`: with `Q = X − p·W` the homogeneous offset, `qq = Q·Q`
+/// and `ww = W²`, whose ratio is the squared distance, and `W·Q·Q_u − W_u·Q·Q` and its like
+/// across v, which have the signs of the squared distance's derivatives, as `W > 0`.
+struct Piece {
+    bz: Bezier,
+    qq: Net,
+    ww: Net,
+    grad: [Net; 2],
+}
+
+impl Piece {
+    /// The whole patch `bz`, with its polynomials for `p` from the patch's own `nets`, `qq`
+    /// among them.
+    fn of(bz: &Bezier, nets: &BoundNets, qq: Net, p: Point3) -> Piece {
+        Piece {
+            bz: bz.clone(),
+            qq,
+            ww: nets.qq[4].clone(),
+            grad: nets.grad().each_ref().map(|g| nets.at(g, p)),
+        }
+    }
+
+    fn halves(&self, across_u: bool) -> [Piece; 2] {
+        let [b0, b1] = self.bz.halves(across_u);
+        let [q0, q1] = self.qq.halves(across_u);
+        let [w0, w1] = self.ww.halves(across_u);
+        let [gu, gv] = &self.grad;
+        let ([u0, u1], [v0, v1]) = (gu.halves(across_u), gv.halves(across_u));
+        let (g0, g1) = ([u0, v0], [u1, v1]);
+        [
+            Piece {
+                bz: b0,
+                qq: q0,
+                ww: w0,
+                grad: g0,
+            },
+            Piece {
+                bz: b1,
+                qq: q1,
+                ww: w1,
+                grad: g1,
+            },
+        ]
+    }
+
+    /// The point at `st` of the piece's own unit square, and its parameters on the surface.
+    fn at(&self, st: Vec2) -> Vec2 {
+        let (lo, hi) = (self.bz.lo, self.bz.hi);
+        Vec2::new(lo.x + st.x * (hi.x - lo.x), lo.y + st.y * (hi.y - lo.y))
+    }
+
+    /// The control point at row `i`, column `j`, in Euclidean coordinates.
+    fn point(&self, i: usize, j: usize) -> Point3 {
+        let h = self.bz.net[i * self.bz.cols + j];
+        Vec3::new(h[0] / h[3], h[1] / h[3], h[2] / h[3])
+    }
+
+    /// Whether the control net runs longer along u than along v.
+    fn longer_along_u(&self) -> bool {
+        let (r, c) = (self.bz.rows, self.bz.cols);
+        let along = |n: usize, m: usize, at: &dyn Fn(usize, usize) -> Point3| {
+            (0..m)
+                .map(|l| (1..n).map(|k| at(k - 1, l).dist(at(k, l))).sum::<f64>())
+                .fold(0.0, f64::max)
+        };
+        along(r, c, &|i, j| self.point(i, j)) >= along(c, r, &|j, i| self.point(i, j))
+    }
+}
+
+/// The state of one search of [`NurbsSurface::bounded`].
+struct Bound<'a> {
+    s: &'a NurbsSurface,
+    p: Point3,
+    best: (f64, Vec2),
+    margin: f64,
+    looked: usize,
+    /// [`NurbsSurface::kinks`] along u and along v.
+    kinks: [Vec<f64>; 2],
+}
+
+impl Bound<'_> {
+    /// The distance a piece must come within to be looked at.
+    fn reach(&self) -> f64 {
+        self.best.0 - self.margin
+    }
+
+    /// Takes the point at `uv` as the nearest where it is nearer by more than the margin: one
+    /// nearer by less is as good, and keeping the point found first keeps the answer the seeds
+    /// gave wherever it was right.
+    fn offer(&mut self, uv: Vec2) {
+        let d = self.s.eval(uv.x, uv.y).dist(self.p);
+        if d < self.best.0 - self.margin {
+            self.best = (d, uv);
+        }
+    }
+
+    /// Searches `pc`, at `depth` halvings into its patch.
+    fn piece(&mut self, pc: Piece, depth: usize) {
+        self.looked += 1;
+        let bb = pc.bz.bbox();
+        if box_gap2(&bb, self.p).sqrt() > self.reach() {
+            return;
+        }
+        // The corners are points of the surface.
+        let (r, c) = (pc.bz.rows, pc.bz.cols);
+        for (i, j) in [(0, 0), (r - 1, 0), (0, c - 1), (r - 1, c - 1)] {
+            let d = pc.point(i, j).dist(self.p);
+            if d < self.best.0 - self.margin {
+                let st = Vec2::new(f64::from(u8::from(i > 0)), f64::from(u8::from(j > 0)));
+                self.best = (d, pc.at(st));
+            }
+        }
+        let m = self.reach();
+        if m <= 0.0 || pc.qq.minus(&pc.ww.scaled(m * m)).range().0 > 0.0 {
+            return;
+        }
+        let [gu, gv] = &pc.grad;
+        let settled = (gu.clear_of_zero() || gv.clear_of_zero() || self.inside(&pc, gu, gv))
+            && (0..4).all(|side| self.side(&pc, gu, gv, side));
+        if settled
+            || (bb.max - bb.min).norm() <= self.margin
+            || depth >= BOUND_DEPTH
+            || self.looked >= BOUND_BUDGET
+        {
+            return;
+        }
+        let [a, b] = pc.halves(pc.longer_along_u());
+        let gap = |h: &Piece| box_gap2(&h.bz.bbox(), self.p);
+        let (a, b) = if gap(&b) < gap(&a) { (b, a) } else { (a, b) };
+        self.piece(a, depth + 1);
+        self.piece(b, depth + 1);
+    }
+
+    /// Whether the piece's stationary points are known: where no matrix the interval bounds on
+    /// the gradient's derivatives allow is singular, two points of the piece cannot both be
+    /// stationary (the mean value theorem), and the one there may be is ruled out by an interval
+    /// Newton step or found by the surface's own search.
+    fn inside(&mut self, pc: &Piece, gu: &Net, gv: &Net) -> bool {
+        let r = [
+            gu.derivative_range(true),
+            gu.derivative_range(false),
+            gv.derivative_range(true),
+            gv.derivative_range(false),
+        ];
+        let (ad, bc) = (mul(r[0], r[3]), mul(r[1], r[2]));
+        let det = (ad.0 - bc.1, ad.1 - bc.0);
+        if !(det.0 > 0.0 || det.1 < 0.0) {
+            return false;
+        }
+        // Interval Newton (Moore): a zero of the gradient in the piece lies in
+        // m − J⁻¹·g(m) for some J the bounds allow, m the middle; where that set misses the
+        // piece, the piece holds none.
+        let (f, g) = (gu.eval(0.5, 0.5), gv.eval(0.5, 0.5));
+        let scale = |(lo, hi): (f64, f64), k: f64| mul((lo, hi), (k, k));
+        let less = |x: (f64, f64), y: (f64, f64)| (x.0 - y.1, x.1 - y.0);
+        let over = |x: (f64, f64)| mul(x, (1.0 / det.1, 1.0 / det.0));
+        let step_s = over(less(scale(r[3], f), scale(r[1], g)));
+        let step_t = over(less(scale(r[0], g), scale(r[2], f)));
+        let slack = 1e-9;
+        let misses = |step: (f64, f64)| 0.5 - step.0 < -slack || 0.5 - step.1 > 1.0 + slack;
+        if misses(step_s) || misses(step_t) {
+            return true;
+        }
+        // The surface's own search finds the one quickly, from the nearest point so far where
+        // it lies in the piece, as the seeds' foot mostly does, or from the piece's middle: a
+        // point it settles on inside the piece and off the ends of the domain is stationary.
+        let s = self.s;
+        let ((u0, u1), (v0, v1)) = s.domain();
+        let (lo, hi) = (pc.bz.lo, pc.bz.hi);
+        let slack = 1e-12 * (1.0 + (hi - lo).norm());
+        let held = |x: f64, a: f64, b: f64, free: bool| !free && (x <= a || x >= b);
+        let within = |uv: Vec2| {
+            let wrap = |x: f64, a: f64, b: f64, period: Option<f64>| match period {
+                Some(t) if x < a - slack => x + t,
+                Some(t) if x > b + slack => x - t,
+                _ => x,
+            };
+            let (x, y) = (
+                wrap(uv.x, lo.x, hi.x, s.u_period),
+                wrap(uv.y, lo.y, hi.y, s.v_period),
+            );
+            x >= lo.x - slack
+                && x <= hi.x + slack
+                && y >= lo.y - slack
+                && y <= hi.y + slack
+                && !held(uv.x, u0, u1, s.u_period.is_some())
+                && !held(uv.y, v0, v1, s.v_period.is_some())
+        };
+        let mut starts = vec![pc.at(Vec2::new(0.5, 0.5))];
+        if within(self.best.1) {
+            starts.insert(0, self.best.1);
+        }
+        for start in starts {
+            let (uv, _, settled) = s.search(self.p, start, None);
+            if settled && within(uv) {
+                self.offer(uv);
+                return true;
+            }
+        }
+        // Not found: the piece is halved, and a half without one is ruled out.
+        false
+    }
+
+    /// Whether the stationary points along side `side` of the piece (v low, v high, u low, u
+    /// high) are known, where the surface may kink or end along it: none, or the one a derivative
+    /// that keeps one sign allows, found by Newton's method on a bracket. Elsewhere a nearer point
+    /// on the side is a stationary point of the piece, which [`Bound::inside`] finds. A side that
+    /// is one point, a pole, is its corners.
+    fn side(&mut self, pc: &Piece, gu: &Net, gv: &Net, side: usize) -> bool {
+        let (lo, hi) = (pc.bz.lo, pc.bz.hi);
+        let (at, kinks) = match side {
+            0 => (lo.y, &self.kinks[1]),
+            1 => (hi.y, &self.kinks[1]),
+            2 => (lo.x, &self.kinks[0]),
+            _ => (hi.x, &self.kinks[0]),
+        };
+        if !kinks.contains(&at) {
+            return true;
+        }
+        let (r, c) = (pc.bz.rows, pc.bz.cols);
+        let points: Vec<Point3> = match side {
+            0 => (0..r).map(|i| pc.point(i, 0)).collect(),
+            1 => (0..r).map(|i| pc.point(i, c - 1)).collect(),
+            2 => (0..c).map(|j| pc.point(0, j)).collect(),
+            _ => (0..c).map(|j| pc.point(r - 1, j)).collect(),
+        };
+        if points
+            .iter()
+            .all(|q| q.dist(points[0]) <= 1e-3 * tol::LINEAR)
+        {
+            return true;
+        }
+        // Along the side alone the squared distance may keep clear of the reach.
+        let m = self.reach();
+        let row = |n: &Net| -> Vec<f64> {
+            match side {
+                0 => (0..n.rows).map(|i| n.at(i, 0)).collect(),
+                1 => (0..n.rows).map(|i| n.at(i, n.cols - 1)).collect(),
+                2 => (0..n.cols).map(|j| n.at(0, j)).collect(),
+                _ => (0..n.cols).map(|j| n.at(n.rows - 1, j)).collect(),
+            }
+        };
+        if row(&pc.qq)
+            .iter()
+            .zip(row(&pc.ww))
+            .all(|(a, w)| a - m * m * w > 0.0)
+        {
+            return true;
+        }
+        // The derivative along the side: the gradient's control values on it.
+        let e = row(if side < 2 { gu } else { gv });
+        let clear = |v: &mut dyn Iterator<Item = f64>| {
+            let (lo, hi) = v.fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), x| {
+                (a.min(x), b.max(x))
+            });
+            lo > 0.0 || hi < 0.0
+        };
+        if clear(&mut e.iter().copied()) {
+            return true;
+        }
+        if !clear(&mut e.windows(2).map(|w| w[1] - w[0])) {
+            return false;
+        }
+        // Monotone along the side: one zero at most, between ends of opposite sign.
+        let (ea, eb) = (e[0], e[e.len() - 1]);
+        if ea * eb > 0.0 {
+            return true;
+        }
+        // Newton's method on the bracket, halving it where a step would leave it.
+        let de: Vec<f64> = e
+            .windows(2)
+            .map(|w| (e.len() - 1) as f64 * (w[1] - w[0]))
+            .collect();
+        let (mut a, mut b, mut t) = (0.0, 1.0, 0.5);
+        for _ in 0..60 {
+            let f = scalar_casteljau(&e, t);
+            if (f > 0.0) == (ea > 0.0) {
+                a = t;
+            } else {
+                b = t;
+            }
+            let step = f / scalar_casteljau(&de, t);
+            let next = if (t - step > a) && (t - step < b) {
+                t - step
+            } else {
+                0.5 * (a + b)
+            };
+            let done = (next - t).abs() <= 1e-13 || b - a <= 1e-13;
+            t = next;
+            if done {
+                break;
+            }
+        }
+        let st = match side {
+            0 => Vec2::new(t, 0.0),
+            1 => Vec2::new(t, 1.0),
+            2 => Vec2::new(0.0, t),
+            _ => Vec2::new(1.0, t),
+        };
+        self.offer(pc.at(st));
+        true
     }
 }
 
@@ -3820,5 +4324,114 @@ pub(crate) mod tests {
                 "{uv:?} at {d}, foot {foot}"
             );
         }
+    }
+    /// The distance from `p` to `s` found from a grid of `n` × `n` points over its domain, then
+    /// a search from the grid point nearest `p`: a fine grid puts that search in the basin of the
+    /// nearest point.
+    fn by_grid(s: &NurbsSurface, p: Point3, n: usize) -> f64 {
+        let ((u0, u1), (v0, v1)) = s.domain();
+        let mut best = (f64::INFINITY, Vec2::ZERO);
+        for i in 0..=n {
+            for j in 0..=n {
+                let uv = Vec2::new(
+                    u0 + (u1 - u0) * i as f64 / n as f64,
+                    v0 + (v1 - v0) * j as f64 / n as f64,
+                );
+                let d = s.eval(uv.x, uv.y).dist(p);
+                if d < best.0 {
+                    best = (d, uv);
+                }
+            }
+        }
+        s.search(p, best.1, None).1.min(best.0)
+    }
+
+    /// A flat bicubic sheet 12 square on z = 0 with its middle control point raised `height` and
+    /// weighted `weight`: a steep bump, about two across, on a sheet whose seeds lie over three
+    /// apart.
+    fn bump(height: f64, weight: f64) -> NurbsSurface {
+        let mut ctrl = Vec::new();
+        let mut w = Vec::new();
+        for i in 0..13 {
+            for j in 0..13 {
+                let up = i == 6 && j == 6;
+                ctrl.push(Vec3::new(i as f64, j as f64, if up { height } else { 0.0 }));
+                w.push(if up { weight } else { 1.0 });
+            }
+        }
+        let mut k = vec![0.0; 4];
+        k.extend((1..10).map(f64::from));
+        k.extend([10.0; 4]);
+        NurbsSurface::new((3, 3), (k.clone(), k), (13, 13), ctrl, Some(w)).unwrap()
+    }
+
+    #[test]
+    fn projection_finds_a_bump_between_the_seeds() {
+        // Beside the bump and over the flat sheet, the seeds nearest the point all lie on the
+        // flat, and their searches settle on the flat right below it; the bump's flank is nearer.
+        let s = bump(2.0, 1e4);
+        let p = Vec3::new(4.0, 6.6, 5.0 / 3.0);
+        let want = by_grid(&s, p, 400);
+        let seeded = s.seeded(p).0;
+        assert!(seeded > want + 0.3, "{seeded} {want}");
+        let uv = s.project(p);
+        let got = s.eval(uv.x, uv.y).dist(p);
+        assert!((got - want).abs() <= tol::LINEAR, "{got} {want}");
+    }
+
+    #[test]
+    fn the_bounded_search_finds_the_near_sheet_of_a_fold_from_a_foot_on_the_far_one() {
+        // Between the two sheets of a fold and nearer the upper, a search from the lower sheet
+        // settles on it: handed that foot, the bounded search still finds the upper sheet.
+        let s = hairpin();
+        for z in [0.58, 0.66, 0.74, 0.82] {
+            let p = Vec3::new(1.0, 1.0, z);
+            let (uv, d, settled) = s.search(p, Vec2::new(0.1, 0.5), None);
+            let want = by_grid(&s, p, 600);
+            assert!(settled && d > want + 0.15, "{d} {want}");
+            let got = s.bounded(p, (d, uv));
+            assert!((got.0 - want).abs() <= tol::LINEAR, "{got:?} {want}");
+            assert!((s.eval(got.1.x, got.1.y).dist(p) - got.0).abs() <= 1e-12);
+        }
+    }
+
+    #[test]
+    fn the_bounded_search_finds_a_spheres_nearest_point_from_a_far_corner() {
+        // From inside the sphere of radius 2 the nearest point is straight out, 2 − |p| away.
+        let crate::geom::Surface::Nurbs(s) = octant(2.0) else {
+            unreachable!()
+        };
+        for p in [
+            Vec3::new(0.3, 0.4, 0.5),
+            Vec3::new(0.9, 0.2, 0.1),
+            Vec3::new(1.2, 1.1, 0.4),
+        ] {
+            let far = Vec2::new(0.0, 0.0);
+            let got = s.bounded(p, (s.eval(far.x, far.y).dist(p), far));
+            assert!((got.0 - (2.0 - p.norm())).abs() <= tol::LINEAR, "{got:?}");
+            let q = s.eval(got.1.x, got.1.y);
+            assert!(q.dist(p * (2.0 / p.norm())) <= 1e-6, "{q:?}");
+        }
+    }
+
+    #[test]
+    fn the_bounded_search_finds_a_foot_on_a_side_of_the_surface() {
+        // Beyond the side x = 1 of the unit square, the nearest point is on that side, level with
+        // the point: no stationary point of the distance inside the square leads there.
+        let ctrl = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.0),
+        ];
+        let k = vec![0.0, 0.0, 1.0, 1.0];
+        let s = NurbsSurface::new((1, 1), (k.clone(), k), (2, 2), ctrl, None).unwrap();
+        let p = Vec3::new(1.5, 0.3, 0.4);
+        let got = s.bounded(p, (p.norm(), Vec2::ZERO));
+        assert!(
+            (got.0 - (0.25f64 + 0.16).sqrt()).abs() <= tol::LINEAR,
+            "{got:?}"
+        );
+        assert!((got.1 - Vec2::new(1.0, 0.3)).norm() <= 1e-9, "{got:?}");
     }
 }

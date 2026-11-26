@@ -1,5 +1,6 @@
 //! Curves and surfaces, each with evaluation, derivatives, projection and parameter ranges.
 
+pub(crate) mod bernstein;
 mod bspline;
 mod curve;
 mod intersection;

@@ -3327,6 +3327,67 @@ fn a_face_across_a_lofted_splines_join_is_written_inside_its_surface() {
 }
 
 #[test]
+fn a_smooth_loft_whose_surface_narrows_past_an_end_reads_back_as_written() {
+    // Smooth lofts through four circles, the last or the first much smaller than its neighbour.
+    // The side's surface, carried on past that end section, narrows through its axis to a small
+    // ring, so every seed of global projection on that end of the surface lies near every other.
+    // The end section's rim must still project onto itself, not onto the surface's end over a
+    // millimetre away, or the file reads back with the rim moved, or not at all (#99).
+    let lofts: [[(f64, [f64; 2], f64); 4]; 2] = [
+        [
+            (0.0, [0.0405, -0.3460], 3.8359),
+            (3.5205, [0.0995, -0.1082], 3.1895),
+            (5.6382, [-0.4869, -0.2673], 3.7598),
+            (7.6977, [-0.3815, -0.2006], 1.4138),
+        ],
+        [
+            (0.0, [0.4459, -0.0143], 1.1754),
+            (4.4557, [0.0546, 0.3519], 3.0649),
+            (8.1294, [-0.1458, 0.0460], 1.7985),
+            (11.5904, [0.4700, 0.2362], 1.0658),
+        ],
+    ];
+    for circles in lofts {
+        let sections: Vec<crate::loft::Section> = circles
+            .iter()
+            .map(|&(z, c, r)| crate::loft::Section {
+                profile: Profile::circle(Vec2::new(c[0], c[1]), 2.0 * r),
+                frame: Frame::new(Vec3::new(0.0, 0.0, z), Vec3::Z, Vec3::X).unwrap(),
+            })
+            .collect();
+        let b = crate::loft::loft(&sections, false, "l").unwrap();
+        // Both rims and the seam lie on the side, and projection finds them there.
+        let side = b
+            .face_ids()
+            .find(|&f| matches!(b.face(f).surface, Surface::Nurbs(_)))
+            .unwrap();
+        let s = &b.face(side).surface;
+        for e in b.edge_ids() {
+            let edge = b.edge(e);
+            let c = edge.curve.as_ref().unwrap();
+            for i in 0..=32 {
+                let p = c.eval(edge.range.0 + (edge.range.1 - edge.range.0) * i as f64 / 32.0);
+                let uv = s.project(p);
+                let off = s.eval(uv.x, uv.y).dist(p);
+                assert!(off <= crate::tol::LINEAR, "{p:?} projects {off} off");
+            }
+        }
+        round_trip(&b);
+        // The file agrees with itself, so a strict read takes it as it is.
+        let text = write(&b, "l").unwrap();
+        let imp = read_with(text.as_bytes(), "imp", &STRICT).unwrap();
+        assert!(imp.rejected.is_empty(), "{:?}", imp.rejected);
+        assert!(imp.healed.is_empty(), "{:?}", imp.healed);
+        for (got, want, what) in [
+            (measure::volume(&imp.brep), measure::volume(&b), "volume"),
+            (measure::area(&imp.brep), measure::area(&b), "area"),
+        ] {
+            assert!((got - want).abs() <= 1e-9 * want, "{what} {got} vs {want}");
+        }
+    }
+}
+
+#[test]
 fn an_unclamped_closed_nurbs_is_turned_to_start_where_its_edge_does() {
     // A cubic on even knots round eight points, its first three again at the end, as a file may
     // carry a closed curve: it is closed, and has no knot of more than one at its ends.
