@@ -2268,7 +2268,8 @@ from the normal's side, so a solid's outer outline turns counter-clockwise about
 they join at the plane's meetings with edges, within each edge's and vertex's own tolerance and at
 least ten times `LINEAR`. Where more than two pieces meet, as at a vertex where faces pinch, each
 arriving piece continues on the first leaving clockwise from it round the point in the plane, so
-each wedge of the cut keeps its own corner. A face lying in the plane gives its loops; an edge lying
+each wedge of the cut keeps its own corner. A face lying in the plane gives its loops, turned to run with the face on their left seen from the
+normal; an edge lying
 in it, of no such face, is a piece of the slice; a curve the plane only touches cuts nothing,
 nor does a traced loop no wider than ten times the join distance. The
 faces' domains, boxes and critical points are worked out once for every plane of `slices`.

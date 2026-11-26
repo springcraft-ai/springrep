@@ -211,6 +211,28 @@ fn a_drilled_block_is_cut_in_its_outline_and_its_holes() {
         Vec3::Z,
     );
     close(area, 1200.0 - 18.0 * PI, 1e-9);
+    // Its bottom along +z, and its top along −z, are cut the same way: each loop is turned to run
+    // with the face on its left seen from the normal, so the area is the face's, not its negative.
+    for (z, n) in [(0.0, Vec3::Z), (10.0, -Vec3::Z)] {
+        let o = Point3::new(0.0, 0.0, z);
+        let got = measure::slice(&b, o, n).unwrap();
+        chained(&got, o, n);
+        assert_eq!(got.len(), 19);
+        let (_, area) = totals(got.iter().map(|c| c.edges.as_slice()), o, n);
+        close(area, 1200.0 - 18.0 * PI, 1e-9);
+    }
+    // A 2 × 3 × 1 block at its top and bottom, along +z and −z: area 6 each way.
+    let blk = primitive::block(&Frame::WORLD, Vec3::new(2.0, 3.0, 1.0), "b").unwrap();
+    for z in [0.0, 1.0] {
+        for n in [Vec3::Z, -Vec3::Z] {
+            let o = Point3::new(0.0, 0.0, z);
+            let got = measure::slice(&blk, o, n).unwrap();
+            chained(&got, o, n);
+            assert_eq!(got.len(), 1, "z = {z}, n = {n:?}");
+            let (_, area) = totals([got[0].edges.as_slice()], o, n);
+            close(area, 6.0, 1e-12);
+        }
+    }
 }
 
 #[test]

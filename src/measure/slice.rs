@@ -288,11 +288,15 @@ impl<'a> Slicer<'a> {
             }
         }
         let mut out: Vec<SliceCurve> = Vec::new();
-        // A face lying in the plane is its own part of the slice: each of its loops, as the face
-        // runs it.
+        // A face lying in the plane is its own part of the slice: each of its loops, turned to
+        // run with the face on its left seen from the normal. The face runs them anticlockwise
+        // about its outward normal, so they are turned where that points against the normal.
         for &f in &coplanar {
-            for &l in &b.face(f).loops {
-                let edges: Vec<SectionEdge> = b
+            let face = b.face(f);
+            let outward = face.surface.normal(0.0, 0.0);
+            let against = (if face.reversed { -outward } else { outward }).dot(n) < 0.0;
+            for &l in &face.loops {
+                let mut edges: Vec<SectionEdge> = b
                     .lp(l)
                     .coedges
                     .iter()
@@ -306,6 +310,9 @@ impl<'a> Slicer<'a> {
                         })
                     })
                     .collect();
+                if against {
+                    reverse(&mut edges);
+                }
                 if !edges.is_empty() {
                     out.push(SliceCurve {
                         edges,
@@ -611,8 +618,9 @@ fn chain(runs: Vec<Run>, nodes: &mut Vec<Node>, n: Vec3) -> Vec<SliceCurve> {
 /// - Pieces join where they end within the tolerance of the edge or vertex they end at, at least
 ///   ten times [`tol::LINEAR`]. Where more than two meet, as at a vertex where faces pinch, each
 ///   continues on the next clockwise round the point in the plane.
-/// - A face lying in the plane gives each of its loops, as the face runs them, in place of the cut
-///   curves of the faces beside it that run along its boundary.
+/// - A face lying in the plane gives each of its loops, run with the face on its left seen from
+///   the normal as every curve of the slice is, in place of the cut curves of the faces beside it
+///   that run along its boundary.
 /// - An edge lying in the plane, of no face lying in it, is a piece of the slice: where two faces
 ///   cross the plane at an edge they share, or a sheet's boundary in the plane.
 /// - Where the plane only touches a face, along a curve or at a point, nothing is cut there; nor
