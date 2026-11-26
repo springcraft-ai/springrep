@@ -1248,14 +1248,31 @@ impl<'g, 'a> Reader<'g, 'a> {
                 return bad(id, "a VERTEX_LOOP off its face's surface");
             }
         }
-        // A whole sphere, bounded only by a vertex loop at one pole: the kernel's seam, a
-        // meridian from the other pole to it, used both ways.
-        if let ([apex], 0, Surface::Sphere(sp)) = (apexes.as_slice(), bounds.len(), &surface) {
+        // A whole sphere, bounded only by vertex loops at its poles, at one or at both: the
+        // kernel's seam, a meridian from one pole to the other, used both ways. A vertex loop at
+        // a pole is that end of the seam; the read makes the other end where no loop is.
+        if let ([apex, rest @ ..], 0, Surface::Sphere(sp)) =
+            (apexes.as_slice(), bounds.len(), &surface)
+        {
             let (c, p) = (sp.frame.origin, self.raw.points[*apex]);
             let other = c * 2.0 - p;
-            self.raw.points.push(other);
-            self.raw.vertex_ids.push(id);
-            let from = self.raw.points.len() - 1;
+            let from = match rest {
+                [] => {
+                    self.raw.points.push(other);
+                    self.raw.vertex_ids.push(id);
+                    self.raw.points.len() - 1
+                }
+                // Each loop lies at a pole; a second one is the other end of the seam only where
+                // the pole it is nearest is not the first's. For q within the tolerance of a pole,
+                // |q - n|^2 - |q - s|^2 = -4 r (q - c).z, so the nearer pole is the one on q's side
+                // of the equator.
+                &[v] if (self.raw.points[v] - c).dot(sp.frame.z) * (p - c).dot(sp.frame.z)
+                    < 0.0 =>
+                {
+                    v
+                }
+                _ => return bad(id, "more than one vertex loop at a pole of a sphere"),
+            };
             let x = (other - c).unit_or_zero();
             let Ok(frame) = Frame::new(c, x.cross(sp.frame.x), x) else {
                 return bad(id, "the vertex loop is not at a pole of its sphere");

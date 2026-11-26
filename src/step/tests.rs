@@ -1228,6 +1228,114 @@ fn a_ball_bounded_by_a_vertex_loop_alone_is_read_whole() {
     assert!((measure::area(&imp.brep) - 100.0 * PI).abs() < 1e-9 * 100.0 * PI);
 }
 
+/// A ball of radius 5 about (1, 2, 3), its sphere's axis along `(0, a, b)`, written as one face
+/// bounded only by a `VERTEX_LOOP` at each point `c + 5 s (0, a, b)` for `s` in `at`, as a file
+/// writes a ball where two races touch it at the ends of a diameter.
+fn ball_held_at(a: f64, b: f64, at: &[f64]) -> String {
+    let mut data = format!(
+        "#1=CARTESIAN_POINT('',(1.,2.,3.));
+#2=DIRECTION('',(0.,{a:?},{b:?}));
+#3=DIRECTION('',(1.,0.,0.));
+#4=AXIS2_PLACEMENT_3D('',#1,#2,#3);
+#5=SPHERICAL_SURFACE('',#4,5.);\n"
+    );
+    let mut bounds = Vec::new();
+    for (k, s) in at.iter().enumerate() {
+        let i = 20 + 4 * k;
+        let (y, z) = (2.0 + 5.0 * s * a, 3.0 + 5.0 * s * b);
+        data.push_str(&format!(
+            "#{i}=CARTESIAN_POINT('',(1.,{y:?},{z:?}));\n#{}=VERTEX_POINT('',#{i});\n\
+             #{}=VERTEX_LOOP('',#{});\n#{}=FACE_BOUND('',#{},.T.);\n",
+            i + 1,
+            i + 2,
+            i + 1,
+            i + 3,
+            i + 2
+        ));
+        bounds.push(format!("#{}", i + 3));
+    }
+    data.push_str(&format!(
+        "#10=ADVANCED_FACE('',({}),#5,.T.);\n#11=CLOSED_SHELL('',(#10));\n\
+         #12=MANIFOLD_SOLID_BREP('',#11);",
+        bounds.join(",")
+    ));
+    step_file(&data)
+}
+
+/// A ball of radius 5 bounded only by two `VERTEX_LOOP`s, one at each pole of its sphere, as
+/// where two races touch a bearing's ball: the whole sphere, its seam a meridian between the two
+/// loops' vertices. Volume 4 pi r^3 / 3 = 500 pi / 3 and area 4 pi r^2 = 100 pi, by default and
+/// strictly, with the axis along z or tilted; it meshes watertight, with both vertices corners of
+/// the mesh. Two loops at the same pole are refused by name.
+#[test]
+fn a_ball_bounded_by_vertex_loops_at_both_poles_is_read_whole() {
+    let (volume, area) = (500.0 * PI / 3.0, 100.0 * PI);
+    for (a, b) in [(0.0, 1.0), (0.6, 0.8)] {
+        for at in [[-1.0, 1.0], [1.0, -1.0]] {
+            let text = ball_held_at(a, b, &at);
+            for options in [ReadOptions::default(), ReadOptions::default().strict(true)] {
+                let imp = read_with(text.as_bytes(), "ball", &options).unwrap();
+                assert!(
+                    imp.rejected.is_empty(),
+                    "{a} {b} {at:?}: {:?}",
+                    imp.rejected
+                );
+                assert!(imp.healed.is_empty() && imp.tolerant.is_empty());
+                let brep = &imp.brep;
+                assert!(check::check(brep).is_empty(), "{:?}", check::check(brep));
+                assert_eq!(brep.face_count(), 1);
+                assert_eq!(brep.vertex_ids().count(), 2);
+                // One seam, and the kernel's degenerate edge at each pole.
+                let seams = brep.edge_ids().filter(|&e| !brep.edge(e).is_degenerate());
+                assert_eq!(seams.count(), 1);
+                let (got_area, got) = measure::area_and_volume(brep);
+                assert!((got - volume).abs() <= 1e-9 * volume, "{got}");
+                assert!((got_area - area).abs() <= 1e-9 * area, "{got_area}");
+                let poles: Vec<Vec3> = at
+                    .iter()
+                    .map(|s| Vec3::new(1.0, 2.0 + 5.0 * s * a, 3.0 + 5.0 * s * b))
+                    .collect();
+                for p in &poles {
+                    assert!(
+                        brep.vertex_ids()
+                            .any(|v| brep.vertex(v).point.dist(*p) <= 1e-12),
+                        "{p:?}"
+                    );
+                }
+                let opt = crate::mesh::MeshOptions::within(0.01);
+                let m = crate::mesh::tessellate(brep, &opt).unwrap();
+                let s = brep.solid_ids().next().unwrap();
+                let rep = crate::mesh::report(brep, &m, s);
+                assert!(rep.watertight(), "{rep:?}");
+                assert_eq!(rep.degenerate_triangles, 0);
+                assert!((rep.volume.abs() - volume).abs() <= area * opt.linear);
+                for p in &poles {
+                    let corner = m.triangles.iter().flatten();
+                    assert!(
+                        corner
+                            .into_iter()
+                            .any(|&i| m.positions[i as usize].dist(*p) <= 1e-12)
+                    );
+                }
+                round_trip(brep);
+            }
+        }
+    }
+    // The same vertex twice, or two vertices at one pole, close the sphere at one point only:
+    // here 5 (1 -+ 1.6e-8) along the axis, each 0.8e-7 from the pole and 1.6e-7 from the other,
+    // so the two are further apart than the tolerance but nearest the same pole.
+    let d = 1.6e-8;
+    for at in [[1.0, 1.0], [1.0 - d, 1.0 + d], [-1.0 - d, -1.0 + d]] {
+        let imp = read(ball_held_at(0.0, 1.0, &at).as_bytes(), "ball").unwrap();
+        assert_eq!(imp.rejected.len(), 1, "{at:?}");
+        assert!(
+            imp.rejected[0].contains("more than one vertex loop at a pole of a sphere"),
+            "{at:?}: {:?}",
+            imp.rejected
+        );
+    }
+}
+
 #[test]
 fn vertex_loops_close_cones_on_their_apex() {
     let cone = cone_with_vertex_loop("CONICAL_SURFACE('',#12,6.,0.876058050598193)");
