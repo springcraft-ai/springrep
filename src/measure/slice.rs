@@ -270,6 +270,15 @@ impl<'a> Slicer<'a> {
                 if sc.tangent {
                     continue;
                 }
+                // So does a loop no wider than ten times JOIN, as a trace started where the plane
+                // touches a face at a point can leave (at a spline sphere's pole, where the normal
+                // has no limit from the parameters): a loop that narrow lies within LINEAR of its
+                // middle's tangent plane wherever the surface's radius of curvature exceeds
+                // 1.3·10⁻⁴ mm, so the plane is within the tolerance of touching there.
+                let (a, z) = sc.range;
+                if sc.curve.bbox(a.min(z), a.max(z)).diagonal() <= 10.0 * JOIN {
+                    continue;
+                }
                 let cut = Cut {
                     c: &sc.curve,
                     range: sc.range,
@@ -595,8 +604,10 @@ fn chain(runs: Vec<Run>, nodes: &mut Vec<Node>, n: Vec3) -> Vec<SliceCurve> {
 ///
 /// - Where a face's cut has to be traced, it is traced from the face's boundary meetings with the
 ///   plane and from where the plane crosses the iso-parametric lines through the face's critical
-///   points of height along the normal, and its seams: every closed loop of the cut that touches
-///   no edge crosses one of those lines, so none is missed.
+///   points of height along the normal, its seams and its kinks: every closed loop of the cut
+///   that touches no edge crosses one of those lines. That holds for the critical points the
+///   search isolates; `measure/slice/critical.rs` says where it stops short (degenerate critical sets, and
+///   its cap on the pieces of a patch it looks at).
 /// - Pieces join where they end within the tolerance of the edge or vertex they end at, at least
 ///   ten times [`tol::LINEAR`]. Where more than two meet, as at a vertex where faces pinch, each
 ///   continues on the next clockwise round the point in the plane.
@@ -604,7 +615,8 @@ fn chain(runs: Vec<Run>, nodes: &mut Vec<Node>, n: Vec3) -> Vec<SliceCurve> {
 ///   curves of the faces beside it that run along its boundary.
 /// - An edge lying in the plane, of no face lying in it, is a piece of the slice: where two faces
 ///   cross the plane at an edge they share, or a sheet's boundary in the plane.
-/// - Where the plane only touches a face, along a curve or at a point, nothing is cut there.
+/// - Where the plane only touches a face, along a curve or at a point, nothing is cut there; nor
+///   where a trace leaves a loop no wider than ten times the join distance.
 pub fn slice(b: &Brep, origin: Point3, normal: Vec3) -> Result<Vec<SliceCurve>> {
     let n = normal
         .unit()

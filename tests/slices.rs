@@ -591,3 +591,45 @@ fn pieces_join_within_the_tolerance_of_the_edges_they_end_at() {
         close(area, 59.0 + 0.36 * PI, 1e-9);
     }
 }
+
+#[test]
+fn a_plane_that_only_touches_a_face_cuts_nothing() {
+    // The ellipsoid x²/9 + y²/16 + z²/25 = 1, a rational spline face, touched by the planes square
+    // to each axis at its extremes there, the poles and the equator's four ends among them, and by
+    // the plane n·x = m along a normal toward (−1, −1, 1), m = √(a²n₁² + b²n₂² + c²n₃²): each meets
+    // it at one point and cuts nothing. A hair inside each, the cut is the ellipse of area
+    // πabc(1 − k²)/m at n·x = km.
+    let e = primitive::ellipsoid(&Frame::WORLD, Vec3::new(3.0, 4.0, 5.0), "ell").unwrap();
+    let s = primitive::sphere(&Frame::WORLD, 5.0, "ball").unwrap();
+    let r = [3.0, 4.0, 5.0];
+    let mut normals: Vec<Vec3> = [Vec3::X, Vec3::Y, Vec3::Z]
+        .into_iter()
+        .flat_map(|a| [a, -a])
+        .collect();
+    normals.push(Vec3::new(-1.0, -1.0, 1.0).unit().unwrap());
+    for n in normals {
+        let m =
+            (r[0] * r[0] * n.x * n.x + r[1] * r[1] * n.y * n.y + r[2] * r[2] * n.z * n.z).sqrt();
+        let got = measure::slice(&e, n * m, n).unwrap();
+        assert!(got.is_empty(), "ellipsoid touched along {n:?}: {got:#?}");
+        let got = measure::slice(&s, n * 5.0, n).unwrap();
+        assert!(got.is_empty(), "sphere touched along {n:?}: {got:#?}");
+        let k = 1.0 - 1e-4;
+        let o = n * (k * m);
+        let got = measure::slice(&e, o, n).unwrap();
+        chained(&got, o, n);
+        assert_eq!(got.len(), 1, "{n:?}: {got:#?}");
+        assert!(got[0].closed);
+        let (_, area) = totals([got[0].edges.as_slice()], o, n);
+        close(area, PI * 60.0 * (1.0 - k * k) / m, 1e-5);
+    }
+    // The dimpled slab touched at the bottom of its dimple, z = 3: only the square outline.
+    let b = dimpled();
+    let o = Point3::new(0.0, 0.0, 3.0);
+    let got = measure::slice(&b, o, Vec3::Z).unwrap();
+    chained(&got, o, Vec3::Z);
+    assert_eq!(got.len(), 1, "{got:#?}");
+    let (len, area) = totals([got[0].edges.as_slice()], o, Vec3::Z);
+    close(len, 8.0, 1e-9);
+    close(area, 4.0, 1e-9);
+}

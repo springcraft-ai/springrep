@@ -1,4 +1,4 @@
-//! Where to start tracing a plane's cut of a face so that no closed loop of it is missed.
+//! Where to start tracing a plane's cut of a face so that its closed loops are not missed.
 //!
 //! Let `h = (S(u, v) − o) · n` be the height of a face's surface above the plane. A closed loop of
 //! the cut that touches no edge of the face is a level curve `h = 0` inside the face, and in the
@@ -17,22 +17,35 @@
 //!   kink is itself an iso-parametric line through it.
 //!
 //! So the plane's meetings with the iso-parametric lines through every critical point, with the
-//! seams and with the kinks lie on every such loop: a trace seeded from them finds it. On a ruled surface (a
+//! seams and with the kinks lie on every such loop: a trace seeded from them finds it, for every
+//! critical point the search below finds. On a ruled surface (a
 //! plane, a cylinder, a cone, an extrusion, a ruled face) `h` is affine along each ruling, and a
 //! ruling through an interior extremum would carry it to the loop, where `h` is zero: there is no
 //! such loop, and only the seams are needed.
 //!
-//! The critical points are found in closed form on the sphere, the torus and a surface of
-//! revolution. On a spline surface they are the common zeros of two polynomials in Bernstein form,
+//! The critical points are found in closed form on the sphere and the torus. On a surface of
+//! revolution they reduce to the profile's extremes along two directions, found by
+//! `Curve::extremes`: in closed form for lines and conics, exactly for a `Curve::BSpline` (at
+//! most cubic), and by the kernel's sampled root finder (`numeric::roots`, 12 samples a span) for
+//! a `Curve::Nurbs` profile, rational or not. The half-plane through the axis the profile lies
+//! in is taken from nine samples of it, checked against its control points or plane; a profile
+//! that fails the check is solved by the sampled root finder too. On a spline surface they are the common zeros of two polynomials in Bernstein form,
 //! found by subdividing each Bézier patch (de Casteljau) and keeping only the pieces where both
 //! polynomials' control values change sign, since a polynomial in Bernstein form lies within the
 //! convex hull of its control values (L. Piegl and W. Tiller, *The NURBS Book*, 2nd ed., 1997,
-//! §1.3 and §5.2). A piece over which the Jacobian's interval determinant keeps one sign holds at
+//! §1.3). A piece over which the Jacobian's interval determinant keeps one sign holds at
 //! most one zero, which Newton's method then finds (interval root isolation; R. E. Moore,
 //! *Interval Analysis*, 1966). A spline line's meetings with the plane are isolated the same way,
 //! by subdivision until a piece's control values change sign once, so that it holds exactly one
 //! root (Descartes' rule of signs for the Bernstein basis; J. M. Lane and R. F. Riesenfeld, "Bounds
 //! on a polynomial", BIT 21, 1981).
+//!
+//! Where it stops short: the search of one patch looks at no more than 65,536 pieces, and past
+//! that seeds the middle of each piece left; and critical points that are not isolated (a ridge
+//! at one height), or lie too close together to tell apart, are not resolved below cells 2⁻¹² of
+//! the patch on a side, each run of such cells being seeded at one point. A loop narrower than
+//! those cells, round part of such a set, can be missed. Isolated, non-degenerate critical points
+//! within the cap are each found.
 
 use std::f64::consts::{PI, TAU};
 
@@ -241,7 +254,8 @@ fn revolution_critical(r: &crate::geom::Revolution, n: Vec3, v0: f64, v1: f64) -
     let a = r.axis;
     let na = n.dot(a);
     let across = (n - a * na).norm();
-    // The half-plane the profile lies in, from its point furthest from the axis among a few.
+    // The half-plane the profile lies in, from its point furthest from the axis among nine: a
+    // guess, which the check below confirms against the profile's control points or plane.
     let q = (0..=8)
         .map(|k| r.curve.eval(v0 + (v1 - v0) * k as f64 / 8.0) - r.origin)
         .map(|q| q - a * q.dot(a))
