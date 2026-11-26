@@ -23,8 +23,8 @@ use std::{
 };
 
 use crate::{
-    check::coedge_params,
-    geom::{IsoLine, NurbsSurface, Patch, Surface},
+    check::{coedge_params, plane_zeros},
+    geom::{Curve, IsoLine, NurbsSurface, Patch, Revolution, Surface},
     math::{Aabb, Frame, Point3, Vec2, Vec3},
     numeric::{KRONROD_7, KRONROD_15, gauss, solve2},
     threads,
@@ -101,6 +101,9 @@ fn inner_rule<const K: usize>(
         Surface::Plane(_) | Surface::Nurbs(_) => false,
         Surface::Extrusion(_) | Surface::Ruled(_) | Surface::Cylinder(_) | Surface::Cone(_) => {
             !inner_v
+        }
+        Surface::Revolution(r) => {
+            !inner_v || matches!(r.curve, Curve::Circle(_) | Curve::Ellipse(_))
         }
         _ => true,
     };
@@ -238,15 +241,18 @@ fn face_integrals_anew(b: &Brep, f: FaceId, c: Point3, scale: f64, rel: f64) -> 
         };
         inner_rule(s, line.as_ref(), inner_v, order, (lo, at, to), &density)
     };
-    const POLED: &str = "only a cone, sphere or torus has poles";
-    let across = |pole: f64, u: f64, v: f64| {
-        let (f, j) = meridian_from(s, pole, v).expect(POLED);
-        let (su, cu) = u.sin_cos();
-        axial(f, c, [1.0, cu, su, cu * cu, su * cu, su * su], j)
+    // A cone, sphere or torus in closed form; a surface turned from any other curve by the rules
+    // along `v`, and then `u`, that its moments take.
+    let across = |pole: f64, u: f64, v: f64| match meridian_from(s, pole, v) {
+        Some((f, j)) => {
+            let (su, cu) = u.sin_cos();
+            axial(f, c, [1.0, cu, su, cu * cu, su * cu, su * su], j)
+        }
+        None => inner_rule(s, None, true, 24, (pole, u, v), &density),
     };
-    let corner = |pole: f64, u: f64, v: f64| {
-        let (f, j) = meridian_from(s, pole, v).expect(POLED);
-        axial(f, c, round_terms(lo, u), j)
+    let corner = |pole: f64, u: f64, v: f64| match meridian_from(s, pole, v) {
+        Some((f, j)) => axial(f, c, round_terms(lo, u), j),
+        None => turn_rule(lo, u, 24, &|x| across(pole, x, v)),
     };
     let polar = Polar {
         poles: near_poles(s, v_span),
@@ -338,12 +344,73 @@ fn near_poles(s: &Surface, (lo, hi): (f64, f64)) -> Vec<f64> {
                 .map(|p| p + TAU * ((mid - p) / TAU).round())
                 .to_vec()
         }
+        Surface::Revolution(r) => {
+            let mid = 0.5 * (lo + hi);
+            let period = r.curve.period();
+            let shift = |p: f64| period.map_or(p, |w| p + w * ((mid - p) / w).round());
+            revolution_poles(r).into_iter().map(shift).collect()
+        }
         _ => Vec::new(),
     };
     poles.retain(|&p| (lo - p).max(p - hi) <= hi - lo);
     poles.sort_by(f64::total_cmp);
     poles.dedup_by(|a, b| (*a - *b).abs() <= 1e-12);
     poles
+}
+
+/// The parameters of a surface of revolution's curve where it meets the axis: its poles. The
+/// curve lies in a plane through the axis, and its distance from the axis there is its distance
+/// from the plane through the axis square to that one, which [`plane_zeros`] solves exactly:
+/// a line and a conic in closed form, a spline by its control values' bounds, where it crosses
+/// the axis or touches it. None for a curve off every plane through the axis.
+fn revolution_poles(r: &Revolution) -> Vec<f64> {
+    let Some(z) = r.axis.unit() else {
+        return Vec::new();
+    };
+    let o = r.origin;
+    let points: Vec<Point3> = match &r.curve {
+        Curve::Line(l) => vec![l.origin, l.origin + l.dir],
+        Curve::Circle(k) => {
+            let f = &k.frame;
+            vec![
+                f.origin + f.x * k.radius,
+                f.origin + f.y * k.radius,
+                f.origin - f.x * k.radius,
+            ]
+        }
+        Curve::Ellipse(k) => {
+            let f = &k.frame;
+            vec![
+                f.origin + f.x * k.major,
+                f.origin + f.y * k.minor,
+                f.origin - f.x * k.major,
+            ]
+        }
+        Curve::Nurbs(n) => n.control_points().to_vec(),
+        other => other
+            .spline()
+            .map_or(Vec::new(), |s| s.control_points().to_vec()),
+    };
+    let off = |p: Point3| (p - o) - z * (p - o).dot(z);
+    let Some(far) = points
+        .iter()
+        .map(|&p| off(p))
+        .max_by(|a, b| a.norm().total_cmp(&b.norm()))
+    else {
+        return Vec::new();
+    };
+    let Some(out) = far.unit() else {
+        return Vec::new();
+    };
+    // Three points of a conic, or a spline's control points, fix its plane, or bound it.
+    let normal = z.cross(out);
+    if points
+        .iter()
+        .any(|&p| normal.dot(p - o).abs() > crate::tol::LINEAR)
+    {
+        return Vec::new();
+    }
+    plane_zeros(&r.curve, r.curve.domain(), (o, out), crate::tol::LINEAR)
 }
 
 /// The integrals along `v` from `from` to `v` of what the area and volume integrands of a cone,
@@ -546,7 +613,11 @@ fn face_moments_anew(b: &Brep, f: FaceId, c: Point3, scale: f64) -> [f64; 11] {
     // From a pole a piece keeps to its own side of the poles' middle, so the integrands along
     // `v`, polynomials of degree five in `v` on a cone and trigonometric ones of degree five on a
     // sphere or torus, span at most about half a turn.
-    let along_v = if matches!(s, Surface::Cone(_)) { 8 } else { 16 };
+    let along_v = match s {
+        Surface::Cone(_) => 8,
+        Surface::Revolution(_) => 24,
+        _ => 16,
+    };
     let across = |pole, u, v| inner_rule(s, None, true, along_v, (pole, u, v), &density);
     let corner = |pole, u, v| turn_rule(lo, u, 24, &|x| across(pole, x, v));
     let polar = Polar {

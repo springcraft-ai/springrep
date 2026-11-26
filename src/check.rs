@@ -2,7 +2,7 @@
 //! edge lies on both its faces within tolerance, and each loop closes in its face's parameters.
 
 use std::collections::{HashMap, HashSet};
-use std::f64::consts::TAU;
+use std::f64::consts::{PI, TAU};
 use std::fmt;
 
 use crate::{
@@ -1131,6 +1131,96 @@ fn bernstein_crossings(b: &[f64], (lo, hi): (f64, f64), band: f64, depth: u32, o
     let m = lo + (hi - lo) * s;
     bernstein_crossings(&left, (lo, m), band, depth + 1, out);
     bernstein_crossings(&right, (m, hi), band, depth + 1, out);
+}
+
+/// The parameters in `[lo, hi]` where the polynomial `b` comes within `band` of zero: where it
+/// crosses zero, and where it reaches within `band` of it and turns back. A piece whose
+/// coefficients all stay beyond `band` on one side holds none; one with a single sign change
+/// and its ends on either side holds one root, found as a crossing is; any other is halved
+/// until it is one of those or no wider than rounding, when its middle is taken.
+fn bernstein_zeros(b: &[f64], (lo, hi): (f64, f64), band: f64, depth: u32, out: &mut Vec<f64>) {
+    let (least, most) = hull(b);
+    if least > band || most < -band {
+        return;
+    }
+    let last = b.len() - 1;
+    if b[0] * b[last] < 0.0 && sign_changes(b) == 1 && (least < -band && most > band) {
+        out.push(lo + (hi - lo) * bernstein_root(b));
+        return;
+    }
+    if depth >= 52 || (least >= -band && most <= band) {
+        out.push(0.5 * (lo + hi));
+        return;
+    }
+    let s = bernstein_middle(b);
+    let (left, right) = bernstein_split(b, s);
+    let m = lo + (hi - lo) * s;
+    bernstein_zeros(&left, (lo, m), band, depth + 1, out);
+    bernstein_zeros(&right, (m, hi), band, depth + 1, out);
+}
+
+/// Where curve `c` comes within `tau` of the plane through `o` with unit normal `n` over
+/// `[t0, t1]`, crossing it or touching it: closed forms for a line and a conic, and for a spline
+/// [`bernstein_zeros`] on each knot span its control values do not keep off the band. Parameters
+/// nearer each other than a billionth of the range are one.
+pub(crate) fn plane_zeros(
+    c: &Curve,
+    (t0, t1): (f64, f64),
+    (o, n): (Point3, Vec3),
+    tau: f64,
+) -> Vec<f64> {
+    let within = |t: f64| t >= t0 && t <= t1;
+    let mut out = Vec::new();
+    match c {
+        Curve::Line(l) => {
+            let (g0, gd) = (n.dot(l.origin - o), n.dot(l.dir));
+            if gd != 0.0 && within(-g0 / gd) {
+                out.push(-g0 / gd);
+            }
+        }
+        Curve::Circle(_) | Curve::Ellipse(_) => {
+            let (a, bc, bs) = conic_terms(c, o, n);
+            let r = bc.hypot(bs);
+            let phase = bs.atan2(bc);
+            let roots: Vec<f64> = if (a + r).abs() <= tau {
+                vec![phase + PI]
+            } else if (a - r).abs() <= tau {
+                vec![phase]
+            } else if a.abs() < r {
+                let half = (-a / r).acos();
+                vec![phase - half, phase + half]
+            } else {
+                Vec::new()
+            };
+            for root in roots {
+                let mut k = ((t0 - root) / TAU).ceil();
+                while root + k * TAU <= t1 {
+                    out.push(root + k * TAU);
+                    k += 1.0;
+                }
+            }
+        }
+        _ => {
+            let parts = spline_parts(c).expect("a spline");
+            let p = parts.0;
+            let (g, least) = spline_values(parts, o, n);
+            let band = tau * least;
+            for (i, shift, a, z) in spline_spans(parts, (t0, t1)) {
+                let (l, m) = hull(&g[i - p..=i]);
+                if l > band || m < -band {
+                    continue;
+                }
+                let bern = span_bernstein(parts, &g, i, (a - shift, z - shift));
+                let mut roots = Vec::new();
+                bernstein_zeros(&bern, (0.0, 1.0), band, 0, &mut roots);
+                out.extend(roots.into_iter().map(|s| a + (z - a) * s));
+            }
+        }
+    }
+    out.sort_by(f64::total_cmp);
+    let gap = 1e-9 * (t1 - t0).abs().min(1e9);
+    out.dedup_by(|x, y| (*x - *y).abs() <= gap);
+    out
 }
 
 /// A conic's distance from the plane through `o` with unit normal `n` as `a + b cos t + s sin t`:

@@ -7,12 +7,12 @@ use std::f64::consts::PI;
 use springrep::{
     boolean::{difference, intersection, union},
     check,
-    geom::Surface,
+    geom::{BSpline, Surface},
     math::{Frame, Vec2, Vec3},
     measure,
     primitive::{block, cone, sphere, spindle_torus},
-    profile::Profile,
-    sweep::extrude,
+    profile::{NamedSegment, Profile, Segment},
+    sweep::{extrude, revolve},
     topo::Brep,
 };
 
@@ -205,4 +205,136 @@ fn a_spindle_torus_cut_a_hair_from_its_poles_keeps_its_whole_skin() {
         assert_near(measure::area(&both) - flat, skin, &format!("gap {d}, skin"));
         assert_near(measure::volume(&both), volume, &format!("gap {d}, volume"));
     }
+}
+
+/// `body` cut by the plane x = d into the piece past it and the rest, both in one arena: about
+/// one centre their volumes make up the whole, and their skins off the plane the whole skin.
+fn assert_halves_make_whole(
+    body: &Brep,
+    gaps: &[f64],
+    size: f64,
+    (volume, skin): (f64, f64),
+    what: &str,
+) {
+    for &d in gaps {
+        let cut = past_x(d, size);
+        let mut both = intersection(body, &cut).unwrap();
+        both.append(&difference(body, &cut).unwrap());
+        let flat: f64 = both
+            .face_ids()
+            .filter(|&f| matches!(both.face(f).surface, Surface::Plane(_)))
+            .map(|f| measure::face_area(&both, f))
+            .sum();
+        assert_near(
+            measure::area(&both) - flat,
+            skin,
+            &format!("{what}, gap {d}, skin"),
+        );
+        assert_near(
+            measure::volume(&both),
+            volume,
+            &format!("{what}, gap {d}, volume"),
+        );
+    }
+}
+
+/// `profile`, drawn with x out from the z axis and y along it, turned a whole turn about it.
+fn turned(profile: Vec<NamedSegment>) -> Brep {
+    let plane = Frame::new(Vec3::ZERO, -Vec3::Y, Vec3::X).unwrap();
+    revolve(
+        &Profile::outline(profile),
+        &plane,
+        Vec3::ZERO,
+        Vec3::Z,
+        2.0 * PI,
+        "turned",
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_lemon_cut_near_its_poles_keeps_its_whole_skin() {
+    // The arc of radius R about (−a, 0), from (0, −h) to (0, h) with h = √(R² − a²), turned
+    // about the axis it ends on: a lemon, its centre across the axis from its skin, so a surface
+    // of revolution of a circle with a pole at each end. At the angle θ up the arc, out to
+    // ±θ₀ = asin(h/R), the skin lies R·cos θ − a from the axis, so the skin is
+    // 2π·∫ (R cos θ − a)·R dθ = 4π·R·(h − a·θ₀) and the lemon holds
+    // π·∫ (√(R² − z²) − a)² dz = π·(2h·(R² + a²) − 2h³/3 − 2a·(a·h + R²·θ₀)).
+    let (r, a) = (5.0f64, 3.0f64);
+    let h = (r * r - a * a).sqrt();
+    let top = (h / r).asin();
+    let lemon = turned(vec![
+        NamedSegment::arc(Vec2::new(-a, 0.0), r, -top, 2.0 * top, "skin"),
+        NamedSegment::line(Vec2::new(0.0, h), Vec2::new(0.0, -h), "axis"),
+    ]);
+    assert!(
+        lemon
+            .face_ids()
+            .any(|f| matches!(lemon.face(f).surface, Surface::Revolution(_)))
+    );
+    let skin = 4.0 * PI * r * (h - a * top);
+    let volume =
+        PI * (2.0 * h * (r * r + a * a) - 2.0 * h.powi(3) / 3.0 - 2.0 * a * (a * h + r * r * top));
+    assert_measures(&lemon, volume, skin, "lemon");
+    // Cut nearer its poles the lemon's pieces are not built yet: a boolean's section through a
+    // pole of a surface turned from a circle comes out off the surface.
+    assert_halves_make_whole(&lemon, &[1e-2], 2.0 * r, (volume, skin), "lemon");
+}
+
+/// `∫ p(t)·q(t)·r′(t) dt` over [0, 1] for cubics given by their Bézier ordinates.
+fn bezier_triple(p: [f64; 4], q: [f64; 4], r: [f64; 4]) -> f64 {
+    // Each cubic in powers of t: Σ bᵢ·C(3, i)·tⁱ·(1 − t)³⁻ⁱ.
+    let power = |b: [f64; 4]| {
+        [
+            b[0],
+            3.0 * (b[1] - b[0]),
+            3.0 * (b[0] - 2.0 * b[1] + b[2]),
+            b[3] - 3.0 * b[2] + 3.0 * b[1] - b[0],
+        ]
+    };
+    let (p, q, r) = (power(p), power(q), power(r));
+    let dr = [r[1], 2.0 * r[2], 3.0 * r[3]];
+    let mut total = 0.0;
+    for (i, pi) in p.iter().enumerate() {
+        for (j, qj) in q.iter().enumerate() {
+            for (k, rk) in dr.iter().enumerate() {
+                total += pi * qj * rk / (i + j + k + 1) as f64;
+            }
+        }
+    }
+    total
+}
+
+#[test]
+fn a_spline_dome_cut_a_hair_from_its_pole_holds_what_its_profile_turns() {
+    // A cubic Bézier from (6, 0) to (0, 5), level where it meets the axis, over a flat base,
+    // turned about the axis: a dome with a pole at its top. It holds π·∫ x(t)²·z′(t) dt, worked
+    // from the profile's ordinates; its skin is the uncut dome's, against which the pieces'
+    // skins are summed.
+    let xs = [6.0, 6.0, 3.0, 0.0];
+    let zs = [0.0, 3.0, 5.0, 5.0];
+    let ctrl = (0..4).map(|i| Vec3::new(xs[i], zs[i], 0.0)).collect();
+    let knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+    let curve = BSpline::new(3, knots, ctrl).unwrap();
+    let dome = turned(vec![
+        NamedSegment::line(Vec2::new(0.0, 0.0), Vec2::new(6.0, 0.0), "base"),
+        NamedSegment::new(
+            Segment::Spline {
+                curve,
+                reversed: false,
+            },
+            "dome",
+        ),
+        NamedSegment::line(Vec2::new(0.0, 5.0), Vec2::new(0.0, 0.0), "axis"),
+    ]);
+    assert!(
+        dome.face_ids()
+            .any(|f| matches!(dome.face(f).surface, Surface::Revolution(_)))
+    );
+    let volume = PI * bezier_triple(xs, xs, zs);
+    let issues = check::check(&dome);
+    assert!(issues.is_empty(), "{issues:?}");
+    assert_near(measure::volume(&dome), volume, "dome, volume");
+    let skin = measure::area(&dome) - PI * 36.0;
+    assert_halves_make_whole(&dome, &GAPS, 12.0, (volume, skin), "dome");
 }
