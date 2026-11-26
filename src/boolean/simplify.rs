@@ -128,7 +128,8 @@ fn merge_once(b: &Brep) -> Option<Brep> {
     let c2 = x2.curve.as_ref()?;
     // The merged edge on the first edge's curve, through the second's far end.
     let end = c2.eval(x2.range.1);
-    let range = if c1 == *c2 {
+    let same = c1 == *c2;
+    let range = if same {
         (x1.range.0, x2.range.1)
     } else {
         (
@@ -165,6 +166,7 @@ fn merge_once(b: &Brep) -> Option<Brep> {
         emap[e.index()] = Some(ne);
     }
     let mut cmap: HashMap<CoedgeId, CoedgeId> = HashMap::new();
+    let mut renamed: Vec<(FaceId, FaceId)> = Vec::new();
     for f in b.face_ids() {
         let face = b.face(f);
         let nf = out.add_face(
@@ -172,6 +174,12 @@ fn merge_once(b: &Brep) -> Option<Brep> {
             face.reversed,
             face.names.iter().cloned(),
         );
+        let touched = face.loops.iter().any(|&lp| {
+            b.lp(lp)
+                .coedges
+                .iter()
+                .any(|&c| b.coedge(c).edge == first || b.coedge(c).edge == second)
+        });
         for &lp in &face.loops {
             let mut specs = Vec::new();
             let mut kept = Vec::new();
@@ -205,6 +213,40 @@ fn merge_once(b: &Brep) -> Option<Brep> {
                 cmap.insert(c, n);
             }
         }
+        // A face away from the merged edges keeps its loops as they were, and what the boolean's
+        // check found of it: a fresh memo would have the next check search it all again.
+        if touched {
+            renamed.push((f, nf));
+        } else {
+            out.share_memo(nf, b.shared_memo(f));
+        }
+    }
+    // On one curve the merged edge is the two edges' points exactly, so the two faces along it
+    // cover what they did, and no other face reaches the dissolved vertex: which faces each meets
+    // nowhere but at what they share holds still.
+    if !same {
+        renamed.clear();
+    }
+    for &(f, nf) in &renamed {
+        let (was, now) = (b.memo(f), out.memo(nf));
+        for (from, to) in [(&was.apart, &now.apart), (&was.clear, &now.clear)] {
+            if let (Ok(from), Ok(mut to)) = (from.lock(), to.lock()) {
+                to.extend(from.iter().copied());
+            }
+        }
+    }
+    for &(f, nf) in &renamed {
+        let (old, new) = (b.memo(f).id, out.memo(nf).id);
+        for g in out.face_ids() {
+            let m = out.memo(g);
+            for set in [&m.apart, &m.clear] {
+                if let Ok(mut s) = set.lock()
+                    && s.contains(&old)
+                {
+                    s.insert(new);
+                }
+            }
+        }
     }
     // Where pieces touch along an edge, which of its uses pair across material, and which face
     // each other across space, carries over.
@@ -229,4 +271,42 @@ fn merge_once(b: &Brep) -> Option<Brep> {
         out.set_edge_tolerance(emap[e.index()]?, t);
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        boolean::{Op, combined},
+        geom::Surface,
+        math::{Frame, Vec3},
+        primitive::block,
+        topo::Facts,
+    };
+
+    #[test]
+    fn faces_away_from_a_merged_edge_keep_their_memos() {
+        let a = block(&Frame::WORLD, Vec3::new(2.0, 1.0, 1.0), "a").unwrap();
+        let at = Frame::new(Vec3::new(1.0, 0.0, 0.0), Vec3::Z, Vec3::X).unwrap();
+        let b = block(&at, Vec3::new(2.0, 1.0, 1.0), "b").unwrap();
+        let joined = combined(&a, &b, Op::Union, &Facts::default()).unwrap();
+        assert!(crate::check::check(&joined).is_empty());
+        let merged = merge_edges(joined.clone());
+        assert!(merged.edge_ids().count() < joined.edge_ids().count());
+        assert!(crate::check::check(&merged).is_empty());
+
+        let is_end = |x: &Brep, f: FaceId| match &x.face(f).surface {
+            Surface::Plane(p) => p.frame.z.x.abs() > 0.5,
+            _ => false,
+        };
+        let before: Vec<u64> = joined.face_ids().map(|f| joined.memo(f).id).collect();
+        let ends: Vec<FaceId> = merged.face_ids().filter(|&f| is_end(&merged, f)).collect();
+        assert_eq!(ends.len(), 2);
+        for f in ends {
+            assert!(
+                before.contains(&merged.memo(f).id),
+                "an end meets no merged edge"
+            );
+        }
+    }
 }
