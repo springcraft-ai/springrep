@@ -2156,7 +2156,10 @@ solid never pinches.
   each point continuing from the last. Where a loop leaves a pole any angle is possible: the one its
   next point implies is tried in each nearby period, a seam's second use must run a period from its
   first, and the loop must close and enclose area the way the face's orientation requires. A gap at
-  a pole becomes a degenerate edge. The free parameter where a use reaches or leaves a pole is the
+  a pole becomes a degenerate edge. An edge that passes through a pole of a sphere between its
+  vertices (a meridian over the pole) is split there before its loops are followed: the loop leaves
+  the pole at another value of the free parameter than it arrived with, and only at a vertex can it
+  jump along the pole's line. The free parameter where a use reaches or leaves a pole is the
   one every reader of its pcurve finds (`topo::project_on`): where `u` is free, the `u` of a point
   just along the edge, or, where the edge leaves along the surface's axis as every curve through a
   horn torus's pole does, of a point the way the edge bends; where `v` is free (a B-spline blend's
