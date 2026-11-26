@@ -2266,7 +2266,7 @@ impl NurbsSurface {
             } else {
                 (start[2], start[1])
             };
-            if across.norm() > 1e-9 * along.norm() || self.line_is_point(held == 1, end) {
+            if across.norm() > 1e-9 * along.norm() || self.line_is_point(held == 0, end) {
                 continue;
             }
             // Newton along the line, the full step where the second derivative of the squared
@@ -3781,6 +3781,44 @@ pub(crate) mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_still_line_beside_a_collapsed_row_is_still_tried() {
+        // A cubic in one parameter whose last two control points coincide, linear in the other,
+        // with the far row of that other parameter drawn into one point: the still end line runs
+        // from the foot of the cubic's end to that point, a curve, beside a line that is a point.
+        // A point on the still line is its own foot there, found by the clamped candidate, which
+        // must not take the collapsed row across it for the still line itself.
+        let foot = [(10.0, 0.0), (10.0, 5.0), (5.0, 10.0), (5.0, 10.0)];
+        let apex = Vec3::new(0.0, 0.0, 4.0);
+        let cubic = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+        let linear = vec![0.0, 0.0, 1.0, 1.0];
+        // Cubic in u, still at u = 1, its row v = 1 the apex.
+        let mut ctrl = Vec::new();
+        for &(x, y) in &foot {
+            ctrl.push(Vec3::new(x, y, 0.0));
+            ctrl.push(apex);
+        }
+        let in_u =
+            NurbsSurface::new((3, 1), (cubic.clone(), linear.clone()), (4, 2), ctrl, None).unwrap();
+        // Cubic in v, still at v = 1, its row u = 1 the apex.
+        let mut ctrl: Vec<Vec3> = foot.iter().map(|&(x, y)| Vec3::new(x, y, 0.0)).collect();
+        ctrl.extend([apex; 4]);
+        let in_v = NurbsSurface::new((1, 3), (linear, cubic), (2, 4), ctrl, None).unwrap();
+        for (s, on, beside) in [
+            (&in_u, Vec2::new(1.0, 0.5), Vec2::new(1.0 - 1e-5, 0.5)),
+            (&in_v, Vec2::new(0.5, 1.0), Vec2::new(0.5, 1.0 - 1e-5)),
+        ] {
+            let p = s.eval(on.x, on.y);
+            let (uv, d, foot) = s
+                .still_line_foot(p, beside)
+                .expect("the still line is tried");
+            assert!(
+                uv.dist(on) <= 1e-12 && d <= 1e-12 && foot,
+                "{uv:?} at {d}, foot {foot}"
+            );
         }
     }
 }
