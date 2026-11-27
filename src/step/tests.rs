@@ -1957,12 +1957,48 @@ fn holed_ball(vx: f64, holes: &[Hole], turned: bool) -> (String, f64, f64) {
 /// between them in turn: the file's vertices, which may lie off the circle, as a file can have a
 /// vertex off its curves by less than healing moves it.
 fn split_holed_ball(vertices: &[Vec3], holes: &[Hole], turned: bool) -> (String, f64, f64) {
+    tilted_holed_ball(0.0, vertices, holes, turned)
+}
+
+/// The axis of the plane that cuts [`tilted_holed_ball`]'s ball, tilted by `tilt` from +z toward
+/// +x, and the direction from its circle's centre to the circle's point at ψ = 0, square to it,
+/// toward −z: n₀ = (sin a, 0, cos a) and e₁ = (cos a, 0, −sin a), a = `tilt`, with
+/// n₀ = e₁ × (0, 1, 0).
+fn tilted_frame(tilt: f64) -> (Vec3, Vec3) {
+    (
+        Vec3::new(tilt.sin(), 0.0, tilt.cos()),
+        Vec3::new(tilt.cos(), 0.0, -tilt.sin()),
+    )
+}
+
+/// The point of [`tilted_holed_ball`]'s circle at the angle ψ about n₀ from e₁ toward +y
+/// ([`tilted_frame`]), moved `out` outward from the circle's centre in its plane: −3n₀ + (4 +
+/// out)(e₁ cos ψ + ŷ sin ψ).
+fn tilted_at(tilt: f64, psi: f64, out: f64) -> Vec3 {
+    let (n, e) = tilted_frame(tilt);
+    n * -3.0 + (e * psi.cos() + Vec3::Y * psi.sin()) * (4.0 + out)
+}
+
+/// [`split_holed_ball`] with the ball cut by the plane n₀·p = −3 instead of z = −3, n₀ tilted by
+/// `tilt` from +z toward +x ([`tilted_frame`]): the circle of radius 4 about −3n₀ in it, split at
+/// `vertices`, in order round n₀. The ball is turned, not changed, so the volume and area are
+/// those of [`split_holed_ball`] where the holes keep clear of the plane. With the plane tilted,
+/// the circle's centre lies off the axis of the sphere, +z, so the half-plane bounded by the axis
+/// through a point moved outward from the circle meets the circle elsewhere than at the point's
+/// nearest point of it: the azimuths about +z of the two differ.
+fn tilted_holed_ball(
+    tilt: f64,
+    vertices: &[Vec3],
+    holes: &[Hole],
+    turned: bool,
+) -> (String, f64, f64) {
+    let (n0, e1) = tilted_frame(tilt);
     let mut s = Entities::default();
     let at = s.placement(Vec3::ZERO, Vec3::Z, Vec3::X);
     let sphere = s.put(format!("SPHERICAL_SURFACE('',#{at},5.)"));
     let vs: Vec<u64> = vertices.iter().map(|&p| s.vertex(p)).collect();
-    let base = Vec3::new(0.0, 0.0, -3.0);
-    let at = s.placement(base, Vec3::Z, Vec3::X);
+    let base = n0 * -3.0;
+    let at = s.placement(base, n0, e1);
     let arcs: Vec<u64> = (0..vs.len())
         .map(|i| s.arc(vs[i], vs[(i + 1) % vs.len()], at, 4.0))
         .collect();
@@ -1996,7 +2032,7 @@ fn split_holed_ball(vertices: &[Vec3], holes: &[Hole], turned: bool) -> (String,
         .map(|(i, b)| (b.as_slice(), i != 0 || !turned))
         .collect();
     let mut faces = vec![s.face(sphere, &bounds)];
-    let at = s.placement(base, -Vec3::Z, Vec3::X);
+    let at = s.placement(base, -n0, e1);
     let plane = s.put(format!("PLANE('',#{at})"));
     let under: Vec<(u64, bool)> = arcs.iter().rev().map(|&e| (e, false)).collect();
     faces.push(s.face(plane, &[(&under, true)]));
@@ -2437,6 +2473,126 @@ fn a_caps_loop_vertex_off_its_circle_by_less_than_healing_moves_it_is_healed_ont
             reads_exactly(&exact, &name, volume, area),
             "{name}"
         );
+    }
+}
+
+/// The azimuth about +z of `p`, in [0, 2π).
+fn azimuth(p: Vec3) -> f64 {
+    p.y.atan2(p.x).rem_euclid(TAU)
+}
+
+/// A hole whose rim passes between the meridians at azimuths `clear` and `cut`, square to the
+/// meridian midway between them, crossing the one at `cut` and missing the one at `clear`: its
+/// centre 60° from the pole, 30° from `clear` the way `cut` lies, and its angular radius β its
+/// angular distance from the meridian at the azimuth m midway, sin β = sin 60° sin |φ − m| (the
+/// right spherical triangle of the pole, the centre and the foot of the perpendicular on the
+/// meridian), its vertex toward the pole.
+fn wedge_hole(clear: f64, cut: f64) -> Hole {
+    let theta = PI / 3.0;
+    let phi = clear + (cut - clear).signum() * PI / 6.0;
+    let mid = 0.5 * (clear + cut);
+    let beta = (theta.sin() * (phi - mid).abs().sin()).asin();
+    Hole {
+        toward: Vec3::Z,
+        ..Hole::at(theta, phi, 5.0 * beta.cos())
+    }
+}
+
+/// A cap whose loop's vertex lies off its circle, the circle's centre off the sphere's axis, is
+/// seamed from that vertex, as where it lies on the circle: the meridian the seam follows is the
+/// one through the circle's end at the vertex, where healing moves the vertex, not the one through
+/// the vertex's point, which meets the circle elsewhere. The ball of radius 5 cut by the plane
+/// n₀·p = −3, n₀ tilted 10° from +z ([`tilted_holed_ball`]), with one vertex at ψ = π/2 moved δ =
+/// 1e-6 to 1e-2 outward in the plane: (−3 sin 10°, 4 + δ, −3 cos 10°), whose azimuth about +z
+/// differs from its nearest point of the circle's by about 3δ sin 10°/(16 + 9 sin² 10°), so that
+/// the half-plane through it meets the circle some 0.13δ from that point, beyond the tolerance
+/// from δ = 1e-6 up. It reads as the cap with its vertex on the circle, healed by δ, with the same
+/// 2 vertices, the loop's and the pole's, as written and turned: 448π/3 and 96π, the ball's above
+/// a plane 3 from its centre ([`holed_ball`]). Healing moves the vertex by δ to within 1e-10 mm:
+/// the tilted circle's frame and the vertex are written to 17 digits, about 5 mm from the origin,
+/// which leaves the distance between them a few 1e-12 mm off δ.
+#[test]
+fn a_tilted_caps_vertex_off_its_circle_starts_its_seam() {
+    let tilt = 10f64.to_radians();
+    for turned in [false, true] {
+        let exact = tilted_holed_ball(tilt, &[tilted_at(tilt, PI / 2.0, 0.0)], &[], turned);
+        let (volume, area) = (exact.1, exact.2);
+        assert!(
+            (volume - 448.0 * PI / 3.0).abs() <= 1e-12 * volume
+                && (area - 96.0 * PI).abs() <= 1e-12 * area
+        );
+        assert_eq!(reads_exactly(&exact.0, "on the circle", volume, area), 2);
+        for d in [1e-6, 1e-5, 1e-4, 1e-3, 1e-2] {
+            let (text, ..) = tilted_holed_ball(tilt, &[tilted_at(tilt, PI / 2.0, d)], &[], turned);
+            let name = format!("δ = {d:e}, turned {turned}");
+            let reach = Some(d + 1e-10);
+            assert_eq!(reads_healed(&text, &name, volume, area, reach), 2, "{name}");
+        }
+    }
+}
+
+/// The seam starts at a loop's vertex near the point the read finds for it only where the seam
+/// from that vertex is clear too. The tilted cap of
+/// `a_tilted_caps_vertex_off_its_circle_starts_its_seam`, its loop's point nearest the pole q at
+/// ψ = π, azimuth π, with vertices A and B at ψ = 0 and ψ = π + s, B a distance of about 4s =
+/// 0.01 to 0.049 mm from q, within what healing moves a vertex ([`crate::step::MAX_HEAL`]):
+///
+/// - A hole of angular radius 20° 60° from the pole on A's meridian, azimuth 0, takes the seam
+///   from A; a second, a [`wedge_hole`], passes between q's meridian and B's, about
+///   5 asin(sin 60° sin(φ_B − π)/2) mm from each, 4.8e-3 mm and more, and takes the seam from B:
+///   the read splits the circle at q and starts the seam there. Six vertices: A, B, q, the holes'
+///   and the pole's.
+/// - Without the second hole, the seam from B is clear, and the read starts it at B rather than
+///   split the circle beside it: four vertices, A, B, the hole's and the pole's.
+///
+/// Each hole lies within 90° of the pole, and the circle 116.87° and more from it (126.87°, its
+/// angle from n₀, less the tilt), so the solid holds 448π/3 and 96π less what each hole takes
+/// ([`Hole::measures`]).
+#[test]
+fn a_caps_seam_starts_at_a_vertex_near_its_point_only_where_the_vertex_is_clear() {
+    let tilt = 10f64.to_radians();
+    let blocking = Hole {
+        toward: Vec3::Z,
+        ..Hole::at(PI / 3.0, 0.0, 5.0 * (20f64).to_radians().cos())
+    };
+    for d in [0.01, 0.02, 0.04, 0.049] {
+        let b = tilted_at(tilt, PI + d / 4.0, 0.0);
+        assert!(b.dist(tilted_at(tilt, PI, 0.0)) < crate::step::MAX_HEAL);
+        let vertices = [tilted_at(tilt, 0.0, 0.0), b];
+        for turned in [false, true] {
+            let name = format!("|qB| = {d} mm, turned {turned}");
+            let holes = [blocking, wedge_hole(PI, azimuth(b))];
+            let (text, volume, area) = tilted_holed_ball(tilt, &vertices, &holes, turned);
+            assert_eq!(reads_exactly(&text, &name, volume, area), 6, "{name}");
+            let (text, volume, area) = tilted_holed_ball(tilt, &vertices, &holes[..1], turned);
+            assert_eq!(reads_exactly(&text, &name, volume, area), 4, "{name}");
+        }
+    }
+}
+
+/// A vertex off its circle that starts a clear seam keeps it where another vertex lies near the
+/// loop's point nearest the pole with a hole across its meridian. The tilted cap of
+/// `a_tilted_caps_vertex_off_its_circle_starts_its_seam`, its first vertex A at ψ = π/2 moved δ =
+/// 0 to 1e-3 outward, its meridian clear, and a second vertex B at ψ = π + s, 0.04 or 0.06 mm
+/// from q at ψ = π, with a [`wedge_hole`] between q's meridian and B's. The seam starts at A, as
+/// with A on the circle: four vertices, A, B, the hole's and the pole's, healed by δ where A lies
+/// off the circle, as written and turned (to within 1e-10 mm, as in
+/// `a_tilted_caps_vertex_off_its_circle_starts_its_seam`).
+#[test]
+fn a_caps_vertex_off_its_circle_keeps_its_clear_seam_beside_a_vertex_near_its_point() {
+    let tilt = 10f64.to_radians();
+    for d in [0.04, 0.06] {
+        let b = tilted_at(tilt, PI + d / 4.0, 0.0);
+        let holes = [wedge_hole(PI, azimuth(b))];
+        for turned in [false, true] {
+            for off in [0.0, 1e-6, 1e-4, 1e-3] {
+                let vertices = [tilted_at(tilt, PI / 2.0, off), b];
+                let (text, volume, area) = tilted_holed_ball(tilt, &vertices, &holes, turned);
+                let name = format!("|qB| = {d} mm, δ = {off:e}, turned {turned}");
+                let reach = (off > 0.0).then_some(off + 1e-10);
+                assert_eq!(reads_healed(&text, &name, volume, area, reach), 4, "{name}");
+            }
+        }
     }
 }
 

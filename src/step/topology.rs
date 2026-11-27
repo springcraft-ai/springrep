@@ -1204,7 +1204,8 @@ impl<'g, 'a> Reader<'g, 'a> {
         let Some((e, t)) = seam_point(&self.raw, &frame, pole, bounds, k) else {
             return bad(id, NO_SEAM);
         };
-        let v = match vertex_at(&self.raw, &bounds[k].1, self.raw.edges[e].curve.eval(t)) {
+        let q = self.raw.edges[e].curve.eval(t);
+        let v = match vertex_at(&self.raw, &frame, pole, bounds, k, q) {
             Some(v) => v,
             None => self.split_edge(e, t, bounds),
         };
@@ -1933,12 +1934,13 @@ const NO_SEAM: &str =
 /// the sphere or a generator of the cone, lies in a half-plane bounded by the axis, and it starts
 /// where that half-plane first meets a loop of the face going out from the pole, a point of loop
 /// `k` ([`first_met`]), so it meets no loop of the face, holes included, anywhere else. Of such
-/// half-planes, the first that serves: the one through the loop's first vertex, where the point it
-/// first meets is that vertex, an end of an edge at it, as the vertex's curves have it; the one
-/// through the loop's point nearest the pole; else, of 64 evenly spaced about the axis, the middle
-/// one of the longest run that serve. `None` where none serves. The vertex is told by the edge it
-/// ends, not by its distance from the point: a file's vertex may lie off its curves by as much as
-/// healing moves it ([`heal::MAX_HEAL`]), and the seam then starts at it as on a vertex on them.
+/// half-planes, the first that serves: one through the loop's first vertex, where the point it
+/// first meets is that vertex, an end of an edge at it, as the vertex's curves have it
+/// ([`from_vertex`]); the one through the loop's point nearest the pole; else, of 64 evenly spaced
+/// about the axis, the middle one of the longest run that serve. `None` where none serves. The
+/// vertex is told by the edge it ends, not by its distance from the point: a file's vertex may lie
+/// off its curves by as much as healing moves it ([`heal::MAX_HEAL`]), and the seam then starts at
+/// it as on a vertex on them.
 fn seam_point(
     raw: &Raw,
     frame: &Frame,
@@ -1950,7 +1952,7 @@ fn seam_point(
     let angle = about(frame);
     let p = raw.points[first];
     let met = |at: f64| first_met(raw, frame, pole, bounds, k, at);
-    let at_first = met(angle(p)).filter(|&(e, t)| ends_at(raw, e, t, first));
+    let at_first = from_vertex(raw, frame, pole, bounds, k, first);
     let found = at_first.or_else(|| {
         // The loop's point nearest the pole, over each edge's whole range.
         let mut nearest: Option<(f64, Point3)> = None;
@@ -2045,6 +2047,38 @@ fn first_met(
     (other > d + tol::LINEAR).then_some((e, t))
 }
 
+/// Where the seam can start at vertex `v` of loop `k` of `bounds`, as an edge and its parameter: in
+/// the half-plane through an end at `v` of an edge of the loop, as the edge's curve has it, where
+/// that half-plane first meets a loop of the face at that end ([`first_met`], [`ends_at`]). `None`
+/// where no edge's end at `v` serves. The half-plane is taken through the curve's end, not through
+/// the vertex's point: a vertex off its curves lies off the half-plane through their end when the
+/// loop's centre is off the axis, as on a cap cut by a tilted plane, by up to the distance it lies
+/// off them, and the half-plane through its point then meets the curve elsewhere, at a point no
+/// curve ends at, though the seam from the curve's end is clear. Healing moves the vertex onto
+/// that end, so the seam runs from where the vertex will be.
+fn from_vertex(
+    raw: &Raw,
+    frame: &Frame,
+    pole: Point3,
+    bounds: &[(bool, Vec<Use>)],
+    k: usize,
+    v: usize,
+) -> Option<(usize, f64)> {
+    let angle = about(frame);
+    bounds[k].1.iter().find_map(|u| {
+        let edge = &raw.edges[u.edge];
+        let (ps, pe) = (raw.points[edge.start], raw.points[edge.end]);
+        let (t0, t1) = edge_range(&edge.curve, ps, pe, edge.start == edge.end)?;
+        [(edge.start, t0), (edge.end, t1)]
+            .into_iter()
+            .filter(|&(w, _)| w == v)
+            .find_map(|(_, at)| {
+                first_met(raw, frame, pole, bounds, k, angle(edge.curve.eval(at)))
+                    .filter(|&(e, t)| ends_at(raw, e, t, v))
+            })
+    })
+}
+
 /// Whether the point of edge `e` at `t` is the edge's end at vertex `v`, as its curve has it: the
 /// curve's point at that end of its range, within the tolerance.
 fn ends_at(raw: &Raw, e: usize, t: f64, v: usize) -> bool {
@@ -2059,17 +2093,32 @@ fn ends_at(raw: &Raw, e: usize, t: f64, v: usize) -> bool {
         .any(|&(w, at)| w == v && edge.curve.eval(at).dist(q) <= tol::LINEAR)
 }
 
-/// The vertex a use of `uses` starts at nearest `q`, within what healing may move a vertex
-/// ([`heal::MAX_HEAL`]), if any. An edge is not split there: one piece would be no longer than the
-/// distance healing closes, as short as nothing where the vertex lies off its curve by a hair, and
-/// healing moves the vertex onto the curve anyway.
-fn vertex_at(raw: &Raw, uses: &[Use], q: Point3) -> Option<usize> {
-    uses.iter()
+/// The vertex of loop `k` of `bounds` to start a seam at, for the point `q` [`seam_point`] found
+/// on it, if any: the vertex a use of the loop starts at nearest `q`, within what healing may move
+/// a vertex ([`heal::MAX_HEAL`]), where the seam from that vertex to `pole` is clear as well
+/// ([`from_vertex`]). An edge is not split beside such a vertex: one piece would be no longer than
+/// the distance healing closes, as short as nothing where the vertex lies off its curve by a hair,
+/// and healing moves the vertex onto the curve anyway. But the vertex's own meridian or generator
+/// is not `q`'s: a hole may pass between the two, however near the vertex lies, and the seam from
+/// the vertex would then run through it. Where the seam from the nearest vertex is not clear, the
+/// edge is split at `q`, where it is.
+fn vertex_at(
+    raw: &Raw,
+    frame: &Frame,
+    pole: Point3,
+    bounds: &[(bool, Vec<Use>)],
+    k: usize,
+    q: Point3,
+) -> Option<usize> {
+    bounds[k]
+        .1
+        .iter()
         .map(|u| use_start(raw, u))
         .map(|v| (raw.points[v].dist(q), v))
         .filter(|&(d, _)| d <= heal::MAX_HEAL)
         .min_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, v)| v)
+        .filter(|&v| from_vertex(raw, frame, pole, bounds, k, v).is_some())
 }
 
 /// Turns loop `uses` to start at its vertex `v`.
@@ -2155,7 +2204,7 @@ fn recap(raw: &mut Raw, f: usize, k: usize) -> Result<Option<(usize, usize)>> {
     let Some((at, t)) = seam_point(raw, &frame, q, &bounds, k) else {
         return bad(raw.faces[f].id, NO_SEAM);
     };
-    let (from, split) = match vertex_at(raw, &bounds[k].1, raw.edges[at].curve.eval(t)) {
+    let (from, split) = match vertex_at(raw, &frame, q, &bounds, k, raw.edges[at].curve.eval(t)) {
         Some(v) => (v, None),
         None => {
             let (v, half) = split_read_edge(raw, at, t);
