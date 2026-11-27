@@ -567,13 +567,14 @@ fn range_of(raw: &Raw, e: usize) -> Option<(f64, f64)> {
 /// `hold`, the file's stated uncertainty, is how far apart a vertex or an edge whose faces touch
 /// there may hold its edges' ends or its faces ([`touching_centre`], [`held_edge`]), and no
 /// further than healing may move geometry ([`MAX_HEAL`]); without it, as for a file that states
-/// none, nothing is held.
+/// none, nothing is held. `memo` keeps what [`held_edge`] found from one attempt to the next.
 fn attempt(
     raw: &mut Raw,
     start: &HashMap<usize, Point3>,
     samples: &HashMap<usize, Vec<Point3>>,
     loose: bool,
     hold: Option<f64>,
+    memo: &mut Held,
 ) -> std::result::Result<Vec<(f64, f64)>, Vec<Failure>> {
     let ranges: Vec<Option<(f64, f64)>> = (0..raw.edges.len()).map(|e| range_of(raw, e)).collect();
     let fits: Vec<bool> = (0..raw.edges.len())
@@ -592,6 +593,7 @@ fn attempt(
     // Vertices whose faces touch there and have no common point: each edge ends on its own faces,
     // and the vertex's tolerance holds those ends.
     let mut held = vec![false; raw.points.len()];
+    let mut holds = 0;
     let hold = hold.map(|u| u.min(MAX_HEAL));
     for (v, edges) in at_vertex.iter().enumerate() {
         let p0 = start.get(&v).copied().unwrap_or(raw.points[v]);
@@ -634,6 +636,7 @@ fn attempt(
                 Some((cap, (x, r))) if r <= cap => {
                     moved[v] = x;
                     held[v] = true;
+                    holds += 1;
                 }
                 c => {
                     stuck[v] = true;
@@ -691,14 +694,18 @@ fn attempt(
             continue;
         }
         // Where the faces touch along the edge, the curve midway between them is the edge; a
-        // refit could only find the same band, and fails where they lie apart.
+        // refit could only find the same band, and fails where they lie apart. Faces that cross
+        // near the edge, however shallow the angle, meet along a curve a refit finds: there the
+        // refit is tried first, and the edge is held only where it fails.
+        let crossing = hold.is_some_and(|cap| memo.crosses(raw, e, r.or(old), cap));
         let touching = match hold {
-            Some(cap) => held_edge(raw, e, r.or(old), cap),
-            None => Err(None),
+            Some(cap) if !crossing => memo.held_edge(raw, e, r.or(old), cap),
+            _ => Err(None),
         };
         if let Ok((curve, r, t)) = touching {
             raw.edges[e].curve = curve;
             out.push(r);
+            holds += 1;
             if t > tol::LINEAR {
                 held_edges.insert(e, t);
             }
@@ -724,6 +731,21 @@ fn attempt(
                 .or_else(|_| refit(raw, e, r.or(old), None, (&held, reach))),
             None => refit(raw, e, r.or(old), None, (&held, reach)),
         };
+        let touching = match (&rf, hold) {
+            (Err(_), Some(cap)) if crossing => memo.held_edge(raw, e, r.or(old), cap),
+            _ => touching,
+        };
+        if rf.is_err()
+            && let Ok((curve, r, t)) = touching
+        {
+            raw.edges[e].curve = curve;
+            out.push(r);
+            holds += 1;
+            if t > tol::LINEAR {
+                held_edges.insert(e, t);
+            }
+            continue;
+        }
         match rf {
             Ok((curve, r)) => {
                 raw.edges[e].curve = curve;
@@ -756,6 +778,9 @@ fn attempt(
         }
         let x = raw.points[v];
         let mut far: f64 = 0.0;
+        // How far holding the vertex moves it and its edges' ends from the file's vertex, which
+        // is what the solid's movement reports.
+        let mut moves = x.dist(before[v]);
         let mut shortest = f64::INFINITY;
         for &e in edges {
             let edge = &raw.edges[e];
@@ -766,6 +791,7 @@ fn attempt(
             for (t, w) in [(r.0, edge.start), (r.1, edge.end)] {
                 if w == v {
                     far = far.max(edge.curve.eval(t).dist(x));
+                    moves = moves.max(edge.curve.eval(t).dist(before[v]));
                 }
             }
             shortest = shortest.min(edge_length(&edge.curve, r));
@@ -776,7 +802,16 @@ fn attempt(
             GAP_MARGIN * far
         }
         .max(widest);
-        if t > cap || (t > tol::LINEAR && t > MAX_SHARE * shortest) {
+        if held[v] && moves > cap {
+            failures.push(Failure::Vertex(
+                v,
+                format!(
+                    "the faces at an end of this edge touch there, and holding it moves its edges' \
+                     ends {moves:.1e} mm from the file's vertex, more than the {cap:.1e} mm a hold \
+                     may"
+                ),
+            ));
+        } else if t > cap || (t > tol::LINEAR && t > MAX_SHARE * shortest) {
             failures.push(Failure::Vertex(
                 v,
                 format!(
@@ -789,11 +824,132 @@ fn attempt(
         }
     }
     raw.held_edges = held_edges;
+    raw.holds = holds;
     if failures.is_empty() {
         Ok(out)
     } else {
         Err(failures)
     }
+}
+
+/// What [`crosses_near`] and [`held_edge`] found for each edge, with what they found it from: the
+/// edge's curve and range, the cap, its vertices' points and its faces' surfaces. Healing tries the
+/// same edges round after round, mostly unchanged, and once more loosely, and both cost
+/// projections onto the faces' surfaces, which onto a spline search the whole surface.
+#[derive(Default)]
+pub(super) struct Held(HashMap<usize, Vec<Found>>);
+
+/// What was found for an edge from `from`, once asked.
+struct Found {
+    from: HeldFrom,
+    crosses: Option<bool>,
+    held: Option<HeldEdge>,
+}
+
+/// What [`held_edge`] finds for an edge.
+type HeldEdge = std::result::Result<(Curve, (f64, f64), f64), Option<f64>>;
+
+/// What [`held_edge`] finds an edge's hold from.
+#[derive(PartialEq)]
+struct HeldFrom {
+    curve: Curve,
+    range: Option<(f64, f64)>,
+    cap: f64,
+    ends: (Point3, Point3),
+    surfaces: Vec<Surface>,
+}
+
+impl Held {
+    /// What was found for edge `e` over `range` with `cap`, as `raw` has it now.
+    fn found(&mut self, raw: &Raw, e: usize, range: Option<(f64, f64)>, cap: f64) -> &mut Found {
+        let edge = &raw.edges[e];
+        let from = HeldFrom {
+            curve: edge.curve.clone(),
+            range,
+            cap,
+            ends: (raw.points[edge.start], raw.points[edge.end]),
+            surfaces: edge
+                .faces
+                .iter()
+                .map(|&f| raw.faces[f].surface.clone())
+                .collect(),
+        };
+        let found = self.0.entry(e).or_default();
+        let i = match found.iter().position(|f| f.from == from) {
+            Some(i) => i,
+            None => {
+                found.push(Found {
+                    from,
+                    crosses: None,
+                    held: None,
+                });
+                found.len() - 1
+            }
+        };
+        &mut found[i]
+    }
+
+    /// [`crosses_near`], found once for each edge, curve, range, vertices and surfaces.
+    fn crosses(&mut self, raw: &Raw, e: usize, range: Option<(f64, f64)>, cap: f64) -> bool {
+        let found = self.found(raw, e, range, cap);
+        *found
+            .crosses
+            .get_or_insert_with(|| crosses_near(raw, e, range))
+    }
+
+    /// [`held_edge`], found once for each edge, curve, range, cap, vertices and surfaces.
+    fn held_edge(&mut self, raw: &Raw, e: usize, range: Option<(f64, f64)>, cap: f64) -> HeldEdge {
+        let found = self.found(raw, e, range, cap);
+        found
+            .held
+            .get_or_insert_with(|| held_edge(raw, e, range, cap))
+            .clone()
+    }
+}
+
+/// Whether the two faces of edge `e` over `range` cross near it, however shallow the angle, rather
+/// than touch. At the feet of the edge's middle on the two surfaces, the sine s of the angle between
+/// their normals and the second's offset d from the first put a crossing, to first order, |d|/s
+/// across the edge; where that lies within what healing may move, the second sheet's side of the
+/// first is compared twice as far out on either side, across the edge, along the first. Sheets
+/// that cross lie on opposite sides there; sheets that touch, as a round meets the wall it is
+/// tangent to, part only with the square of the distance and lie on the same side.
+fn crosses_near(raw: &Raw, e: usize, range: Option<(f64, f64)>) -> bool {
+    let edge = &raw.edges[e];
+    let mut faces = edge.faces.clone();
+    faces.sort_unstable();
+    faces.dedup();
+    let [fa, fb] = faces.as_slice() else {
+        return false;
+    };
+    let (a, b) = (&raw.faces[*fa].surface, &raw.faces[*fb].surface);
+    let Some(r) = range.or_else(|| file_range(raw, e)) else {
+        return false;
+    };
+    let m = edge.curve.eval(0.5 * (r.0 + r.1));
+    let (ua, ub) = (a.project(m), b.project(m));
+    let (pa, na) = (a.eval(ua.x, ua.y), a.normal(ua.x, ua.y));
+    let (pb, nb) = (b.eval(ub.x, ub.y), b.normal(ub.x, ub.y));
+    let nb = if na.dot(nb) < 0.0 { -nb } else { nb };
+    let sine = na.cross(nb).norm();
+    if sine >= TOUCHING {
+        return true;
+    }
+    let reach = 2.0 * nb.dot(pa - pb).abs() / sine.max(f64::MIN_POSITIVE) + 10.0 * tol::LINEAR;
+    if reach > MAX_HEAL {
+        return false;
+    }
+    // Across the edge along the first sheet, the way the second's normal leans from its.
+    let Some(across) = (nb - na * na.dot(nb)).unit() else {
+        return false;
+    };
+    let side = |sign: f64| {
+        let ua = a.project_near(pa + across * (sign * reach), ua);
+        let q = a.eval(ua.x, ua.y);
+        let ub = b.project_near(q, ub);
+        nb.dot(q - b.eval(ub.x, ub.y))
+    };
+    side(1.0) * side(-1.0) < 0.0
 }
 
 /// Edge `e` over `range` held with a tolerance where its two faces touch along it and no curve
@@ -821,7 +977,7 @@ fn held_edge(
     if a.normal(ua.x, ua.y).cross(b.normal(ub.x, ub.y)).norm() >= TOUCHING {
         return Err(None);
     }
-    let c = midway_by(raw, e, r, true).ok_or(None)?;
+    let c = midway_by(raw, e, r, Some(2.0 * cap)).ok_or(None)?;
     let dom = c.domain();
     let gap = curve_gap(&c, dom, a).max(curve_gap(&c, dom, b));
     let t = if gap <= tol::LINEAR {
@@ -1002,13 +1158,32 @@ fn movement(file: &Raw, healed: &Raw, faces: &BTreeSet<usize>) -> Option<Healed>
 /// other so that cannot work, [`adjust`] moves the surfaces of the faces involved. A solid whose
 /// geometry would move more than [`MAX_HEAL`] is an error naming the distance.
 pub(super) fn heal(raw: &mut Raw) -> Result<Ranges> {
+    heal_remembering(raw, &mut Held::default())
+}
+
+/// [`heal`], keeping in `memo` what it found where faces touch along an edge. In a file that
+/// states an uncertainty, faces that touch are held within it ([`attempt`]); where healing so
+/// would move the geometry further than a hold may, the stated uncertainty or [`MAX_HEAL`], it is
+/// set aside and healing runs again holding nothing, moving surfaces where faces touch as for a
+/// file that states none.
+pub(super) fn heal_remembering(raw: &mut Raw, memo: &mut Held) -> Result<Ranges> {
+    match heal_holding(raw, raw.stated, memo)? {
+        Some(healed) => Ok(healed),
+        None => heal_holding(raw, None, memo)
+            .map(|healed| healed.expect("a heal that holds nothing is not set aside")),
+    }
+}
+
+/// [`heal`], holding faces that touch within `hold`; `None` where it held some and would move the
+/// geometry further than `hold` or [`MAX_HEAL`].
+fn heal_holding(raw: &mut Raw, hold: Option<f64>, memo: &mut Held) -> Result<Option<Ranges>> {
     let ranges: Vec<Option<(f64, f64)>> = (0..raw.edges.len()).map(|e| range_of(raw, e)).collect();
     if (0..raw.edges.len()).all(|e| edge_fits(raw, e, ranges[e])) {
         let ranges = ranges
             .into_iter()
             .map(|r| r.unwrap_or((0.0, 0.0)))
             .collect();
-        return Ok((ranges, None));
+        return Ok(Some((ranges, None)));
     }
     let file = raw.clone();
     let mut surfaces: Vec<Surface> = file.faces.iter().map(|f| f.surface.clone()).collect();
@@ -1030,9 +1205,15 @@ pub(super) fn heal(raw: &mut Raw) -> Result<Ranges> {
     // file that states none is healed as before.
     for round in 0..=ADJUST_ROUNDS {
         let mut work = with_surfaces(&surfaces);
-        let failures = match attempt(&mut work, &start, &samples, false, file.stated) {
+        let failures = match attempt(&mut work, &start, &samples, false, hold, memo) {
             Ok(ranges) => {
                 let healed = movement(&file, &work, &chosen);
+                if let Some(cap) = hold
+                    && work.holds > 0
+                    && healed.as_ref().is_some_and(|h| h.moved > cap.min(MAX_HEAL))
+                {
+                    return Ok(None);
+                }
                 if let Some(h) = healed.as_ref().filter(|h| h.moved > MAX_HEAL) {
                     return fail(
                         file.edges.first().map_or(0, |e| e.id),
@@ -1043,7 +1224,7 @@ pub(super) fn heal(raw: &mut Raw) -> Result<Ranges> {
                     );
                 }
                 *raw = work;
-                return Ok((ranges, healed));
+                return Ok(Some((ranges, healed)));
             }
             Err(f) => f,
         };
@@ -1107,9 +1288,16 @@ fn first_failure(file: &Raw, failures: &[Failure]) -> (u64, String) {
 /// hold what is left: where faces meet nowhere exactly, as four faces at a corner can miss each
 /// other by far less than the file's uncertainty, healing fails, but an edge elsewhere may still
 /// be further off than the file promises until it is refitted. Returns how far it moved.
-pub(super) fn heal_loosely(raw: &mut Raw) -> Option<Healed> {
+pub(super) fn heal_loosely(raw: &mut Raw, memo: &mut Held) -> Option<Healed> {
     let file = raw.clone();
-    let _ = attempt(raw, &HashMap::new(), &HashMap::new(), true, raw.stated);
+    let _ = attempt(
+        raw,
+        &HashMap::new(),
+        &HashMap::new(),
+        true,
+        raw.stated,
+        memo,
+    );
     movement(&file, raw, &BTreeSet::new())
 }
 
@@ -1170,8 +1358,9 @@ fn curve_gap(c: &Curve, r: (f64, f64), s: &Surface) -> f64 {
             let p = c.eval(t);
             hint = s.project_near(p, hint);
             let d = s.eval(hint.x, hint.y).dist(p);
-            // A projection that stalls short of the nearest point is tried again from scratch.
-            let d = if d > tol::LINEAR {
+            // A projection that stalls short of the nearest point is tried again from scratch,
+            // where that could change the largest: from scratch it can only come nearer.
+            let d = if d > tol::LINEAR && d > worst {
                 d.min(surface_gap(s, p))
             } else {
                 d
@@ -1186,13 +1375,15 @@ fn curve_gap(c: &Curve, r: (f64, f64), s: &Surface) -> f64 {
 /// vertices as they are: where the faces lie apart along it rather than crossing, the file's curve
 /// on one of them misses the other by the whole gap, and this one by half.
 fn midway(raw: &Raw, e: usize, r: (f64, f64)) -> Option<Curve> {
-    midway_by(raw, e, r, false)
+    midway_by(raw, e, r, None)
 }
 
-/// [`midway`], with each sample's feet after the first found by walking from the last ones where
-/// `walk` is set: the point moves by less each time, and a projection onto a spline from scratch
-/// searches the whole surface.
-fn midway_by(raw: &Raw, e: usize, r: (f64, f64), walk: bool) -> Option<Curve> {
+/// [`midway`], with each sample's feet found by walking where `walk` is given: from the last
+/// sample's feet, and through a sample's steps from its own last ones, since the point moves by
+/// little each time and a projection onto a spline from scratch searches the whole surface. A
+/// walk that ends further than `walk` from a sample's point, where no edge held within it lies, is
+/// done again from scratch.
+fn midway_by(raw: &Raw, e: usize, r: (f64, f64), walk: Option<f64>) -> Option<Curve> {
     let edge = &raw.edges[e];
     let mut faces = edge.faces.clone();
     faces.sort_unstable();
@@ -1209,6 +1400,7 @@ fn midway_by(raw: &Raw, e: usize, r: (f64, f64), walk: bool) -> Option<Curve> {
         return None;
     }
     let last = ts.len() - 1;
+    let mut feet: Option<(Vec2, Vec2)> = None;
     let mut pts: Vec<Point3> = ts
         .iter()
         .enumerate()
@@ -1217,23 +1409,39 @@ fn midway_by(raw: &Raw, e: usize, r: (f64, f64), walk: bool) -> Option<Curve> {
             i if i == last => raw.points[edge.end],
             _ => {
                 let mut p = edge.curve.eval(t);
-                let (mut ua, mut ub) = (a.project(p), b.project(p));
+                let foot = |s: &Surface, p: Point3, hint: Option<Vec2>| match (walk, hint) {
+                    (Some(far), Some(h)) => {
+                        let uv = s.project_near(p, h);
+                        if s.eval(uv.x, uv.y).dist(p) <= far {
+                            uv
+                        } else {
+                            s.project(p)
+                        }
+                    }
+                    _ => s.project(p),
+                };
+                let (mut ua, mut ub) =
+                    (foot(a, p, feet.map(|f| f.0)), foot(b, p, feet.map(|f| f.1)));
                 for k in 0..50 {
                     if k > 0 {
-                        (ua, ub) = if walk {
-                            (a.project_near(p, ua), b.project_near(p, ub))
-                        } else {
-                            (a.project(p), b.project(p))
-                        };
+                        (ua, ub) = (foot(a, p, Some(ua)), foot(b, p, Some(ub)));
                     }
                     let (qa, qb) = (a.eval(ua.x, ua.y), b.eval(ub.x, ub.y));
                     let next = qa + (qb - qa) * 0.5;
-                    let done = next.dist(p) <= 1e-12;
+                    // A walk's feet settle only to the projection's own precision, short of
+                    // 1e-12 on a spline: there a step below a thousandth of the tolerance ends it.
+                    let settled = if walk.is_some() {
+                        1e-3 * tol::LINEAR
+                    } else {
+                        1e-12
+                    };
+                    let done = next.dist(p) <= settled;
                     p = next;
                     if done {
                         break;
                     }
                 }
+                feet = Some((ua, ub));
                 p
             }
         })

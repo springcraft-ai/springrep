@@ -6018,3 +6018,165 @@ fn touching_faces_further_apart_than_the_file_states_are_kept_as_it_has_them() {
     assert_eq!((t.vertices, t.edges, t.past_stated), (4, 4, 8));
     assert!((t.largest - 7.5e-6).abs() < 1e-8, "{t:?}");
 }
+
+/// Grown by `dr` in a file that states `dr` or more, but no more than twice `dr`, the round's
+/// corners would be held `dr/2` from the sheets, within what the file states; but each arc at a
+/// corner ends on the round and the end it crosses, `dr` from the file's vertex on the side, and
+/// so would the solid's geometry move `dr`, which is not within it. Nothing is held: the surface
+/// step moves the round onto the sides, as in a file that states none, and the solid is exact.
+/// So too where the hold would be within what the file states but `dr` past what healing may
+/// move ([`MAX_HEAL`](super::MAX_HEAL), 0.05 mm): grown 0.06 or 0.066 mm in a file that states
+/// 0.2 mm.
+#[test]
+fn touching_faces_a_hold_would_move_further_than_it_may_are_closed_by_moving_a_surface() {
+    let b = rounded_block();
+    let (v0, a) = (measure::volume(&b), measure::area(&b));
+    for (dr, stated) in [(1e-6, 1e-6), (0.06, 0.2), (0.066, 0.2)] {
+        let imp = rounds_grown(dr, Some(stated));
+        assert!(imp.rejected.is_empty(), "{dr}: {:?}", imp.rejected);
+        assert!(check::check(&imp.brep).is_empty(), "{dr}");
+        assert!(imp.tolerant.is_empty(), "{dr}: {:?}", imp.tolerant);
+        let h = &imp.healed[0];
+        assert!(
+            h.surfaces > 0.0 && h.moved <= dr && h.moved <= super::MAX_HEAL,
+            "{dr}: {h:?}"
+        );
+        let v = measure::volume(&imp.brep);
+        assert!((v - v0).abs() <= a * dr, "{dr}: {v} vs {v0}");
+    }
+}
+
+/// A wedge of angle `alpha` along the z axis, H = 2 high and L = 10 long, in a file that states
+/// `stated` as its uncertainty: the planes y = 0 and y = x tan α meet the bottom z = 0, the top
+/// z = H and the end x = L. The edge where they meet is written as the line through `(dx, dy)`
+/// parallel to the axis, off both planes, its vertices on the axis.
+fn wedge(alpha: f64, (dx, dy): (f64, f64), stated: f64) -> String {
+    let (l, h) = (10.0f64, 2.0f64);
+    let q = l * alpha.tan();
+    let (s, c) = (alpha.sin(), alpha.cos());
+    step_file(&format!(
+        "#1=CARTESIAN_POINT('',(0.,0.,0.));
+#2=CARTESIAN_POINT('',(0.,0.,{h:?}));
+#3=CARTESIAN_POINT('',({l:?},0.,0.));
+#4=CARTESIAN_POINT('',({l:?},0.,{h:?}));
+#5=CARTESIAN_POINT('',({l:?},{q:?},0.));
+#6=CARTESIAN_POINT('',({l:?},{q:?},{h:?}));
+#7=CARTESIAN_POINT('',({dx:?},{dy:?},0.));
+#11=VERTEX_POINT('',#1);
+#12=VERTEX_POINT('',#2);
+#13=VERTEX_POINT('',#3);
+#14=VERTEX_POINT('',#4);
+#15=VERTEX_POINT('',#5);
+#16=VERTEX_POINT('',#6);
+#20=DIRECTION('',(1.,0.,0.));
+#21=DIRECTION('',({c:?},{s:?},0.));
+#22=DIRECTION('',(0.,1.,0.));
+#23=DIRECTION('',(0.,0.,1.));
+#24=DIRECTION('',(0.,0.,-1.));
+#25=DIRECTION('',(0.,-1.,0.));
+#26=DIRECTION('',({ns:?},{c:?},0.));
+#30=VECTOR('',#20,1.);
+#31=VECTOR('',#21,1.);
+#32=VECTOR('',#22,1.);
+#33=VECTOR('',#23,1.);
+#40=LINE('',#1,#30);
+#41=LINE('',#2,#30);
+#42=LINE('',#1,#31);
+#43=LINE('',#2,#31);
+#44=LINE('',#3,#32);
+#45=LINE('',#4,#32);
+#46=LINE('',#7,#33);
+#47=LINE('',#3,#33);
+#48=LINE('',#5,#33);
+#50=EDGE_CURVE('',#11,#13,#40,.T.);
+#51=EDGE_CURVE('',#12,#14,#41,.T.);
+#52=EDGE_CURVE('',#11,#15,#42,.T.);
+#53=EDGE_CURVE('',#12,#16,#43,.T.);
+#54=EDGE_CURVE('',#13,#15,#44,.T.);
+#55=EDGE_CURVE('',#14,#16,#45,.T.);
+#56=EDGE_CURVE('',#11,#12,#46,.T.);
+#57=EDGE_CURVE('',#13,#14,#47,.T.);
+#58=EDGE_CURVE('',#15,#16,#48,.T.);
+#60=AXIS2_PLACEMENT_3D('',#1,#24,#20);
+#61=AXIS2_PLACEMENT_3D('',#2,#23,#20);
+#62=AXIS2_PLACEMENT_3D('',#1,#25,#20);
+#63=AXIS2_PLACEMENT_3D('',#1,#26,#21);
+#64=AXIS2_PLACEMENT_3D('',#3,#20,#22);
+#70=PLANE('',#60);
+#71=PLANE('',#61);
+#72=PLANE('',#62);
+#73=PLANE('',#63);
+#74=PLANE('',#64);
+#80=ORIENTED_EDGE('',*,*,#52,.T.);
+#81=ORIENTED_EDGE('',*,*,#54,.F.);
+#82=ORIENTED_EDGE('',*,*,#50,.F.);
+#83=EDGE_LOOP('',(#80,#81,#82));
+#84=FACE_OUTER_BOUND('',#83,.T.);
+#85=ADVANCED_FACE('',(#84),#70,.T.);
+#90=ORIENTED_EDGE('',*,*,#51,.T.);
+#91=ORIENTED_EDGE('',*,*,#55,.T.);
+#92=ORIENTED_EDGE('',*,*,#53,.F.);
+#93=EDGE_LOOP('',(#90,#91,#92));
+#94=FACE_OUTER_BOUND('',#93,.T.);
+#95=ADVANCED_FACE('',(#94),#71,.T.);
+#100=ORIENTED_EDGE('',*,*,#50,.T.);
+#101=ORIENTED_EDGE('',*,*,#57,.T.);
+#102=ORIENTED_EDGE('',*,*,#51,.F.);
+#103=ORIENTED_EDGE('',*,*,#56,.F.);
+#104=EDGE_LOOP('',(#100,#101,#102,#103));
+#105=FACE_OUTER_BOUND('',#104,.T.);
+#106=ADVANCED_FACE('',(#105),#72,.T.);
+#110=ORIENTED_EDGE('',*,*,#56,.T.);
+#111=ORIENTED_EDGE('',*,*,#53,.T.);
+#112=ORIENTED_EDGE('',*,*,#58,.F.);
+#113=ORIENTED_EDGE('',*,*,#52,.F.);
+#114=EDGE_LOOP('',(#110,#111,#112,#113));
+#115=FACE_OUTER_BOUND('',#114,.T.);
+#116=ADVANCED_FACE('',(#115),#73,.T.);
+#120=ORIENTED_EDGE('',*,*,#54,.T.);
+#121=ORIENTED_EDGE('',*,*,#58,.T.);
+#122=ORIENTED_EDGE('',*,*,#55,.F.);
+#123=ORIENTED_EDGE('',*,*,#57,.F.);
+#124=EDGE_LOOP('',(#120,#121,#122,#123));
+#125=FACE_OUTER_BOUND('',#124,.T.);
+#126=ADVANCED_FACE('',(#125),#74,.T.);
+#130=CLOSED_SHELL('',(#85,#95,#106,#116,#126));
+#131=MANIFOLD_SOLID_BREP('',#130);
+#140=(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.));
+#141=(NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.));
+#142=(NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT());
+#143=UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE({stated:?}),#140,'distance_accuracy_value','');
+#144=(GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#143)) \
+GLOBAL_UNIT_ASSIGNED_CONTEXT((#140,#141,#142)) REPRESENTATION_CONTEXT('','3D'));
+#145=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#131),#144);",
+        ns = -s,
+    ))
+}
+
+/// Planes at 4° or 5° to each other have normals within a sine of 0.1 of each other, as faces that
+/// touch do, but they cross, along the axis: an edge written off them is refitted onto that line,
+/// as in a file that states no uncertainty, not held between them. The edge moves by the
+/// distance its line was written off the axis, √(dx² + dy²), no surface moves, and the solid is
+/// exact, with the wedge's volume H L² tan α / 2. The file states 1e-3 mm.
+#[test]
+fn faces_that_cross_at_a_shallow_angle_meet_where_they_cross_rather_than_being_held() {
+    for deg in [4.0f64, 5.0] {
+        let alpha = deg.to_radians();
+        let want = 2.0 * 100.0 * alpha.tan() / 2.0;
+        for (dx, dy) in [(-2e-6, -1e-6), (-2e-5, -1e-5)] {
+            let imp = read(wedge(alpha, (dx, dy), 1e-3).as_bytes(), "wedge").unwrap();
+            let name = format!("{deg}° ({dx}, {dy})");
+            assert!(imp.rejected.is_empty(), "{name}: {:?}", imp.rejected);
+            assert!(imp.tolerant.is_empty(), "{name}: {:?}", imp.tolerant);
+            assert!(check::check(&imp.brep).is_empty(), "{name}");
+            let h = &imp.healed[0];
+            let off = (dx * dx + dy * dy).sqrt();
+            assert!(
+                h.surfaces == 0.0 && (h.moved - off).abs() <= 1e-12,
+                "{name}: {h:?}"
+            );
+            let v = measure::volume(&imp.brep);
+            assert!((v - want).abs() <= 1e-12 * want, "{name}: {v} vs {want}");
+        }
+    }
+}

@@ -76,6 +76,9 @@ pub(super) struct Raw {
     pub held: HashMap<usize, f64>,
     /// The same for each edge whose faces touch along it and have no curve in common.
     pub held_edges: HashMap<usize, f64>,
+    /// How many vertices and edges healing held where their faces touch, within the kernel
+    /// tolerance or not.
+    pub holds: usize,
 }
 
 /// The parameter of the point of `c` nearest `p`; a periodic curve's within its first period.
@@ -2543,9 +2546,11 @@ fn built(raw: Raw, uncertainty: Option<f64>, ours: bool, strict: bool) -> Result
         let (ranges, _) = heal::heal(&mut raw)?;
         return assemble(&raw, &ranges, None).map(|b| (b, names(), None, turned));
     }
-    let exact = || {
+    // What healing found where faces touch, for each time it is tried.
+    let mut memo = heal::Held::default();
+    let mut exact = || {
         let mut raw = file.clone();
-        heal::heal(&mut raw)
+        heal::heal_remembering(&mut raw, &mut memo)
             .and_then(|(ranges, healed)| assemble(&raw, &ranges, None).map(|b| (b, healed)))
     };
     let within = uncertainty.filter(|&u| u > tol::LINEAR);
@@ -2589,7 +2594,7 @@ fn built(raw: Raw, uncertainty: Option<f64>, ours: bool, strict: bool) -> Result
         Err(e) => {
             // Healed where it can be, and held by tolerances where it cannot.
             let mut loose = file.clone();
-            let healed = heal::heal_loosely(&mut loose);
+            let healed = heal::heal_loosely(&mut loose, &mut memo);
             let l = match (tolerant(&loose), healed.as_ref(), within) {
                 (Ok(_), Some(h), Some(within)) if h.moved > within => format!(
                     "healing would move {} {:.1e} mm, more than the file's {within:.1e} mm",

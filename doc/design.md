@@ -2219,8 +2219,12 @@ solid never pinches.
      (the minimum-norm solution of at most three equations), each of its edges ends on its own two
      faces as near it as they meet, and an edge along touching faces is the curve midway between
      them. Each carries 1.5 times its widest gap, within the stated uncertainty, `MAX_HEAL` and a
-     quarter of its shortest edge; the surfaces stay as the file has them. A file that states no
-     uncertainty holds nothing.
+     quarter of its shortest edge; the surfaces stay as the file has them. A hold is kept only where
+     the vertex and its edges' ends stay within those bounds of the file's vertex, since an edge at
+     it whose faces cross ends on the far sheet; a heal that held something and still moves the
+     geometry further is set aside, and healing runs again holding nothing. Faces whose normals
+     agree within that sine but that cross near the edge, at a shallow angle, are refitted first
+     and held only where that fails. A file that states no uncertainty holds nothing.
   2. Where faces miss each other, so that step fails (three surfaces with no common point at a
      vertex, two faces that touch rather than cross, a B-spline face that stops short of its
      corner), the surfaces of the faces involved move too ([`adjust.rs`](../src/step/adjust.rs)).
