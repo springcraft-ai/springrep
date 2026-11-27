@@ -1949,21 +1949,38 @@ impl Hole {
 /// ball's 448π/3 above z = −3 (a cap of height 2 below it holds 52π/3) and 80π + 16π, less what
 /// the holes take, where no two holes meet.
 fn holed_ball(vx: f64, holes: &[Hole], turned: bool) -> (String, f64, f64) {
+    let p = Vec3::new(vx, (16.0 - vx * vx).max(0.0).sqrt(), -3.0);
+    split_holed_ball(&[p], holes, turned)
+}
+
+/// [`holed_ball`] with the circle at z = −3 split at `vertices`, in order round +z, its arcs
+/// between them in turn: the file's vertices, which may lie off the circle, as a file can have a
+/// vertex off its curves by less than healing moves it.
+fn split_holed_ball(vertices: &[Vec3], holes: &[Hole], turned: bool) -> (String, f64, f64) {
     let mut s = Entities::default();
     let at = s.placement(Vec3::ZERO, Vec3::Z, Vec3::X);
     let sphere = s.put(format!("SPHERICAL_SURFACE('',#{at},5.)"));
-    let p = Vec3::new(vx, (16.0 - vx * vx).max(0.0).sqrt(), -3.0);
-    let v = s.vertex(p);
+    let vs: Vec<u64> = vertices.iter().map(|&p| s.vertex(p)).collect();
     let base = Vec3::new(0.0, 0.0, -3.0);
     let at = s.placement(base, Vec3::Z, Vec3::X);
-    let circle = s.arc(v, v, at, 4.0);
+    let arcs: Vec<u64> = (0..vs.len())
+        .map(|i| s.arc(vs[i], vs[(i + 1) % vs.len()], at, 4.0))
+        .collect();
     let (mut volume, mut area) = (448.0 * PI / 3.0, 96.0 * PI);
-    let (mut sphere_bounds, mut discs) = (vec![vec![(circle, !turned)]], Vec::new());
+    let round: Vec<(u64, bool)> = if turned {
+        arcs.iter().rev().map(|&e| (e, false)).collect()
+    } else {
+        arcs.iter().map(|&e| (e, true)).collect()
+    };
+    let (mut sphere_bounds, mut discs) = (vec![round], Vec::new());
     for hole in holes {
         let (c, r) = (hole.n * hole.d, (25.0 - hole.d * hole.d).sqrt());
         let x = (hole.toward - hole.n * hole.toward.dot(hole.n)).unit_or_zero();
         let q = c + x * r;
-        let w = if q.dist(p) <= 1e-12 { v } else { s.vertex(q) };
+        let w = match vertices.iter().position(|p| q.dist(*p) <= 1e-12) {
+            Some(i) => vs[i],
+            None => s.vertex(q),
+        };
         let at = s.placement(c, hole.n, x);
         let e = s.arc(w, w, at, r);
         sphere_bounds.push(vec![(e, false)]);
@@ -1981,7 +1998,8 @@ fn holed_ball(vx: f64, holes: &[Hole], turned: bool) -> (String, f64, f64) {
     let mut faces = vec![s.face(sphere, &bounds)];
     let at = s.placement(base, -Vec3::Z, Vec3::X);
     let plane = s.put(format!("PLANE('',#{at})"));
-    faces.push(s.face(plane, &[(&[(circle, false)], true)]));
+    let under: Vec<(u64, bool)> = arcs.iter().rev().map(|&e| (e, false)).collect();
+    faces.push(s.face(plane, &[(&under, true)]));
     faces.extend(discs);
     (s.solid(&faces), volume, area)
 }
@@ -1996,14 +2014,23 @@ fn holed_cap(vx: f64, holes: &[(f64, f64, f64)]) -> String {
 /// has `volume` and `area` to 1e-9 relative, meshes watertight with the mesh volume within
 /// area × deflection, and writes and reads back. Returns how many vertices it has.
 fn reads_exactly(text: &str, name: &str, volume: f64, area: f64) -> usize {
+    reads_healed(text, name, volume, area, None)
+}
+
+/// [`reads_exactly`], but with the solid healed where `moved` is given: its geometry moved by no
+/// more than `moved`, and no surface moved.
+fn reads_healed(text: &str, name: &str, volume: f64, area: f64, moved: Option<f64>) -> usize {
     let imp = read(text.as_bytes(), "part").unwrap();
     assert!(imp.rejected.is_empty(), "{name}: {:?}", imp.rejected);
-    assert!(
-        imp.healed.is_empty() && imp.tolerant.is_empty(),
-        "{name}: {:?} {:?}",
-        imp.healed,
-        imp.tolerant
-    );
+    assert!(imp.tolerant.is_empty(), "{name}: {:?}", imp.tolerant);
+    match moved {
+        None => assert!(imp.healed.is_empty(), "{name}: {:?}", imp.healed),
+        Some(moved) => assert!(
+            imp.healed.len() == 1 && imp.healed[0].moved <= moved && imp.healed[0].surfaces == 0.0,
+            "{name}: {:?}",
+            imp.healed
+        ),
+    }
     let b = &imp.brep;
     assert!(check::check(b).is_empty(), "{name}: {:?}", check::check(b));
     let (got_area, got) = measure::area_and_volume(b);
@@ -2306,6 +2333,110 @@ fn a_cones_seam_to_its_apex_clears_a_window_in_its_side() {
         + 3.0;
     for phi in [0.0, PI / 4.0, PI] {
         reads_exactly(&windowed_cone(phi), &format!("{phi}"), volume, area);
+    }
+}
+
+/// The cone of half-angle 45° on the disc of radius 4 at z = 0, apex (0, 0, 4): the cone face has
+/// the base circle for its loop round the apex, with one vertex at `p`, which may lie off the
+/// circle. It holds 64π/3 (πr²h/3, r = h = 4), and its area is the side's πr·√2r = 16√2π and the
+/// base's 16π.
+fn cone_on(p: Vec3) -> String {
+    let mut s = Entities::default();
+    let at = s.placement(Vec3::ZERO, -Vec3::Z, Vec3::X);
+    let cone = s.put(format!("CONICAL_SURFACE('',#{at},4.,{:?})", PI / 4.0));
+    let v = s.vertex(p);
+    let at = s.placement(Vec3::ZERO, Vec3::Z, Vec3::X);
+    let base = s.arc(v, v, at, 4.0);
+    let mut faces = vec![s.face(cone, &[(&[(base, true)], true)])];
+    let at = s.placement(Vec3::ZERO, -Vec3::Z, Vec3::X);
+    let plane = s.put(format!("PLANE('',#{at})"));
+    faces.push(s.face(plane, &[(&[(base, false)], true)]));
+    s.solid(&faces)
+}
+
+/// A cap whose loop's vertices lie off their circle by δ, less than healing moves a vertex, reads
+/// as the same cap with them on it, healed: the seam starts at the vertex where it starts on the
+/// circle, told by the edges that end there, and no edge is split beside a vertex. Each vertex
+/// lies δ = 2e-7 to 1e-3 mm off the circle of radius 4 at z = −3, outward or up: the nearest point
+/// of the circle is δ away, and healing moves the vertex there, no further. The surfaces stay,
+/// so the measures are those of the exact solid:
+///
+/// - the ball above z = −3, 448π/3 and 96π, its vertex at (4 + δ, 0, −3) or (4, 0, −3 + δ), as
+///   written and with its loop turned;
+/// - the ball cut by the hole of `a_caps_seam_to_its_pole_clears_its_holes`, 434π/3 and 95π, its
+///   vertex at −x, where the seam starts, and at +x, where a new vertex starts it, as written and
+///   turned;
+/// - that cut ball with its circle in four arcs, a vertex at each quarter turn, each 1e-6 off
+///   outward, as written and turned;
+/// - the cone of [`cone_on`], 64π/3 and 16√2π + 16π, its base vertex at (4 + δ, 0, 0) or
+///   (4, 0, δ).
+///
+/// Each has as many vertices as the cap with its vertices on the circle.
+///
+/// Nor is an edge split beside a vertex where the seam's start is found among half-planes about
+/// the axis: the cut ball with its circle in two arcs, from the vertex at +x, whose meridian runs
+/// through the hole, to one at φ = π + ε, ε = 5e-8 to 2.5e-6, beside the start the search finds
+/// at φ = π, the middle of the half-planes clear of the hole, which is symmetric about y = 0. The
+/// seam starts at that vertex rather than at a new one 4ε from it, and the solid has as many
+/// vertices as with ε = 0.
+#[test]
+fn a_caps_loop_vertex_off_its_circle_by_less_than_healing_moves_it_is_healed_onto_it() {
+    let hole = Hole::at(PI / 3.0, 0.0, 4.0);
+    let at = |phi: f64, out: f64, up: f64| {
+        Vec3::new((4.0 + out) * phi.cos(), (4.0 + out) * phi.sin(), -3.0 + up)
+    };
+    let both = |d: f64| [(d, 0.0), (0.0, d)];
+    for d in [2e-7, 1e-6, 1e-5, 1e-4, 1e-3] {
+        let reach = Some(d * (1.0 + 1e-9));
+        for (out, up) in both(d) {
+            for turned in [false, true] {
+                let name = format!("δ = {d:e} out {out:e} up {up:e}, turned {turned}");
+                for (phi, holes) in [(0.0, &[][..]), (PI, &[hole][..]), (0.0, &[hole][..])] {
+                    let (text, volume, area) = split_holed_ball(&[at(phi, out, up)], holes, turned);
+                    let (exact, ..) = split_holed_ball(&[at(phi, 0.0, 0.0)], holes, turned);
+                    let name = format!("{name}, φ {phi}, {} holes", holes.len());
+                    assert_eq!(
+                        reads_healed(&text, &name, volume, area, reach),
+                        reads_exactly(&exact, &name, volume, area),
+                        "{name}"
+                    );
+                }
+            }
+            let (volume, area) = (64.0 * PI / 3.0, 16.0 * 2f64.sqrt() * PI + 16.0 * PI);
+            let p = Vec3::new(4.0 + out, 0.0, up);
+            let name = format!("cone, δ = {d:e} out {out:e} up {up:e}");
+            assert_eq!(
+                reads_healed(&cone_on(p), &name, volume, area, reach),
+                reads_exactly(&cone_on(Vec3::new(4.0, 0.0, 0.0)), &name, volume, area),
+            );
+        }
+    }
+    for turned in [false, true] {
+        let halves = |e: f64| [at(0.0, 0.0, 0.0), at(PI + e, 0.0, 0.0)];
+        let (exact, volume, area) = split_holed_ball(&halves(0.0), &[hole], turned);
+        let vertices = reads_exactly(&exact, "two arcs", volume, area);
+        for e in [5e-8, 2.5e-7, 2.5e-6] {
+            let (text, ..) = split_holed_ball(&halves(e), &[hole], turned);
+            let name = format!("two arcs, ε = {e:e}, turned {turned}");
+            assert_eq!(
+                reads_exactly(&text, &name, volume, area),
+                vertices,
+                "{name}"
+            );
+        }
+    }
+    let quarters = [0.0, PI / 2.0, PI, 1.5 * PI];
+    for turned in [false, true] {
+        let off: Vec<Vec3> = quarters.iter().map(|&phi| at(phi, 1e-6, 0.0)).collect();
+        let on: Vec<Vec3> = quarters.iter().map(|&phi| at(phi, 0.0, 0.0)).collect();
+        let (text, volume, area) = split_holed_ball(&off, &[hole], turned);
+        let (exact, ..) = split_holed_ball(&on, &[hole], turned);
+        let name = format!("four arcs, turned {turned}");
+        assert_eq!(
+            reads_healed(&text, &name, volume, area, Some(1e-6 * (1.0 + 1e-9))),
+            reads_exactly(&exact, &name, volume, area),
+            "{name}"
+        );
     }
 }
 

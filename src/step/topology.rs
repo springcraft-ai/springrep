@@ -1933,10 +1933,12 @@ const NO_SEAM: &str =
 /// the sphere or a generator of the cone, lies in a half-plane bounded by the axis, and it starts
 /// where that half-plane first meets a loop of the face going out from the pole, a point of loop
 /// `k` ([`first_met`]), so it meets no loop of the face, holes included, anywhere else. Of such
-/// half-planes, the first that serves: the one through the loop's first vertex, where that vertex
-/// is the point it first meets; the one through the loop's point nearest the pole; else, of 64
-/// evenly spaced about the axis, the middle one of the longest run that serve. `None` where none
-/// serves.
+/// half-planes, the first that serves: the one through the loop's first vertex, where the point it
+/// first meets is that vertex, an end of an edge at it, as the vertex's curves have it; the one
+/// through the loop's point nearest the pole; else, of 64 evenly spaced about the axis, the middle
+/// one of the longest run that serve. `None` where none serves. The vertex is told by the edge it
+/// ends, not by its distance from the point: a file's vertex may lie off its curves by as much as
+/// healing moves it ([`heal::MAX_HEAL`]), and the seam then starts at it as on a vertex on them.
 fn seam_point(
     raw: &Raw,
     frame: &Frame,
@@ -1948,8 +1950,7 @@ fn seam_point(
     let angle = about(frame);
     let p = raw.points[first];
     let met = |at: f64| first_met(raw, frame, pole, bounds, k, at);
-    let at_first =
-        met(angle(p)).filter(|&(e, t)| raw.edges[e].curve.eval(t).dist(p) <= tol::LINEAR);
+    let at_first = met(angle(p)).filter(|&(e, t)| ends_at(raw, e, t, first));
     let found = at_first.or_else(|| {
         // The loop's point nearest the pole, over each edge's whole range.
         let mut nearest: Option<(f64, Point3)> = None;
@@ -2044,11 +2045,31 @@ fn first_met(
     (other > d + tol::LINEAR).then_some((e, t))
 }
 
-/// The vertex a use of `uses` starts at within the tolerance of `q`, if any.
+/// Whether the point of edge `e` at `t` is the edge's end at vertex `v`, as its curve has it: the
+/// curve's point at that end of its range, within the tolerance.
+fn ends_at(raw: &Raw, e: usize, t: f64, v: usize) -> bool {
+    let edge = &raw.edges[e];
+    let (ps, pe) = (raw.points[edge.start], raw.points[edge.end]);
+    let Some((t0, t1)) = edge_range(&edge.curve, ps, pe, edge.start == edge.end) else {
+        return false;
+    };
+    let q = edge.curve.eval(t);
+    [(edge.start, t0), (edge.end, t1)]
+        .iter()
+        .any(|&(w, at)| w == v && edge.curve.eval(at).dist(q) <= tol::LINEAR)
+}
+
+/// The vertex a use of `uses` starts at nearest `q`, within what healing may move a vertex
+/// ([`heal::MAX_HEAL`]), if any. An edge is not split there: one piece would be no longer than the
+/// distance healing closes, as short as nothing where the vertex lies off its curve by a hair, and
+/// healing moves the vertex onto the curve anyway.
 fn vertex_at(raw: &Raw, uses: &[Use], q: Point3) -> Option<usize> {
     uses.iter()
         .map(|u| use_start(raw, u))
-        .find(|&v| raw.points[v].dist(q) <= tol::LINEAR)
+        .map(|v| (raw.points[v].dist(q), v))
+        .filter(|&(d, _)| d <= heal::MAX_HEAL)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, v)| v)
 }
 
 /// Turns loop `uses` to start at its vertex `v`.
