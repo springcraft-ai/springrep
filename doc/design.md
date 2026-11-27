@@ -2220,9 +2220,10 @@ solid never pinches.
      faces as near it as they meet, and an edge along touching faces is the curve midway between
      them. Each carries 1.5 times its widest gap, within the stated uncertainty, `MAX_HEAL` and a
      quarter of its shortest edge; the surfaces stay as the file has them. A hold is kept only where
-     the vertex and its edges' ends stay within those bounds of the file's vertex, since an edge at
-     it whose faces cross ends on the far sheet; a heal that held something and still moves the
-     geometry further is set aside, and healing runs again holding nothing. Faces whose normals
+     the vertex, its edges' ends and the curves it gave them stay within those bounds of where the
+     file has them, since an edge at it whose faces cross ends on the far sheet; a hold that fails
+     is left as the file has it, and a heal, exact or loose, that held something and still moves
+     the geometry further is set aside and runs again holding nothing. Faces whose normals
      agree within that sine but that cross near the edge, at a shallow angle, are refitted first
      and held only where that fails. A file that states no uncertainty holds nothing.
   2. Where faces miss each other, so that step fails (three surfaces with no common point at a

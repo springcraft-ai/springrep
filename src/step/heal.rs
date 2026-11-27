@@ -676,6 +676,8 @@ fn attempt(
         })
     };
 
+    // Each edge's curve before it was refitted or held, for a hold that fails to leave as it was.
+    let curves: Vec<Curve> = raw.edges.iter().map(|e| e.curve.clone()).collect();
     let mut out = Vec::with_capacity(raw.edges.len());
     let mut held_edges: HashMap<usize, f64> = HashMap::new();
     let reach = hold.unwrap_or(tol::LINEAR);
@@ -765,9 +767,12 @@ fn attempt(
     }
     // A held vertex's tolerance is the widest gap between it and its edges' ends, widened as
     // [`tolerate`] widens a gap, and no more than the file's stated uncertainty or a quarter of an
-    // edge it holds. Only a file that states one holds any.
+    // edge it holds. Only a file that states one holds any. A vertex whose hold fails is left
+    // where the file has it, and its edges as they were, so that a heal that goes on past
+    // failures ([`heal_loosely`]) keeps no hold that failed.
     let cap = hold.unwrap_or(tol::LINEAR);
     raw.held.clear();
+    let mut failed_holds = Vec::new();
     for (v, edges) in at_vertex.iter().enumerate() {
         let widest = edges
             .iter()
@@ -778,8 +783,9 @@ fn attempt(
         }
         let x = raw.points[v];
         let mut far: f64 = 0.0;
-        // How far holding the vertex moves it and its edges' ends from the file's vertex, which
-        // is what the solid's movement reports.
+        // How far holding the vertex moves it from the file's vertex, and its edges from where the
+        // file has them, measured as the solid's movement measures them ([`movement`]): an edge's
+        // ends, and the points along a curve it was given, from the file's curve.
         let mut moves = x.dist(before[v]);
         let mut shortest = f64::INFINITY;
         for &e in edges {
@@ -794,33 +800,47 @@ fn attempt(
                     moves = moves.max(edge.curve.eval(t).dist(before[v]));
                 }
             }
+            if held[v] && edge.curve != curves[e] {
+                for p in inner_samples(raw, e, 7) {
+                    moves = moves.max(p.dist(curves[e].eval(param_of(&curves[e], p))));
+                }
+            }
             shortest = shortest.min(edge_length(&edge.curve, r));
         }
-        let t = if far <= tol::LINEAR {
+        let own = if far <= tol::LINEAR {
             tol::LINEAR
         } else {
             GAP_MARGIN * far
-        }
-        .max(widest);
+        };
+        let t = own.max(widest);
         if held[v] && moves > cap {
             failures.push(Failure::Vertex(
                 v,
                 format!(
-                    "the faces at an end of this edge touch there, and holding it moves its edges' \
-                     ends {moves:.1e} mm from the file's vertex, more than the {cap:.1e} mm a hold \
-                     may"
+                    "the faces at an end of this edge touch there, and holding it moves it or its \
+                     edges {moves:.1e} mm from where the file has them, more than the {cap:.1e} mm \
+                     a hold may"
                 ),
             ));
+            failed_holds.push(v);
         } else if t > cap || (t > tol::LINEAR && t > MAX_SHARE * shortest) {
             failures.push(Failure::Vertex(
                 v,
-                format!(
-                    "the faces at an end of this edge touch there, and its edges end {far:.1e} mm \
-                     apart on them"
-                ),
+                held_too_wide(far, own, widest, cap, shortest),
             ));
+            failed_holds.push(v);
         } else if t > tol::LINEAR {
             raw.held.insert(v, t);
+        }
+    }
+    for v in failed_holds {
+        if held[v] {
+            raw.points[v] = before[v];
+            raw.held.remove(&v);
+        }
+        for &e in &at_vertex[v] {
+            raw.edges[e].curve = curves[e].clone();
+            held_edges.remove(&e);
         }
     }
     raw.held_edges = held_edges;
@@ -829,6 +849,31 @@ fn attempt(
         Ok(out)
     } else {
         Err(failures)
+    }
+}
+
+/// Why a vertex whose faces touch there cannot be held with the tolerance `own` its edges' ends
+/// `far` apart need, or `widest`, the widest of an edge beside it held where its faces touch,
+/// whichever is wider: it is more than `cap`, the most a hold may, or a quarter of `shortest`, the
+/// shortest edge there.
+fn held_too_wide(far: f64, own: f64, widest: f64, cap: f64, shortest: f64) -> String {
+    let t = own.max(widest);
+    let past = if t > cap {
+        format!("more than the {cap:.1e} mm a hold may")
+    } else {
+        format!("more than a quarter of its shortest edge, {shortest:.1e} mm long")
+    };
+    if widest > own {
+        format!(
+            "the faces at an end of this edge touch there, and an edge held beside it where its \
+             faces touch has a tolerance of {widest:.1e} mm, which the vertex would need too, \
+             {past}"
+        )
+    } else {
+        format!(
+            "the faces at an end of this edge touch there, and its edges end {far:.1e} mm apart \
+             on them, which needs a tolerance of {t:.1e} mm, {past}"
+        )
     }
 }
 
@@ -1297,17 +1342,26 @@ fn first_failure(file: &Raw, failures: &[Failure]) -> (u64, String) {
 /// hold what is left: where faces meet nowhere exactly, as four faces at a corner can miss each
 /// other by far less than the file's uncertainty, healing fails, but an edge elsewhere may still
 /// be further off than the file promises until it is refitted. Returns how far it moved.
+///
+/// A hold that fails is left as the file has it ([`attempt`]), and as [`heal_remembering`] does, a
+/// loose heal that held something and would then move the geometry further than a hold may, the
+/// stated uncertainty or [`MAX_HEAL`], is set aside, and the loose heal runs again holding nothing.
 pub(super) fn heal_loosely(raw: &mut Raw, memo: &mut Held) -> Option<Healed> {
     let file = raw.clone();
-    let _ = attempt(
-        raw,
-        &HashMap::new(),
-        &HashMap::new(),
-        true,
-        raw.stated,
-        memo,
-    );
-    movement(&file, raw, &BTreeSet::new())
+    let loosely = |raw: &mut Raw, hold: Option<f64>, memo: &mut Held| {
+        let _ = attempt(raw, &HashMap::new(), &HashMap::new(), true, hold, memo);
+        movement(&file, raw, &BTreeSet::new())
+    };
+    let healed = loosely(raw, raw.stated, memo);
+    match raw.stated {
+        Some(cap)
+            if raw.holds > 0 && healed.as_ref().is_some_and(|h| h.moved > cap.min(MAX_HEAL)) =>
+        {
+            *raw = file.clone();
+            loosely(raw, None, memo)
+        }
+        _ => healed,
+    }
 }
 
 /// What [`tolerate`] gives a solid it keeps as the file has it: each edge's range, each vertex's
@@ -1630,5 +1684,32 @@ mod tests {
         // Four stacks overdetermine the point.
         let f = plane(Point3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0));
         assert!(touching_centre(p0, &[&a, &b, &c, &e, &f]).is_none());
+    }
+    #[test]
+    fn a_vertex_held_too_wide_by_an_edge_beside_it_names_that_edge_s_tolerance() {
+        // Its own ends meet (far ≈ 0), and an edge held beside it carries 1.5e-3 mm: past a
+        // quarter of a 4e-3 mm edge there, the message names the held edge's tolerance.
+        let why = held_too_wide(1e-12, tol::LINEAR, 1.5e-3, 1e-2, 4e-3);
+        assert_eq!(
+            why,
+            "the faces at an end of this edge touch there, and an edge held beside it where its \
+             faces touch has a tolerance of 1.5e-3 mm, which the vertex would need too, more than \
+             a quarter of its shortest edge, 4.0e-3 mm long"
+        );
+        // Past what a hold may, it says so.
+        let why = held_too_wide(1e-12, tol::LINEAR, 1.5e-3, 1e-3, 1.0);
+        assert!(
+            why.ends_with(
+                "1.5e-3 mm, which the vertex would need too, more than the 1.0e-3 mm a hold may"
+            ),
+            "{why}"
+        );
+        // Where its own ends are further apart, they give its tolerance, as before.
+        let why = held_too_wide(2e-3, 3e-3, 1.5e-3, 1e-3, 1.0);
+        assert_eq!(
+            why,
+            "the faces at an end of this edge touch there, and its edges end 2.0e-3 mm apart on \
+             them, which needs a tolerance of 3.0e-3 mm, more than the 1.0e-3 mm a hold may"
+        );
     }
 }

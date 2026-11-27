@@ -6078,6 +6078,25 @@ fn touching_faces_a_heal_holding_them_cannot_finish_are_healed_holding_nothing()
     }
 }
 
+/// The loose heal, which a solid reaches only where healing exactly and keeping it as the file has
+/// it both fail, holds no more than the exact heal may: grown by `dr` in a file that states `dr`,
+/// a hold of the round's corners would move the arcs' ends `dr` from the file's vertices, which is
+/// not within it, so the loose heal holds nothing there, as the exact heal does not, and moves
+/// nothing past what the file states.
+#[test]
+fn touching_faces_a_hold_would_move_too_far_are_not_held_loosely_either() {
+    for dr in [1e-6, 1e-3, 0.05] {
+        super::topology::LOOSE_PROBE.set(Some(Vec::new()));
+        let imp = rounds_grown(dr, Some(dr));
+        let probe = super::topology::LOOSE_PROBE.take().unwrap();
+        assert!(imp.rejected.is_empty(), "{dr}: {:?}", imp.rejected);
+        assert_eq!(probe.len(), 1, "{dr}");
+        if let Some(h) = &probe[0] {
+            assert!(h.moved <= dr, "{dr}: {h:?}");
+        }
+    }
+}
+
 /// A wedge of angle `alpha` along the z axis, H = 2 high and L = 10 long, in a file that states
 /// `stated` as its uncertainty: the planes y = 0 and y = x tan α meet the bottom z = 0, the top
 /// z = H and the end x = L. The edge where they meet is written as the line through `(dx, dy)`

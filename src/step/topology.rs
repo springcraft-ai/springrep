@@ -2527,6 +2527,15 @@ fn shell_points(raw: &Raw, k: usize) -> Vec<Point3> {
     out
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Where set, each solid this thread reads is healed loosely ([`heal::heal_loosely`]) as well,
+    /// before it is read as usual, and how far that moved it is kept here, so tests can probe the
+    /// loose heal of a solid that would not reach it.
+    pub(super) static LOOSE_PROBE: std::cell::RefCell<Option<Vec<Option<heal::Healed>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// The checked solid of the shells of `raw`, as [`solid`] reads them, with its faces' STEP ids and
 /// names and how far healing moved it; `uncertainty` is the one its file states, and `ours`
 /// whether this kernel wrote the file.
@@ -2535,6 +2544,15 @@ fn built(raw: Raw, uncertainty: Option<f64>, ours: bool, strict: bool) -> Result
     let turned = agree_senses(&mut file)?;
     file.stated = uncertainty.filter(|&u| u > tol::LINEAR);
     let names = || file.faces.iter().map(|f| (f.id, f.name.clone())).collect();
+    #[cfg(test)]
+    LOOSE_PROBE.with_borrow_mut(|probe| {
+        if let Some(found) = probe {
+            found.push(heal::heal_loosely(
+                &mut file.clone(),
+                &mut heal::Held::default(),
+            ));
+        }
+    });
     if strict {
         if let Some(why) = heal::misfit(&file) {
             return Err(Error::InvalidInput(format!(
