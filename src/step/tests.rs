@@ -1819,120 +1819,215 @@ fn a_cap_whose_vertex_meridian_leaves_it_is_seamed_from_its_point_nearest_the_po
     }
 }
 
-/// The part of the ball of radius 5 at the origin above the plane z = −3, with the caps beyond the
-/// planes n·p = d cut away, for each `(θ, φ, d)` of `holes` with n at the angle θ from +z and φ
-/// about it: a sphere face, the disc of radius 4 at z = −3 and the disc of radius √(25 − d²) about
-/// d n for each hole. The sphere face has the circle at z = −3 for its loop round the pole at +z,
-/// one vertex on it at (`vx`, ±√(16 − vx²), −3), and the circles about d n for holes.
-fn holed_cap(vx: f64, holes: &[(f64, f64, f64)]) -> String {
-    let vy = (16.0 - vx * vx).max(0.0).sqrt();
-    let mut data = format!(
-        "#1=CARTESIAN_POINT('',(0.,0.,0.));
-#2=DIRECTION('',(0.,0.,1.));
-#3=DIRECTION('',(1.,0.,0.));
-#6=DIRECTION('',(0.,0.,-1.));
-#50=AXIS2_PLACEMENT_3D('',#1,#2,#3);
-#51=SPHERICAL_SURFACE('',#50,5.);
-#20=CARTESIAN_POINT('',(0.,0.,-3.));
-#21=AXIS2_PLACEMENT_3D('',#20,#2,#3);
-#22=CIRCLE('',#21,4.);
-#10=CARTESIAN_POINT('',({vx:?},{vy:?},-3.));
-#11=VERTEX_POINT('',#10);
-#23=EDGE_CURVE('',#11,#11,#22,.T.);
-#40=ORIENTED_EDGE('',*,*,#23,.T.);
-#41=EDGE_LOOP('',(#40));
-#42=FACE_OUTER_BOUND('',#41,.T.);
-#70=AXIS2_PLACEMENT_3D('',#20,#6,#3);
-#71=PLANE('',#70);
-#72=ORIENTED_EDGE('',*,*,#23,.F.);
-#73=EDGE_LOOP('',(#72));
-#74=FACE_OUTER_BOUND('',#73,.T.);
-#75=ADVANCED_FACE('',(#74),#71,.T.);\n"
-    );
-    let (mut bounds, mut faces) = (
-        vec!["#42".to_string()],
-        vec!["#46".to_string(), "#75".into()],
-    );
-    for (k, &(theta, phi, d)) in holes.iter().enumerate() {
-        let i = 100 + 20 * k;
+/// A file's data section written entity by entity, numbered from #1.
+#[derive(Default)]
+struct Entities(u64, String);
+
+impl Entities {
+    fn put(&mut self, entity: String) -> u64 {
+        self.0 += 1;
+        self.1 += &format!("#{}={entity};\n", self.0);
+        self.0
+    }
+
+    fn point(&mut self, p: Vec3) -> u64 {
+        self.put(format!(
+            "CARTESIAN_POINT('',({:?},{:?},{:?}))",
+            p.x, p.y, p.z
+        ))
+    }
+
+    fn direction(&mut self, d: Vec3) -> u64 {
+        self.put(format!("DIRECTION('',({:?},{:?},{:?}))", d.x, d.y, d.z))
+    }
+
+    fn placement(&mut self, o: Vec3, z: Vec3, x: Vec3) -> u64 {
+        let (o, z, x) = (self.point(o), self.direction(z), self.direction(x));
+        self.put(format!("AXIS2_PLACEMENT_3D('',#{o},#{z},#{x})"))
+    }
+
+    fn vertex(&mut self, p: Vec3) -> u64 {
+        let p = self.point(p);
+        self.put(format!("VERTEX_POINT('',#{p})"))
+    }
+
+    /// The edge from vertex `a` at `pa` to vertex `b` at `pb` along their line.
+    fn line(&mut self, (a, pa): (u64, Vec3), (b, pb): (u64, Vec3)) -> u64 {
+        let (o, d) = (self.point(pa), self.direction((pb - pa).unit_or_zero()));
+        let v = self.put(format!("VECTOR('',#{d},1.)"));
+        let l = self.put(format!("LINE('',#{o},#{v})"));
+        self.put(format!("EDGE_CURVE('',#{a},#{b},#{l},.T.)"))
+    }
+
+    /// The edge from vertex `a` to vertex `b` along the circle of `radius` on `placement`.
+    fn arc(&mut self, a: u64, b: u64, placement: u64, radius: f64) -> u64 {
+        let c = self.put(format!("CIRCLE('',#{placement},{radius:?})"));
+        self.put(format!("EDGE_CURVE('',#{a},#{b},#{c},.T.)"))
+    }
+
+    /// A face on `surface` with `bounds`, each its edges and whether each is used along itself,
+    /// and whether the file says it is used as listed. The first bound is the outer one.
+    fn face(&mut self, surface: u64, bounds: &[(&[(u64, bool)], bool)]) -> u64 {
+        let flag = |b: bool| if b { ".T." } else { ".F." };
+        let mut ids = Vec::new();
+        for (i, &(edges, sense)) in bounds.iter().enumerate() {
+            let used: Vec<String> = edges
+                .iter()
+                .map(|&(e, along)| {
+                    let id = self.put(format!("ORIENTED_EDGE('',*,*,#{e},{})", flag(along)));
+                    format!("#{id}")
+                })
+                .collect();
+            let l = self.put(format!("EDGE_LOOP('',({}))", used.join(",")));
+            let kind = if i == 0 {
+                "FACE_OUTER_BOUND"
+            } else {
+                "FACE_BOUND"
+            };
+            ids.push(format!(
+                "#{}",
+                self.put(format!("{kind}('',#{l},{})", flag(sense)))
+            ));
+        }
+        self.put(format!(
+            "ADVANCED_FACE('',({}),#{surface},.T.)",
+            ids.join(",")
+        ))
+    }
+
+    /// The file of one solid closed by `faces`.
+    fn solid(mut self, faces: &[u64]) -> String {
+        let faces: Vec<String> = faces.iter().map(|f| format!("#{f}")).collect();
+        let shell = self.put(format!("CLOSED_SHELL('',({}))", faces.join(",")));
+        self.put(format!("MANIFOLD_SOLID_BREP('',#{shell})"));
+        step_file(&self.1)
+    }
+}
+
+/// A hole of the ball of radius 5 at the origin: the cap beyond the plane n·p = d cut away, n at
+/// the angle θ from +z and φ about it. Its circle's one vertex lies the way `toward` points from
+/// the circle's centre, square to n.
+#[derive(Clone, Copy)]
+struct Hole {
+    n: Vec3,
+    d: f64,
+    toward: Vec3,
+}
+
+impl Hole {
+    /// The hole at `(θ, φ)` cut at `d`, with its vertex on the circle's parallel of latitude
+    /// about n's, the way φ grows.
+    fn at(theta: f64, phi: f64, d: f64) -> Hole {
         let n = Vec3::new(
             theta.sin() * phi.cos(),
             theta.sin() * phi.sin(),
             theta.cos(),
         );
-        let u = Vec3::new(-phi.sin(), phi.cos(), 0.0);
-        let (c, r) = (n * d, (25.0 - d * d).sqrt());
-        let q = c + u * r;
-        data.push_str(&format!(
-            "#{i}=CARTESIAN_POINT('',({:?},{:?},{:?}));
-#{}=DIRECTION('',({:?},{:?},{:?}));
-#{}=DIRECTION('',({:?},{:?},0.));
-#{}=AXIS2_PLACEMENT_3D('',#{i},#{},#{});
-#{}=CIRCLE('',#{},{r:?});
-#{}=CARTESIAN_POINT('',({:?},{:?},{:?}));
-#{}=VERTEX_POINT('',#{});
-#{}=EDGE_CURVE('',#{},#{},#{},.T.);
-#{}=ORIENTED_EDGE('',*,*,#{},.F.);
-#{}=EDGE_LOOP('',(#{}));
-#{}=FACE_BOUND('',#{},.T.);
-#{}=PLANE('',#{});
-#{}=ORIENTED_EDGE('',*,*,#{},.T.);
-#{}=EDGE_LOOP('',(#{}));
-#{}=FACE_OUTER_BOUND('',#{},.T.);
-#{}=ADVANCED_FACE('',(#{}),#{},.T.);\n",
-            c.x,
-            c.y,
-            c.z,
-            i + 1,
-            n.x,
-            n.y,
-            n.z,
-            i + 2,
-            u.x,
-            u.y,
-            i + 3,
-            i + 1,
-            i + 2,
-            i + 4,
-            i + 3,
-            i + 5,
-            q.x,
-            q.y,
-            q.z,
-            i + 6,
-            i + 5,
-            i + 7,
-            i + 6,
-            i + 6,
-            i + 4,
-            i + 8,
-            i + 7,
-            i + 9,
-            i + 8,
-            i + 10,
-            i + 9,
-            i + 11,
-            i + 3,
-            i + 12,
-            i + 7,
-            i + 13,
-            i + 12,
-            i + 14,
-            i + 13,
-            i + 15,
-            i + 14,
-            i + 11,
-        ));
-        bounds.push(format!("#{}", i + 10));
-        faces.push(format!("#{}", i + 15));
+        let toward = Vec3::new(-phi.sin(), phi.cos(), 0.0);
+        Hole { n, d, toward }
     }
-    data.push_str(&format!(
-        "#46=ADVANCED_FACE('',({}),#51,.T.);\n#90=CLOSED_SHELL('',({}));\n\
-         #91=MANIFOLD_SOLID_BREP('',#90);",
-        bounds.join(","),
-        faces.join(",")
-    ));
-    step_file(&data)
+
+    /// The volume and the area of the sphere the hole takes from the ball, a cap of height
+    /// h = 5 − d: πh²(15 − h)/3 and 10πh (Archimedes, *On the Sphere and Cylinder*), and the area
+    /// of its disc, π(25 − d²).
+    fn measures(&self) -> (f64, f64, f64) {
+        let h = 5.0 - self.d;
+        (
+            PI * h * h * (15.0 - h) / 3.0,
+            10.0 * PI * h,
+            PI * (25.0 - self.d * self.d),
+        )
+    }
+}
+
+/// The part of the ball of radius 5 at the origin above the plane z = −3, with `holes` cut away:
+/// a sphere face, the disc of radius 4 at z = −3 and a disc for each hole. The sphere face has the
+/// circle at z = −3 for its loop round the pole at +z, one vertex on it at (`vx`, √(16 − vx²), −3),
+/// and the holes' circles for its other loops; a hole's vertex where the circle's is is that
+/// vertex. With `turned`, the file flags the loop round the pole as used against the way it lists
+/// it, `.F.`, and lists it the other way. Returns the file and the solid's volume and area, the
+/// ball's 448π/3 above z = −3 (a cap of height 2 below it holds 52π/3) and 80π + 16π, less what
+/// the holes take, where no two holes meet.
+fn holed_ball(vx: f64, holes: &[Hole], turned: bool) -> (String, f64, f64) {
+    let mut s = Entities::default();
+    let at = s.placement(Vec3::ZERO, Vec3::Z, Vec3::X);
+    let sphere = s.put(format!("SPHERICAL_SURFACE('',#{at},5.)"));
+    let p = Vec3::new(vx, (16.0 - vx * vx).max(0.0).sqrt(), -3.0);
+    let v = s.vertex(p);
+    let base = Vec3::new(0.0, 0.0, -3.0);
+    let at = s.placement(base, Vec3::Z, Vec3::X);
+    let circle = s.arc(v, v, at, 4.0);
+    let (mut volume, mut area) = (448.0 * PI / 3.0, 96.0 * PI);
+    let (mut sphere_bounds, mut discs) = (vec![vec![(circle, !turned)]], Vec::new());
+    for hole in holes {
+        let (c, r) = (hole.n * hole.d, (25.0 - hole.d * hole.d).sqrt());
+        let x = (hole.toward - hole.n * hole.toward.dot(hole.n)).unit_or_zero();
+        let q = c + x * r;
+        let w = if q.dist(p) <= 1e-12 { v } else { s.vertex(q) };
+        let at = s.placement(c, hole.n, x);
+        let e = s.arc(w, w, at, r);
+        sphere_bounds.push(vec![(e, false)]);
+        let plane = s.put(format!("PLANE('',#{at})"));
+        discs.push(s.face(plane, &[(&[(e, true)], true)]));
+        let (cap, zone, disc) = hole.measures();
+        volume -= cap;
+        area += disc - zone;
+    }
+    let bounds: Vec<(&[(u64, bool)], bool)> = sphere_bounds
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.as_slice(), i != 0 || !turned))
+        .collect();
+    let mut faces = vec![s.face(sphere, &bounds)];
+    let at = s.placement(base, -Vec3::Z, Vec3::X);
+    let plane = s.put(format!("PLANE('',#{at})"));
+    faces.push(s.face(plane, &[(&[(circle, false)], true)]));
+    faces.extend(discs);
+    (s.solid(&faces), volume, area)
+}
+
+/// [`holed_ball`] with the holes at `(θ, φ, d)`, as written.
+fn holed_cap(vx: f64, holes: &[(f64, f64, f64)]) -> String {
+    let holes: Vec<Hole> = holes.iter().map(|&(t, p, d)| Hole::at(t, p, d)).collect();
+    holed_ball(vx, &holes, false).0
+}
+
+/// `text` reads as one solid with nothing rejected, healed or kept with tolerances, checks clean,
+/// has `volume` and `area` to 1e-9 relative, meshes watertight with the mesh volume within
+/// area × deflection, and writes and reads back. Returns how many vertices it has.
+fn reads_exactly(text: &str, name: &str, volume: f64, area: f64) -> usize {
+    let imp = read(text.as_bytes(), "part").unwrap();
+    assert!(imp.rejected.is_empty(), "{name}: {:?}", imp.rejected);
+    assert!(
+        imp.healed.is_empty() && imp.tolerant.is_empty(),
+        "{name}: {:?} {:?}",
+        imp.healed,
+        imp.tolerant
+    );
+    let b = &imp.brep;
+    assert!(check::check(b).is_empty(), "{name}: {:?}", check::check(b));
+    let (got_area, got) = measure::area_and_volume(b);
+    assert!(
+        (got - volume).abs() <= 1e-9 * volume,
+        "{name}: {got} vs {volume}"
+    );
+    assert!(
+        (got_area - area).abs() <= 1e-9 * area,
+        "{name}: {got_area} vs {area}"
+    );
+    let opt = crate::mesh::MeshOptions::within(0.01);
+    let m = crate::mesh::tessellate(b, &opt).unwrap();
+    let solid = b.solid_ids().next().unwrap();
+    let rep = crate::mesh::report(b, &m, solid);
+    assert!(rep.watertight(), "{name}: {rep:?}");
+    assert_eq!(rep.degenerate_triangles, 0, "{name}");
+    assert!(
+        (rep.volume.abs() - volume).abs() <= area * opt.linear,
+        "{name}: {}",
+        rep.volume
+    );
+    round_trip(b);
+    b.vertex_ids().count()
 }
 
 /// A cap's seam to its pole clears the cap's holes as well as its loop round the pole. The ball
@@ -2003,6 +2098,215 @@ fn a_cap_whose_holes_shade_its_loop_from_the_pole_all_round_is_refused() {
         "{:?}",
         imp.rejected
     );
+}
+
+/// A cap whose loop round the pole the file flags as used against the way it lists it is read
+/// first as the cap over the other pole, and turned to agree with the discs across its edges; its
+/// seam then runs to the new pole, and starts where a seam the read places there would, clear of
+/// its holes. The cut ball of `a_caps_seam_to_its_pole_clears_its_holes`, so the same 434π/3 and
+/// 95π: from (4, 0, −3) the meridian to the new pole runs through the hole, and the seam starts at
+/// a new point of the circle; from (−4, 0, −3) it starts at the file's vertex.
+#[test]
+fn a_turned_caps_seam_to_its_new_pole_clears_its_holes() {
+    let (want, area) = (434.0 * PI / 3.0, 95.0 * PI);
+    let hole = [Hole::at(PI / 3.0, 0.0, 4.0)];
+    for (sx, vertices) in [(1.0, 4), (-1.0, 3)] {
+        let (text, volume, got_area) = holed_ball(4.0 * sx, &hole, true);
+        assert!((volume - want).abs() <= 1e-12 * want && (got_area - area).abs() <= 1e-12 * area);
+        assert_eq!(reads_exactly(&text, &format!("{sx}"), want, area), vertices);
+    }
+}
+
+/// A seam clears holes that only touch the meridian from the loop's vertex, or reach over it by a
+/// hair, and holes that touch the loop round the pole. Each solid's volume and area are the
+/// ball's above z = −3, 448π/3 and 96π, less each hole's cap, πh²(15 − h)/3, and zone, 10πh, plus
+/// its disc, π(25 − d²), h = 5 − d ([`Hole::measures`]).
+///
+/// - A hole of angular radius β = 30° about the direction at θ = 60° from the pole, φ =
+///   ∓asin(sin β/sin θ) about it, touches the meridian φ = 0 through the vertex (4, 0, −3) at the
+///   angle acos(cos θ/cos β) from the pole (the right spherical triangle of the pole, the centre
+///   and the point of tangency), where its vertex is; at φ = asin(sin β/sin θ) − 1e-6 it reaches
+///   over that meridian.
+/// - The hole beyond the plane x = 4, of radius 3, touches the circle at z = −3 at the vertex (4,
+///   0, −3), its own vertex: 434π/3 and 95π.
+#[test]
+fn a_caps_seam_clears_holes_that_graze_its_vertex_meridian_or_touch_its_loop() {
+    let (theta, beta) = (PI / 3.0, PI / 6.0);
+    let side = (beta.sin() / theta.sin()).asin();
+    let touches = 5.0
+        * Vec3::new(
+            (theta.cos() / beta.cos()).acos().sin(),
+            0.0,
+            theta.cos() / beta.cos(),
+        );
+    let d = 5.0 * beta.cos();
+    let grazing = |phi: f64, toward: Option<Vec3>| {
+        let hole = Hole::at(theta, phi, d);
+        let toward = toward.map_or(hole.toward, |t| t - hole.n * d);
+        Hole { toward, ..hole }
+    };
+    let cases = [
+        ("touching from +y", grazing(side, Some(touches))),
+        ("touching from −y", grazing(-side, Some(touches))),
+        (
+            "reaching over",
+            grazing(side - 1e-6, Some(Vec3::new(0.0, 0.0, 5.0))),
+        ),
+        (
+            "touching the loop",
+            Hole {
+                toward: -Vec3::Z,
+                ..Hole::at(PI / 2.0, 0.0, 4.0)
+            },
+        ),
+    ];
+    for (name, hole) in cases {
+        let (text, volume, area) = holed_ball(4.0, &[hole], false);
+        reads_exactly(&text, name, volume, area);
+    }
+    let (_, volume, area) = holed_ball(4.0, &[cases[3].1], false);
+    assert!(
+        (volume - 434.0 * PI / 3.0).abs() <= 1e-12 * volume
+            && (area - 95.0 * PI).abs() <= 1e-12 * area
+    );
+}
+
+/// Where holes leave the seam one gap a little wider than the spacing of the 64 half-planes, the
+/// read finds it. Four holes of angular radius 20° at 35° from the pole, a quarter turn apart,
+/// shade 2α of the turn each, α = asin(sin 20°/sin 35°) = 36.6°; three of angular radius 20° at
+/// 80°, between them, cover three of the gaps they leave, and a fourth at 80° covers the last from
+/// α + 8° to 90° − α + 1°, leaving 8° clear: at 80° from the pole a hole of angular radius β
+/// shades 2 asin(sin β/sin 80°) of the turn, so its β is asin(sin 80° sin w) for the half-width w.
+#[test]
+fn a_caps_seam_passes_between_holes_through_a_gap_wider_than_its_search_steps() {
+    let deg = PI / 180.0;
+    let d = |beta: f64| 5.0 * beta.cos();
+    let alpha = ((20.0 * deg).sin() / (35.0 * deg).sin()).asin();
+    let mut holes: Vec<Hole> = (0..4)
+        .map(|k| Hole::at(35.0 * deg, k as f64 * PI / 2.0, d(20.0 * deg)))
+        .collect();
+    holes.extend(
+        (1..4).map(|k| Hole::at(80.0 * deg, PI / 4.0 + k as f64 * PI / 2.0, d(20.0 * deg))),
+    );
+    let (lo, hi) = (alpha + 8.0 * deg, PI / 2.0 - alpha + deg);
+    let beta = ((80.0 * deg).sin() * (0.5 * (hi - lo)).sin()).asin();
+    holes.push(Hole::at(80.0 * deg, 0.5 * (lo + hi), d(beta)));
+    let (text, volume, area) = holed_ball(4.0, &holes, false);
+    reads_exactly(&text, "gap", volume, area);
+}
+
+/// The cone of half-angle 45° on the disc of radius 4 at z = 0, apex (0, 0, 4), with a window cut
+/// into its side over the quarter turn 0 ≤ φ ≤ π/2 between z = 1 and z = 2, down to the cylinder
+/// of radius 1: the cone face has the base circle for its loop round the apex, with one vertex at
+/// φ = `phi`, and the window's outline for a hole, two arcs and two generators of the cone. The
+/// generator in y = 0 lies in the half-plane through the vertex at φ = 0, and the one through φ =
+/// π/4 runs through the window.
+fn windowed_cone(phi: f64) -> String {
+    let mut s = Entities::default();
+    let at = s.placement(Vec3::ZERO, -Vec3::Z, Vec3::X);
+    let cone = s.put(format!("CONICAL_SURFACE('',#{at},4.,{:?})", PI / 4.0));
+    let v = s.vertex(Vec3::new(4.0 * phi.cos(), 4.0 * phi.sin(), 0.0));
+    let at = s.placement(Vec3::ZERO, Vec3::Z, Vec3::new(phi.cos(), phi.sin(), 0.0));
+    let base = s.arc(v, v, at, 4.0);
+    // The window's corners on the cone, a to d, and on the cylinder below them, e to h.
+    let corners = [
+        Vec3::new(3.0, 0.0, 1.0),
+        Vec3::new(2.0, 0.0, 2.0),
+        Vec3::new(0.0, 2.0, 2.0),
+        Vec3::new(0.0, 3.0, 1.0),
+        Vec3::new(1.0, 0.0, 1.0),
+        Vec3::new(1.0, 0.0, 2.0),
+        Vec3::new(0.0, 1.0, 2.0),
+        Vec3::new(0.0, 1.0, 1.0),
+    ];
+    let [a, b, c, d, e, f, g, h] = corners.map(|p| (s.vertex(p), p));
+    let level = |s: &mut Entities, z: f64| s.placement(Vec3::new(0.0, 0.0, z), Vec3::Z, Vec3::X);
+    let ab = s.line(a, b);
+    let dc = s.line(d, c);
+    let at = level(&mut s, 2.0);
+    let bc = s.arc(b.0, c.0, at, 2.0);
+    let fg = s.arc(f.0, g.0, at, 1.0);
+    let at = level(&mut s, 1.0);
+    let ad = s.arc(a.0, d.0, at, 3.0);
+    let eh = s.arc(e.0, h.0, at, 1.0);
+    let (bf, gc, hd, ea, ef, hg) = (
+        s.line(b, f),
+        s.line(g, c),
+        s.line(h, d),
+        s.line(e, a),
+        s.line(e, f),
+        s.line(h, g),
+    );
+    let mut faces = vec![s.face(
+        cone,
+        &[
+            (&[(base, true)], true),
+            (&[(ab, true), (bc, true), (dc, false), (ad, false)], true),
+        ],
+    )];
+    let mut plane = |s: &mut Entities, o: Vec3, z: Vec3, x: Vec3, edges: &[(u64, bool)]| {
+        let at = s.placement(o, z, x);
+        let p = s.put(format!("PLANE('',#{at})"));
+        faces.push(s.face(p, &[(edges, true)]));
+    };
+    plane(&mut s, Vec3::ZERO, -Vec3::Z, Vec3::X, &[(base, false)]);
+    let (up, low) = (Vec3::new(0.0, 0.0, 2.0), Vec3::new(0.0, 0.0, 1.0));
+    plane(
+        &mut s,
+        up,
+        -Vec3::Z,
+        Vec3::X,
+        &[(bc, false), (bf, true), (fg, true), (gc, true)],
+    );
+    plane(
+        &mut s,
+        low,
+        Vec3::Z,
+        Vec3::X,
+        &[(ad, true), (hd, false), (eh, false), (ea, true)],
+    );
+    plane(
+        &mut s,
+        Vec3::ZERO,
+        Vec3::Y,
+        Vec3::X,
+        &[(ef, true), (bf, false), (ab, false), (ea, false)],
+    );
+    plane(
+        &mut s,
+        Vec3::ZERO,
+        Vec3::X,
+        Vec3::Y,
+        &[(dc, true), (gc, false), (hg, false), (hd, true)],
+    );
+    let at = s.placement(Vec3::ZERO, Vec3::Z, Vec3::X);
+    let cylinder = s.put(format!("CYLINDRICAL_SURFACE('',#{at},1.)"));
+    faces.push(s.face(
+        cylinder,
+        &[(&[(eh, true), (hg, true), (fg, false), (ef, false)], true)],
+    ));
+    s.solid(&faces)
+}
+
+/// A cone's seam to its apex clears a hole in its side, from a vertex whose generator runs through
+/// the hole or along its side. The cone holds 64π/3 (πr²h/3, r = h = 4); the window takes a
+/// quarter of the frustum between z = 1 and z = 2 less the cylinder within it, (π/4)(∫₁² (4 −
+/// z)² dz − 1) = (π/4)(19/3 − 1) = 4π/3, leaving 20π. The area: the cone's side, πr·√2r = 16√2π,
+/// less a quarter of the frustum's, π(3 + 2)√2/4, the base 16π, the window's floor and ceiling
+/// (π/4)(9 − 1) and (π/4)(4 − 1), its back, a quarter of the cylinder's 2π, and its two sides,
+/// trapezia of area 3/2.
+#[test]
+fn a_cones_seam_to_its_apex_clears_a_window_in_its_side() {
+    let volume = 20.0 * PI;
+    let area = 16.0 * 2f64.sqrt() * PI - 5.0 * 2f64.sqrt() * PI / 4.0
+        + 16.0 * PI
+        + 2.0 * PI
+        + 0.75 * PI
+        + 0.5 * PI
+        + 3.0;
+    for phi in [0.0, PI / 4.0, PI] {
+        reads_exactly(&windowed_cone(phi), &format!("{phi}"), volume, area);
+    }
 }
 
 /// The text of `b` with its first cylinder written as an offset by `d` of a cylinder `d`
