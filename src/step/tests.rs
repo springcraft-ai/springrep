@@ -6046,6 +6046,38 @@ fn touching_faces_a_hold_would_move_further_than_it_may_are_closed_by_moving_a_s
     }
 }
 
+/// Where healing that held some of the round's lines or corners then fails, as when the surface
+/// step it leaves would move the round more than [`MAX_HEAL`](super::MAX_HEAL), that heal is set
+/// aside and healing runs again holding nothing: the round grown 0.05 or −0.05 mm in a file that
+/// states 0.1 mm, 0.05 mm in one that states 0.05 mm, and −1e-3 mm in one that states 1e-3 mm
+/// heal as the same file stating no uncertainty does, the surface step moving the round, at most
+/// |dr|, and the solid exact with nothing kept with tolerances.
+#[test]
+fn touching_faces_a_heal_holding_them_cannot_finish_are_healed_holding_nothing() {
+    let b = rounded_block();
+    let (v0, a) = (measure::volume(&b), measure::area(&b));
+    for (dr, stated) in [(0.05, 0.1), (-0.05, 0.1), (0.05, 0.05), (-1e-3, 1e-3)] {
+        let imp = rounds_grown(dr, Some(stated));
+        let none = rounds_grown(dr, None);
+        assert!(imp.rejected.is_empty(), "{dr}: {:?}", imp.rejected);
+        assert!(check::check(&imp.brep).is_empty(), "{dr}");
+        assert!(imp.tolerant.is_empty(), "{dr}: {:?}", imp.tolerant);
+        let h = &imp.healed[0];
+        assert!(
+            h.surfaces > 0.0 && h.moved <= dr.abs() && h.moved <= super::MAX_HEAL,
+            "{dr}: {h:?}"
+        );
+        assert_eq!(
+            (h.moved, h.surfaces),
+            (none.healed[0].moved, none.healed[0].surfaces),
+            "{dr}"
+        );
+        let v = measure::volume(&imp.brep);
+        assert_eq!(v, measure::volume(&none.brep), "{dr}");
+        assert!((v - v0).abs() <= a * dr.abs(), "{dr}: {v} vs {v0}");
+    }
+}
+
 /// A wedge of angle `alpha` along the z axis, H = 2 high and L = 10 long, in a file that states
 /// `stated` as its uncertainty: the planes y = 0 and y = x tan α meet the bottom z = 0, the top
 /// z = H and the end x = L. The edge where they meet is written as the line through `(dx, dy)`

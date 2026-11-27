@@ -1162,10 +1162,10 @@ pub(super) fn heal(raw: &mut Raw) -> Result<Ranges> {
 }
 
 /// [`heal`], keeping in `memo` what it found where faces touch along an edge. In a file that
-/// states an uncertainty, faces that touch are held within it ([`attempt`]); where healing so
-/// would move the geometry further than a hold may, the stated uncertainty or [`MAX_HEAL`], it is
-/// set aside and healing runs again holding nothing, moving surfaces where faces touch as for a
-/// file that states none.
+/// states an uncertainty, faces that touch are held within it ([`attempt`]); where a heal that
+/// held something would move the geometry further than a hold may, the stated uncertainty or
+/// [`MAX_HEAL`], or fails, it is set aside and healing runs again holding nothing, moving surfaces
+/// where faces touch as for a file that states none.
 pub(super) fn heal_remembering(raw: &mut Raw, memo: &mut Held) -> Result<Ranges> {
     match heal_holding(raw, raw.stated, memo)? {
         Some(healed) => Ok(healed),
@@ -1174,8 +1174,8 @@ pub(super) fn heal_remembering(raw: &mut Raw, memo: &mut Held) -> Result<Ranges>
     }
 }
 
-/// [`heal`], holding faces that touch within `hold`; `None` where it held some and would move the
-/// geometry further than `hold` or [`MAX_HEAL`].
+/// [`heal`], holding faces that touch within `hold`; `None` where it held some and then would
+/// move the geometry further than `hold` or [`MAX_HEAL`], or failed.
 fn heal_holding(raw: &mut Raw, hold: Option<f64>, memo: &mut Held) -> Result<Option<Ranges>> {
     let ranges: Vec<Option<(f64, f64)>> = (0..raw.edges.len()).map(|e| range_of(raw, e)).collect();
     if (0..raw.edges.len()).all(|e| edge_fits(raw, e, ranges[e])) {
@@ -1203,13 +1203,19 @@ fn heal_holding(raw: &mut Raw, hold: Option<f64>, memo: &mut Held) -> Result<Opt
     // Faces that touch are held within the file's stated uncertainty rather than moved: moving
     // their surfaces cannot make nearly parallel sheets meet without moving them by their gap. A
     // file that states none is healed as before.
+    // Whether any attempt held something: its failure, or a heal past what a hold may move, is
+    // then set aside for a heal that holds nothing, which is healing as for a file that states no
+    // uncertainty.
+    let mut held = false;
     for round in 0..=ADJUST_ROUNDS {
         let mut work = with_surfaces(&surfaces);
-        let failures = match attempt(&mut work, &start, &samples, false, hold, memo) {
+        let tried = attempt(&mut work, &start, &samples, false, hold, memo);
+        held |= hold.is_some() && work.holds > 0;
+        let failures = match tried {
             Ok(ranges) => {
                 let healed = movement(&file, &work, &chosen);
                 if let Some(cap) = hold
-                    && work.holds > 0
+                    && held
                     && healed.as_ref().is_some_and(|h| h.moved > cap.min(MAX_HEAL))
                 {
                     return Ok(None);
@@ -1249,6 +1255,9 @@ fn heal_holding(raw: &mut Raw, hold: Option<f64>, memo: &mut Held) -> Result<Opt
         failed_before = failures.len();
         let stuck = round > 0 && chosen.len() == before && !settled;
         if round == ADJUST_ROUNDS || stuck || worse {
+            if held {
+                return Ok(None);
+            }
             let (id, why) = first_failure(&file, &failures);
             return fail(id, &why);
         }
