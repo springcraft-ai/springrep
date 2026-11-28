@@ -11,7 +11,8 @@ use crate::{
     boolean,
     error::{Error, Result},
     geom::{Curve, Surface},
-    math::{Frame, Point3, Vec2, Vec3},
+    math::{Aabb, Frame, Point3, Vec2, Vec3},
+    measure,
     pick::{concave_edges, convex_edges},
     profile::{NamedSegment, Profile, ProfileLoop, Segment},
     sweep::revolve,
@@ -241,8 +242,9 @@ fn hollowed(s: &Brep, open: &[FaceId], t: f64, feature: &str) -> Result<Brep> {
 
 /// The points within `distance` of `s`: every face moved out that far, a hole that closes on the
 /// way followed there, each convex edge rounded at `distance` (which leaves a ball's patch at each
-/// convex corner), and over each end of a hole that closed, the dimple its rim leaves. Where that
-/// cannot be built (a face beside a convex edge closes on the way, as the walls of a narrow slot,
+/// convex corner), over each open end of a hole that closed, the dimple its rim leaves (floored
+/// where another face, as a recess's floor, is near), and about the open arc of a round that
+/// closed, the points near the arc and over the face beside it. Where that cannot be built (a face beside a convex edge closes on the way, as the walls of a narrow slot,
 /// or a cone's apex is convex), the union of `s` with a slab for each face, a tube about each
 /// convex edge and a ball about each corner; an error where a piece of that is not built.
 ///
@@ -313,9 +315,10 @@ fn moved_and_rounded(s: &Brep, distance: f64, feature: &str) -> Result<Brep> {
         .into_iter()
         .filter(|&f| hole_radius(s, f, distance).is_none())
         .collect();
+    let convex = convex_edges(s)?;
     closed_beside(
         s,
-        &convex_edges(s)?,
+        &convex,
         &closed,
         "an offset whose faces close past a convex edge",
     )?;
@@ -325,14 +328,27 @@ fn moved_and_rounded(s: &Brep, distance: f64, feature: &str) -> Result<Brep> {
     } else {
         blend::fillet_edges_mitred(&moved, &edges, distance, feature)?
     };
-    for f in s.face_ids() {
+    let walls: Vec<FaceId> = s
+        .face_ids()
+        .filter(|&f| hole_radius(s, f, distance).is_some())
+        .collect();
+    // The tubes about the arcs of rounds that closed, and the faces beside those arcs.
+    let mut kept = Vec::new();
+    let mut beside = Vec::new();
+    for &f in &walls {
         let Some(radius) = hole_radius(s, f, distance) else {
             continue;
         };
         for &lp in &s.face(f).loops {
             for &co in &s.lp(lp).coedges {
                 let e = s.coedge(co).edge;
-                let Some(Curve::Circle(rim)) = &s.edge(e).curve else {
+                // Only a rim the wall opens at, a convex edge, leaves anything: the points beside
+                // a concave one, as a blind bore's floor, are all within the distance of the solid.
+                if !convex.contains(&e) {
+                    continue;
+                }
+                let edge = s.edge(e);
+                let Some(Curve::Circle(rim)) = &edge.curve else {
                     continue;
                 };
                 let Some(g) = s
@@ -343,15 +359,77 @@ fn moved_and_rounded(s: &Brep, distance: f64, feature: &str) -> Result<Brep> {
                 else {
                     continue;
                 };
+                if edge.range.1 - edge.range.0 < TAU - tol::ANGULAR {
+                    // A round's arc, not a whole hole's rim: the faces beside the round, moved
+                    // until they meet square where it closed, leave out points near the arc and
+                    // over the part of the face beside it that the round bounded.
+                    kept.push(near::tube(s, e, distance, feature)?);
+                    if !beside.contains(&g) {
+                        beside.push(g);
+                    }
+                    continue;
+                }
                 let (_, up) = plane_of(s, g)?;
-                out = boolean::difference(
-                    &out,
-                    &dimple(rim.frame.origin, up, radius, distance, feature)?,
-                )?;
+                let hollow = dimple(rim.frame.origin, up, radius, distance, feature)?;
+                let hollow = not_near_others(s, hollow, &[g], &walls, distance, feature)?;
+                if hollow.face_count() > 0 {
+                    out = boolean::difference(&out, &hollow)?;
+                }
             }
         }
     }
+    for &g in &beside {
+        kept.push(near::slab(s, g, distance, feature)?);
+    }
+    if !kept.is_empty() {
+        let mut parts = vec![&out];
+        parts.extend(kept.iter());
+        out = boolean::union_all(&parts)?;
+    }
     Ok(out)
+}
+
+/// `hollow` less the points within `distance` of a face of `s` other than those of `skip` and
+/// `walls`: what of a dimple is near no other face, as a shallow recess's floor, stays open.
+fn not_near_others(
+    s: &Brep,
+    mut hollow: Brep,
+    skip: &[FaceId],
+    walls: &[FaceId],
+    distance: f64,
+    feature: &str,
+) -> Result<Brep> {
+    let reach = measure::bbox(&hollow);
+    for h in s.face_ids() {
+        if skip.contains(&h) || walls.contains(&h) {
+            continue;
+        }
+        let mut near_h = measure::face_bbox(s, h);
+        near_h.min = near_h.min - Vec3::new(distance, distance, distance);
+        near_h.max = near_h.max + Vec3::new(distance, distance, distance);
+        if !overlap(&near_h, &reach) {
+            continue;
+        }
+        let slab = near::slab(s, h, distance, feature)?;
+        if overlap(&measure::bbox(&slab), &reach) {
+            hollow = boolean::difference(&hollow, &slab)?;
+            if hollow.face_count() == 0 {
+                break;
+            }
+        }
+    }
+    Ok(hollow)
+}
+
+/// Whether boxes `a` and `b` meet, to within the tolerance.
+fn overlap(a: &Aabb, b: &Aabb) -> bool {
+    let t = tol::LINEAR;
+    a.min.x <= b.max.x + t
+        && b.min.x <= a.max.x + t
+        && a.min.y <= b.max.y + t
+        && b.min.y <= a.max.y + t
+        && a.min.z <= b.max.z + t
+        && b.min.z <= a.max.z + t
 }
 
 /// The radius of face `f` where it is a hole's cylindrical wall that an offset by `distance`
