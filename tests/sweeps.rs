@@ -473,3 +473,68 @@ fn a_twisted_disc_that_misses_its_fit_is_a_numerical_error() {
     let volume = r.as_ref().map(measure::volume);
     assert!(matches!(r, Err(Error::Numerical(_))), "{volume:?}");
 }
+
+#[test]
+fn a_disc_off_a_spline_path_that_fits_within_the_tolerance_at_the_limit_is_swept() {
+    use springrep::{
+        geom::{BSpline, Curve},
+        sweep::along_curve,
+    };
+
+    // A disc beside a cubic path of four spans, whose wall fits its track at the stations' limit
+    // to about 2e-8 mm: short of the tenth of the tolerance the stations aim for, within the
+    // tolerance itself.
+    let ctrl = [
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.773459305043224],
+        [1.4666477166125422, 1.2495120950982006, 3.4914364557564808],
+        [0.11258295452236, 0.30916169346364897, 5.1769020665962895],
+        [0.39901818312602044, 0.3390264078128524, 7.228370675556924],
+        [1.1903925080651216, -0.536217726952221, 9.308519097645132],
+        [1.462007347536251, -1.5714904570894526, 11.309527098538428],
+    ]
+    .map(Vec3::from_array)
+    .to_vec();
+    let knots = vec![0.0, 0.0, 0.0, 0.0, 0.25, 0.5, 0.75, 1.0, 1.0, 1.0, 1.0];
+    let path = Curve::BSpline(BSpline::new(3, knots, ctrl).unwrap());
+    let radius = 0.13827793463108332;
+    let disc = Profile::circle(Vec2::new(0.2343463265049385, 0.0), 2.0 * radius);
+    let tube = along_curve(&disc, &Frame::WORLD, &path, (0.0, 1.0), 0.0, "tube").unwrap();
+    let issues = check::check(&tube);
+    assert!(issues.is_empty(), "{issues:?}");
+
+    // The same disc centred on the path sweeps the path's length times its area (Pappus): the
+    // length by five-point Gauss-Legendre quadrature, 64 panels to each of the four spans.
+    let Curve::BSpline(spline) = &path else {
+        unreachable!()
+    };
+    let (x, w) = (
+        [0.0, 0.5384693101056831, 0.906179845938664],
+        [0.5688888888888889, 0.47862867049936647, 0.23692688505618908],
+    );
+    let panels = 256;
+    let mut length = 0.0;
+    for k in 0..panels {
+        let (a, b) = (k as f64 / panels as f64, (k + 1) as f64 / panels as f64);
+        let (mid, half) = ((a + b) / 2.0, (b - a) / 2.0);
+        for (i, &xi) in x.iter().enumerate() {
+            for t in if xi == 0.0 {
+                vec![mid]
+            } else {
+                vec![mid - half * xi, mid + half * xi]
+            } {
+                length += half * w[i] * spline.eval_ders(t, 1)[1].norm();
+            }
+        }
+    }
+    let centred = Profile::circle(Vec2::ZERO, 2.0 * radius);
+    let rod = along_curve(&centred, &Frame::WORLD, &path, (0.0, 1.0), 0.0, "rod").unwrap();
+    let issues = check::check(&rod);
+    assert!(issues.is_empty(), "{issues:?}");
+    let volume = PI * radius * radius * length;
+    let v = measure::volume(&rod);
+    assert!(
+        (v - volume).abs() <= 1e-7 * volume,
+        "volume {v} vs {volume}"
+    );
+}

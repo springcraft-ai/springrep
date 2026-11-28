@@ -20,7 +20,8 @@ use crate::{
     tol,
 };
 
-/// How far a column may stray from its track, a tenth of the linear tolerance.
+/// How far a column may stray from its track, a tenth of the linear tolerance, while the
+/// stations can still double; at their limit, the linear tolerance itself.
 const FIT: f64 = tol::LINEAR / 10.0;
 
 /// Reflection steps between neighbouring stations.
@@ -257,6 +258,11 @@ pub fn along_curve(
             break (us, frames, across);
         }
         if n >= 512 {
+            // At the limit, a wall short of the tenth but within the tolerance is still the
+            // sweep to the kernel's accuracy; only one that misses by more is refused.
+            if worst <= tol::LINEAR {
+                break (us, frames, across);
+            }
             return Err(Error::Numerical(format!(
                 "path sweep misses its profile by {worst:e} mm at the fit limit"
             )));
