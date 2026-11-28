@@ -1,7 +1,7 @@
 //! Reading a STEP file: the product structure gives each solid's placements, and each solid is
 //! built once and copied to every placement.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{
@@ -54,6 +54,9 @@ pub struct Import {
     pub brep: Brep,
     /// Rejected solids and placements, each as `#id: error`.
     pub rejected: Vec<String>,
+    /// Uses whose placing relationships agree only within the file's stated uncertainty, in
+    /// STEP id order.
+    pub placement_adjustments: Vec<PlacementAdjustment>,
     /// One entry per placed solid whose geometry healing moved, in placement order.
     pub healed: Vec<Healing>,
     /// One entry per placed solid kept as the file has it, with local tolerances, in placement
@@ -74,6 +77,20 @@ pub struct Import {
     pub bodies: Vec<Body>,
     /// The faces the file gives a colour of their own, apart from their body's.
     pub face_colours: Vec<(FaceId, [f64; 3])>,
+}
+
+/// An assembly use placed by the first of several relationships that agree within uncertainty.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct PlacementAdjustment {
+    /// The STEP assembly use.
+    pub use_step_id: u64,
+    /// The STEP relationship used to place it.
+    pub chosen: u64,
+    /// The two STEP relationships with the largest gap.
+    pub relationships: (u64, u64),
+    /// The largest gap in mm, with basis and relative scale gaps measured over [`tol::MODEL_SIZE`].
+    pub moved: f64,
 }
 
 /// A solid of an import as its file describes it.
@@ -204,6 +221,7 @@ fn cyclic<T>(id: u64, what: &str) -> Result<T> {
 struct Placements {
     solids: Vec<Placement>,
     rejected: Vec<String>,
+    adjustments: BTreeMap<u64, PlacementAdjustment>,
 }
 
 /// A solid to build, the representation context its units come from, and where it goes.
@@ -247,14 +265,17 @@ fn representation(f: &File, id: u64) -> Option<(Vec<u64>, Option<u64>)> {
     Some((refs(p.get(1)), p.get(2).and_then(Param::as_ref)))
 }
 
+/// The links that place one assembly use, with each link's id and its relationship if set.
+type Rels = Vec<(u64, Option<u64>)>;
+
 struct Assembly<'a> {
     file: &'a File,
     /// Representations joined without a transformation (a part's shape and its B-rep).
     links: HashMap<u64, Vec<u64>>,
     /// Each product definition's shape representations.
     reps: HashMap<u64, Vec<u64>>,
-    /// Each product definition's children: the child, the relation that places it, and the use.
-    children: HashMap<u64, Vec<(u64, u64, u64)>>,
+    /// Each product definition's children: the child, the relations that place it, and the use.
+    children: HashMap<u64, Vec<(u64, Rels, u64)>>,
     related: HashSet<u64>,
 }
 
@@ -267,8 +288,8 @@ impl<'a> Assembly<'a> {
             children: HashMap::new(),
             related: HashSet::new(),
         };
-        let mut nauo_place: HashMap<u64, u64> = HashMap::new();
-        for e in &file.entities {
+        let mut nauo_place: HashMap<u64, Rels> = HashMap::new();
+        for (&id, e) in file.ids.iter().zip(&file.entities) {
             if let Some(p) = e.part("SHAPE_DEFINITION_REPRESENTATION") {
                 let (Some(pds), Some(rep)) = (
                     p.first().and_then(Param::as_ref),
@@ -282,7 +303,7 @@ impl<'a> Assembly<'a> {
                     a.reps.entry(pd).or_default().push(rep);
                 }
             } else if let Some(p) = e.part("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION") {
-                let (Some(rel), Some(pds)) = (
+                let (rel, Some(pds)) = (
                     p.first().and_then(Param::as_ref),
                     p.get(1).and_then(Param::as_ref),
                 ) else {
@@ -291,7 +312,7 @@ impl<'a> Assembly<'a> {
                 if let Some(nauo) = params(file, pds, "PRODUCT_DEFINITION_SHAPE")
                     .and_then(|q| q.get(2).and_then(Param::as_ref))
                 {
-                    nauo_place.insert(nauo, rel);
+                    nauo_place.entry(nauo).or_default().push((id, rel));
                 }
             } else if !e.has("REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION")
                 && let Some(p) = e.part("REPRESENTATION_RELATIONSHIP").or_else(|| {
@@ -316,7 +337,7 @@ impl<'a> Assembly<'a> {
                 ) else {
                     continue;
                 };
-                if let Some(&rel) = nauo_place.get(&id) {
+                if let Some(rel) = nauo_place.remove(&id) {
                     a.children.entry(parent).or_default().push((child, rel, id));
                     a.related.insert(child);
                 }
@@ -425,8 +446,8 @@ impl<'a> Assembly<'a> {
         Ok((src, origin.inverse().then(&target)))
     }
 
-    /// The motion that places `child`'s shape in its parent's, from the placing relation.
-    fn placement(&self, geo: &mut Geometry, child: u64, rel: u64) -> Result<Placing> {
+    /// The motion placing `child`'s shape in its parent's and the parent's distance tolerance.
+    fn placement(&self, geo: &mut Geometry, child: u64, rel: u64) -> Result<(Placing, f64)> {
         let e = self
             .file
             .get(rel)
@@ -463,22 +484,71 @@ impl<'a> Assembly<'a> {
             }
         };
         let context = |r: u64| representation(self.file, r).and_then(|x| x.1);
-        if let Some(it) = self
+        let (child_rep, parent_rep, child_arg, parent_arg) = if child_is_r1 {
+            (r1, r2, 2, 3)
+        } else {
+            (r2, r1, 3, 2)
+        };
+        let placing = if let Some(it) = self
             .file
             .get(op)
             .and_then(|e| e.part("ITEM_DEFINED_TRANSFORMATION"))
         {
-            geo.use_context(context(r1))?;
-            let a = geo.transform_of(geo.reference(op, it.get(2))?)?;
-            geo.use_context(context(r2))?;
-            let b = geo.transform_of(geo.reference(op, it.get(3))?)?;
-            let (from, to) = if child_is_r1 { (a, b) } else { (b, a) };
-            Ok(from.inverse().then(&to))
+            geo.use_context(context(child_rep))?;
+            let from = geo.transform_of(geo.reference(op, it.get(child_arg))?)?;
+            geo.use_context(context(parent_rep))?;
+            let to = geo.transform_of(geo.reference(op, it.get(parent_arg))?)?;
+            from.inverse().then(&to)
         } else {
-            geo.use_context(context(if child_is_r1 { r2 } else { r1 }))?;
+            geo.use_context(context(parent_rep))?;
             let t = geo.transform_of(op)?;
-            Ok(if child_is_r1 { t } else { t.inverse() })
+            if child_is_r1 { t } else { t.inverse() }
+        };
+        let distance = tol::LINEAR.max(geo.uncertainty().unwrap_or(0.0));
+        Ok((placing, distance))
+    }
+
+    /// The motion that places `child` for one use, on which all its placing relations agree.
+    fn use_placing(
+        &self,
+        geo: &mut Geometry,
+        child: u64,
+        used: u64,
+        rels: &[(u64, Option<u64>)],
+    ) -> Result<(Placing, Option<PlacementAdjustment>)> {
+        let mut found = Vec::new();
+        for &(link, rel) in rels {
+            let rel = rel
+                .ok_or_else(|| Error::InvalidInput(format!("STEP #{link}: unset relationship")))?;
+            let (placing, distance) = self.placement(geo, child, rel)?;
+            found.push((rel, placing, distance));
         }
+        let Some(&(chosen, placing, _)) = found.first() else {
+            return Err(Error::InvalidInput(format!(
+                "STEP #{used}: no placing relationship"
+            )));
+        };
+        let mut adjustment: Option<PlacementAdjustment> = None;
+        for (i, &(rel, p, distance)) in found.iter().enumerate() {
+            for &(other, q, other_distance) in &found[i..] {
+                if let Some(gap) = p.gap_beyond(&q, distance.min(other_distance)) {
+                    return Err(Error::InvalidInput(format!(
+                        "STEP #{rel}, #{other}: placements differ by {gap:.1e} mm"
+                    )));
+                }
+                if let Some(moved) = p.gap_beyond(&q, tol::LINEAR)
+                    && adjustment.as_ref().is_none_or(|a| a.moved < moved)
+                {
+                    adjustment = Some(PlacementAdjustment {
+                        use_step_id: used,
+                        chosen,
+                        relationships: (rel, other),
+                        moved,
+                    });
+                }
+            }
+        }
+        Ok((placing, adjustment))
     }
 
     /// Places `pd` and its children at `at`. `path` holds the products above it, so an assembly
@@ -508,9 +578,14 @@ impl<'a> Assembly<'a> {
                 p.product = Some(pd);
             }
         }
-        for &(child, rel, used) in self.children.get(&pd).into_iter().flatten() {
-            let child_at = at.and_then(|at| match self.placement(geo, child, rel) {
-                Ok(t) => Some(t.then(at)),
+        for &(child, ref rels, used) in self.children.get(&pd).into_iter().flatten() {
+            let child_at = at.and_then(|at| match self.use_placing(geo, child, used, rels) {
+                Ok((t, adjustment)) => {
+                    if let Some(adjustment) = adjustment {
+                        out.adjustments.insert(used, adjustment);
+                    }
+                    Some(t.then(at))
+                }
                 Err(e) => {
                     out.rejected.push(format!("#{used}: {e}"));
                     None
@@ -601,6 +676,7 @@ pub fn read_with(text: &[u8], feature: &str, options: &ReadOptions) -> Result<Im
     let Placements {
         solids: mut placements,
         mut rejected,
+        adjustments,
     } = Assembly::new(&file).placements(&mut geo)?;
     if placements.is_empty() && rejected.is_empty() {
         // Without a product structure, a solid takes its units and uncertainty from a
@@ -773,6 +849,7 @@ pub fn read_with(text: &[u8], feature: &str, options: &ReadOptions) -> Result<Im
     Ok(Import {
         brep: out,
         rejected,
+        placement_adjustments: adjustments.into_values().collect(),
         healed,
         tolerant,
         crossed,

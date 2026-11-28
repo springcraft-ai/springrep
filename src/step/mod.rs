@@ -13,8 +13,8 @@ mod write;
 
 pub use heal::{Healed, MAX_HEAL};
 pub use read::{
-    Body, Crossed, Healing, Import, ReadOptions, Separated, Tolerant, TurnedBound, read, read_part,
-    read_part_with, read_with,
+    Body, Crossed, Healing, Import, PlacementAdjustment, ReadOptions, Separated, Tolerant,
+    TurnedBound, read, read_part, read_part_with, read_with,
 };
 pub(crate) use topology::{PartFace, Parts, parts_of, rebuilt, sewn, solid_of};
 pub use write::{

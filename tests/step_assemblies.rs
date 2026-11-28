@@ -188,3 +188,99 @@ fn a_relationship_can_place_the_child_in_rep_2() {
     }
     reads_back_where_placed(&text);
 }
+
+#[test]
+fn a_use_with_inconsistent_placement_links_is_rejected() {
+    let text = written();
+    let entity = "=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(";
+    let mut links = text.lines().filter(|line| line.contains(entity));
+    let upright = links.nth(1).unwrap();
+    let laid_down = links.next().unwrap().split_once(entity).unwrap().1;
+    let (laid_down_rel, _) = laid_down.split_once(',').unwrap();
+    let (_, shape) = upright.split_once(',').unwrap();
+    for relationship in [laid_down_rel, "$"] {
+        let extra = format!("#900001{entity}{relationship},{shape}");
+        for links in [format!("{upright}\n{extra}"), format!("{extra}\n{upright}")] {
+            let input = text.replacen(upright, &links, 1);
+            let import = step::read(input.as_bytes(), "in").unwrap();
+            let instances: Vec<_> = import.bodies.into_iter().map(|b| b.instance).collect();
+            assert_eq!(instances, [["base"], ["post-b"]], "{:?}", import.rejected);
+            assert_eq!(import.rejected.len(), 1, "{:?}", import.rejected);
+            if relationship == "$" {
+                assert!(import.rejected[0].contains("STEP #900001: unset relationship"));
+            }
+        }
+    }
+}
+
+#[test]
+fn duplicate_placements_must_agree_within_the_parent_contexts_uncertainty() {
+    let text = written();
+    let parent_uncertainty = text
+        .lines()
+        .rfind(|line| line.contains("=UNCERTAINTY_MEASURE_WITH_UNIT("))
+        .unwrap();
+    let (start, measure) = parent_uncertainty.split_once("LENGTH_MEASURE(").unwrap();
+    let (_, rest) = measure.split_once(')').unwrap();
+    let text = text.replace(
+        parent_uncertainty,
+        &format!("{start}LENGTH_MEASURE(0.001){rest}"),
+    );
+
+    let link = "=CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(";
+    let (upright, args) = text
+        .lines()
+        .filter_map(|line| line.split_once(link))
+        .nth(1)
+        .unwrap();
+    let (relation, shape) = args.split_once(',').unwrap();
+    let (_, endpoints) = text
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{relation}=")))
+        .unwrap()
+        .split_once("REPRESENTATION_RELATIONSHIP(")
+        .unwrap();
+    let (endpoints, _) = endpoints.split_once(')').unwrap();
+
+    for z in [40.0005, 40.002] {
+        let input = text.replacen(
+            &format!("{upright}{link}{args}"),
+            &format!(
+                "{upright}{link}{args}\n\
+                 #900001{link}#900002,{shape}\n\
+                 #900002=(REPRESENTATION_RELATIONSHIP({endpoints}) \
+                 REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#900003) \
+                 SHAPE_REPRESENTATION_RELATIONSHIP());\n\
+                 #900003=CARTESIAN_TRANSFORMATION_OPERATOR_3D('','',$,$,#900004,1.,$);\n\
+                 #900004=CARTESIAN_POINT('',(0.,0.,{z}));"
+            ),
+            1,
+        );
+        let import = step::read(input.as_bytes(), "in").unwrap();
+        if z < 40.001 {
+            assert!(import.rejected.is_empty(), "{:?}", import.rejected);
+            assert_eq!(import.bodies.len(), 3);
+            let post = &import.bodies[1];
+            assert_eq!(post.instance, ["post-a"]);
+            let bounds = measure::solid_bbox(&import.brep, post.solid);
+            assert!((bounds.min.z - 40.0).abs() <= springrep::tol::LINEAR);
+            let [adjustment] = &import.placement_adjustments[..] else {
+                panic!("{:?}", import.placement_adjustments);
+            };
+            assert_eq!(format!("#{}", adjustment.chosen), relation);
+            assert_eq!(adjustment.relationships, (adjustment.chosen, 900002));
+            assert!((adjustment.moved - 0.0005).abs() <= springrep::tol::LINEAR);
+        } else {
+            let instances: Vec<_> = import.bodies.into_iter().map(|b| b.instance).collect();
+            assert_eq!(instances, [["base"], ["post-b"]], "{:?}", import.rejected);
+            assert_eq!(import.rejected.len(), 1, "{:?}", import.rejected);
+            let expected = format!("STEP {relation}, #900002: placements differ by 2.0e-3 mm");
+            assert!(
+                import.rejected[0].contains(&expected),
+                "{:?}",
+                import.rejected
+            );
+            assert!(import.placement_adjustments.is_empty());
+        }
+    }
+}
