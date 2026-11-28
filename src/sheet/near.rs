@@ -2,8 +2,9 @@
 //! crease and corner (Rossignac and Requicha 1986): the slab each face sweeps moving along its
 //! normal, the sector of the tube about each crease the front turns convex at that lies between
 //! its two faces' normals, and the part of the ball about each corner where such creases meet that
-//! lies within the cone of its faces' normals. Where the front turns concave the slabs overlap, and
-//! where two faces meet tangentially their slabs share a side.
+//! lies within the cone of its faces' normals. Where the front turns concave the slabs overlap, cut
+//! at the plane bisecting the crease where it closes to an acute wedge, and where two faces meet
+//! tangentially their slabs share a side.
 
 use std::collections::{BTreeSet, HashMap};
 use std::f64::consts::{PI, TAU};
@@ -12,7 +13,7 @@ use crate::{
     boolean,
     edit::near::{ball, slab_of},
     error::{Error, Result},
-    geom::Curve,
+    geom::{Curve, Surface},
     math::{Frame, Point3, Vec2, Vec3},
     pick::{concave_edges, convex_edges},
     profile::{NamedSegment, Profile},
@@ -46,9 +47,17 @@ fn outward(s: &Brep, f: FaceId, p: Point3) -> Vec3 {
 /// [`on_sheet`]`(f)`, each face of a slab on the far side of `f` carries `f`'s names, its sides are
 /// `<feature>.side` and the rest `<feature>.round`.
 pub(super) fn front(sheet: &Brep, d: f64, feature: &str) -> Result<Brep> {
+    let concave = concave_edges(sheet)?;
     let mut parts = Vec::new();
     for f in sheet.face_ids() {
-        parts.push(face_slab(sheet, f, d, feature)?);
+        parts.push(mitred(
+            sheet,
+            f,
+            face_slab(sheet, f, d, feature)?,
+            &concave,
+            d,
+            feature,
+        )?);
     }
     let convex = convex_edges(sheet)?;
     for &e in &convex {
@@ -93,6 +102,98 @@ fn far_side(slab: &Brep, g: FaceId, sheet: &Brep, f: FaceId, d: f64) -> bool {
     let n = surface.normal(uv.x, uv.y);
     (p.dist(q) - d).abs() <= tol::LINEAR.max(1e-9 * d)
         && n.cross(on.normal(st.x, st.y)).norm() <= tol::ANGULAR
+}
+
+/// Slab `slab` of sheet face `f` less what it sweeps past the plane bisecting each crease of
+/// `concave` beside `f` whose faces' normals are more than a right angle apart. There the front
+/// closes to an acute wedge, and the slab's side at the crease, along `f`'s normal, would leave the
+/// wedge across the other face; past the bisecting plane every point is nearer that face, whose
+/// slab holds it. The slabs so cut meet in the plane, and their union is the wedge's points within
+/// `d` of its faces, its faces on the sheet running all the way to the crease.
+fn mitred(
+    sheet: &Brep,
+    f: FaceId,
+    mut slab: Brep,
+    concave: &[EdgeId],
+    d: f64,
+    feature: &str,
+) -> Result<Brep> {
+    for &e in concave {
+        let Some((a, b)) = faces_of(sheet, e) else {
+            continue;
+        };
+        let g = match (a == f, b == f) {
+            (true, false) => b,
+            (false, true) => a,
+            _ => continue,
+        };
+        let x = sheet.edge(e);
+        let acute = |p: Point3| outward(sheet, f, p).dot(outward(sheet, g, p)) < -tol::ANGULAR;
+        let Some(Curve::Line(l)) = &x.curve else {
+            if x.curve.as_ref().is_some_and(|c| acute(c.eval(x.range.0))) {
+                return unsupported("a sheet creased to an acute wedge along a curve");
+            }
+            continue;
+        };
+        let (t0, t1) = x.range;
+        let p0 = l.origin + l.dir * t0;
+        if !acute(p0) {
+            continue;
+        }
+        let Some((nf, ng)) = line_normals(sheet, e, f, g) else {
+            return unsupported("a sheet creased to an acute wedge whose faces' normals turn");
+        };
+        let Some(bis) = (nf + ng).unit() else {
+            return unsupported("a sheet folded flat on itself");
+        };
+        // The slab past the bisecting plane lies within d / cos α of the crease, α the angle
+        // from either normal to the bisector: the moved face crosses the plane that far out.
+        let reach = 2.0 * d / nf.dot(bis);
+        let fr = Frame::new(p0, l.dir, bis)?;
+        let away = if nf.dot(l.dir.cross(bis)) > 0.0 {
+            reach
+        } else {
+            -reach
+        };
+        let p = Vec2::new;
+        let mut pts = [
+            p(-reach, 0.0),
+            p(reach, 0.0),
+            p(reach, away),
+            p(-reach, away),
+        ];
+        if away < 0.0 {
+            pts.reverse();
+        }
+        let side = format!("{feature}.side");
+        let past = extrude(
+            &Profile::polygon(&pts, &[side.as_str(); 4]),
+            &fr,
+            t1 - t0,
+            feature,
+        )?;
+        slab = boolean::difference(&slab, &past)?;
+    }
+    Ok(slab)
+}
+
+/// The outward normals of faces `f` and `g` along straight crease `e`, if each keeps its
+/// direction along it: where its surface is a plane, or a cylinder, a cone or an extrusion, whose
+/// every straight line is a ruling (or lies in a flat strip) along which the tangent plane is
+/// fixed. On other surfaces a line's normals may turn, and none are given.
+fn line_normals(sheet: &Brep, e: EdgeId, f: FaceId, g: FaceId) -> Option<(Vec3, Vec3)> {
+    let x = sheet.edge(e);
+    let Some(Curve::Line(l)) = &x.curve else {
+        return None;
+    };
+    let fixed = |h: FaceId| {
+        matches!(
+            sheet.face(h).surface,
+            Surface::Plane(_) | Surface::Cylinder(_) | Surface::Cone(_) | Surface::Extrusion(_)
+        )
+    };
+    let p0 = l.origin + l.dir * x.range.0;
+    (fixed(f) && fixed(g)).then(|| (outward(sheet, f, p0), outward(sheet, g, p0)))
 }
 
 /// The two faces using edge `e`.
@@ -145,15 +246,9 @@ fn sector(sheet: &Brep, e: EdgeId, d: f64, feature: &str) -> Result<Brep> {
     match &x.curve {
         Some(Curve::Line(l)) => {
             let p0 = l.origin + l.dir * t0;
-            let (nf, ng) = (outward(sheet, f, p0), outward(sheet, g, p0));
-            for k in 1..=4 {
-                let p = l.origin + l.dir * at(k);
-                if outward(sheet, f, p).cross(nf).norm() > tol::ANGULAR
-                    || outward(sheet, g, p).cross(ng).norm() > tol::ANGULAR
-                {
-                    return fixed();
-                }
-            }
+            let Some((nf, ng)) = line_normals(sheet, e, f, g) else {
+                return fixed();
+            };
             let fr = Frame::new(p0, l.dir, nf)?;
             let flat = |v: Vec3| {
                 let l = fr.dir_to_local(v);

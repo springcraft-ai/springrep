@@ -13,6 +13,7 @@ use springrep::{
     measure,
     pick::faces_named,
     profile::Profile,
+    sheet::{self, Corners},
     sweep::extrude,
     topo::{Brep, FaceId},
 };
@@ -125,4 +126,37 @@ fn thickening_a_bore_closes_it_and_thinning_it_opens_it() {
             "{d}"
         );
     }
+}
+
+#[test]
+fn a_sheet_creased_to_sixty_degrees_thickened_outside_its_crease_meets_in_a_sharp_corner() {
+    // the floor, (0, 0, 0)–(10, 8, 0), and the wall rising from the y axis at 60° over it to
+    // (5, 8, 5√3): two faces of the prism over that triangle in the xz plane, run 8 along y, their
+    // normals out of the prism, to the outside of the crease
+    let top = Vec2::new(5.0, 5.0 * 3f64.sqrt());
+    let triangle = Profile::polygon(
+        &[Vec2::ZERO, Vec2::new(10.0, 0.0), top],
+        &["floor", "far", "wall"],
+    );
+    let plane = Frame::new(Vec3::ZERO, -Vec3::Y, Vec3::X).unwrap();
+    let prism = extrude(&triangle, &plane, -8.0, "v").unwrap();
+    let faces: Vec<FaceId> = ["v.floor", "v.wall"]
+        .iter()
+        .flat_map(|n| faces_named(&prism, n))
+        .collect();
+    let sheet = sheet::from_faces(&prism, &faces).unwrap();
+    let thick = sheet::thicken(&sheet, 1.0, 0.0, Corners::Sharp, "thick").unwrap();
+
+    // each strip 10 × 1, and the kite between the moved faces of area t²·cot 30° = √3
+    let s3 = 3f64.sqrt();
+    let (volume, area) = (8.0 * (20.0 + s3), 376.0 + 18.0 * s3);
+    let issues = check::check(&thick);
+    assert!(issues.is_empty(), "{issues:?}");
+    let v = measure::volume(&thick);
+    let a = measure::area(&thick);
+    assert!(
+        (v - volume).abs() <= 1e-9 * volume,
+        "volume {v} vs {volume}"
+    );
+    assert!((a - area).abs() <= 1e-9 * area, "area {a} vs {area}");
 }
