@@ -405,8 +405,8 @@ fn not_near_others(
             continue;
         }
         let mut near_h = measure::face_bbox(s, h);
-        near_h.min = near_h.min - Vec3::new(distance, distance, distance);
-        near_h.max = near_h.max + Vec3::new(distance, distance, distance);
+        near_h.min -= Vec3::new(distance, distance, distance);
+        near_h.max += Vec3::new(distance, distance, distance);
         if !overlap(&near_h, &reach) {
             continue;
         }
